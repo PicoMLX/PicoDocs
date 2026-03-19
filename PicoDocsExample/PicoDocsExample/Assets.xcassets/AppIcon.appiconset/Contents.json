@@ -53,7 +53,7 @@
       "size" : "32x32"
     },
     {
-      "filename" : "127.png",
+      "filename" : "128.png",
       "idiom" : "mac",
       "scale" : "1x",
       "size" : "128x128"
@@ -83,7 +83,7 @@
       "size" : "512x512"
     },
     {
-      "filename" : "1024.png",
+      "filename" : "macOS Icon.png",
       "idiom" : "mac",
       "scale" : "2x",
       "size" : "512x512"
