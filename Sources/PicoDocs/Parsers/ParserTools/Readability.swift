@@ -104,17 +104,63 @@ class ReadabilityUserScript: WKUserScript {
     convenience override init() {
         let js: String
         do {
-            js = try Self.loadFile(name: "Readability", type: "js")
+            js = try Self.loadFile(
+                name: "Readability",
+                type: "js",
+                subdirectory: "Parsers/ParserTools/Readability"
+            )
         } catch {
             fatalError("Couldn't load Readability.js")
         }
         self.init(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
     }
+    
+//    static func loadFile(name: String, type: String, subdirectory: String) throws -> String {
+//        guard let url = Bundle.module.url(
+//            forResource: name,
+//            withExtension: type,
+//            subdirectory: subdirectory
+//        ) else {
+//            throw ReadabilityError.scriptNotFound
+//        }
+//        return try String(contentsOfFile: url.path(), encoding: .utf8)
+//    }
+     
+    
+    static func loadFile(name: String, type: String, subdirectory: String) throws -> String {
+        let bundle = Bundle.module
+        let fileName = "\(name).\(type)"
+        let candidateSubdirectories = [
+            subdirectory,
+            URL(filePath: subdirectory).lastPathComponent,
+        ]
         
-    static func loadFile(name: String, type: String) throws -> String {
-        guard let url = Bundle.module.url(forResource: name, withExtension: type) else {
-            throw ReadabilityError.scriptNotFound
+        for candidate in candidateSubdirectories where candidate.isEmpty == false {
+            if let url = bundle.url(
+                forResource: name,
+                withExtension: type,
+                subdirectory: candidate
+            ) {
+                return try String(contentsOf: url, encoding: .utf8)
+            }
         }
-        return try String(contentsOfFile: url.path(), encoding: .utf8)
+        
+        if let url = bundle.url(forResource: name, withExtension: type) {
+            return try String(contentsOf: url, encoding: .utf8)
+        }
+        
+        // SwiftPM can flatten copied resources or keep a top-level directory
+        // depending on how the bundle is assembled. Walk the bundle as a final
+        // fallback so Readability.js still loads in both layouts.
+        if let resourceURL = bundle.resourceURL,
+           let enumerator = FileManager.default.enumerator(
+            at: resourceURL,
+            includingPropertiesForKeys: nil
+           ) {
+            for case let url as URL in enumerator where url.lastPathComponent == fileName {
+                return try String(contentsOf: url, encoding: .utf8)
+            }
+        }
+        throw ReadabilityError.scriptNotFound
     }
 }

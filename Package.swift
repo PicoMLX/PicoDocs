@@ -38,7 +38,7 @@ let package = Package(
             ],
             resources: [
                 .process("Localizable.xcstrings"),
-                .process("Parsers/ParserTools/Readability/")
+                .copy("Parsers/ParserTools/Readability/")
             ]
         ),
         .testTarget(
