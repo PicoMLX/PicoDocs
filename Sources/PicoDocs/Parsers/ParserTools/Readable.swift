@@ -22,7 +22,7 @@ public struct Readable: Codable, Sendable {
     public let length: Int
 
     /// Article description, or short excerpt from the content
-    public let excerpt: String
+    public let excerpt: String?
     
     /// Author metadata
     public let byline: String?
