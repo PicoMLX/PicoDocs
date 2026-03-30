@@ -81,7 +81,42 @@ struct ReadabilityTests {
         #expect(readable.content.contains("second paragraph exists to verify"))
         #expect(readable.textContent.contains("third paragraph makes the article long enough"))
         #expect(readable.length > 500)
-        #expect(readable.excerpt.isEmpty == false)
+        #expect(readable.excerpt?.isEmpty == false)
+    }
+
+    @Test("Readability preprocessing removes executable scripts but keeps JSON-LD")
+    func preprocessingRemovesExecutableScripts() throws {
+        let preprocessed = try ReadabilityHTMLPreprocessor.preprocess(
+            Self.sampleHTMLWithAppState,
+            baseURL: URL(string: "https://example.com/article")!
+        )
+
+        #expect(preprocessed.contains("window.__INITIAL_STATE__") == false)
+        #expect(preprocessed.contains("\"headline\":\"\(Self.sampleTitle)\""))
+        #expect(preprocessed.contains("articleBody") == false)
+    }
+
+    @Test("Readability preprocessing removes malformed inline state scripts")
+    func preprocessingRemovesMalformedInlineStateScripts() throws {
+        let preprocessed = try ReadabilityHTMLPreprocessor.preprocess(
+            Self.sampleHTMLWithMalformedStateScript,
+            baseURL: URL(string: "https://example.com/article")!
+        )
+
+        #expect(preprocessed.contains("window.__INITIAL_STATE__") == false)
+        #expect(preprocessed.contains("components-AdLive-__AdLive__label"))
+    }
+
+    @MainActor
+    @Test("Readability htmlString parsing excludes app state payloads")
+    func parseHTMLStringExcludesAppStatePayloads() async throws {
+        let readability = Readability(htmlString: Self.sampleHTMLWithAppState)
+        let readable = try await readability.parse()
+
+        #expect(readable.title == Self.sampleTitle)
+        #expect(readable.textContent.contains("second paragraph exists to verify"))
+        #expect(readable.textContent.contains("window.__INITIAL_STATE__") == false)
+        #expect(readable.content.contains("window.__INITIAL_STATE__") == false)
     }
 
     @MainActor
@@ -109,6 +144,57 @@ struct ReadabilityTests {
             <p>The third paragraph makes the article long enough to clear Readability's default character threshold while staying deterministic for a unit test. That lets this suite validate the exact integration path used by `Readability.parse()`, including the bundled resource lookup, user script injection, JavaScript execution, JSON serialization, and Swift decoding into the `Readable` model.</p>
           </article>
         </main>
+      </body>
+    </html>
+    """
+
+    private static let sampleHTMLWithAppState = """
+    <!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>\(sampleTitle)</title>
+        <script>
+          window.__INITIAL_STATE__ = {
+            "player": {
+              "sponsorMessage": "Live Radio KQED News Player sponsored by"
+            }
+          };
+        </script>
+        <script type="application/ld+json">
+          {"@context":"https://schema.org","@type":"NewsArticle","headline":"\(sampleTitle)"}
+        </script>
+      </head>
+      <body>
+        <article>
+          <h1>\(sampleTitle)</h1>
+          <p>The first paragraph gives Readability enough editorial structure to identify this page as an article instead of a generic collection of navigation elements. It contains deliberate, natural language sentences with enough substance to look like a real document and it mentions PicoDocs so the test can assert against unique content.</p>
+          <p>The second paragraph exists to verify that the bundled Readability.js script is not only present, but also capable of extracting meaningful content from a loaded document. If this script is missing, malformed, or not injected into the web view at document end, the production parser will fail before it can produce a structured article.</p>
+          <p>The third paragraph makes the article long enough to clear Readability's default character threshold while staying deterministic for a unit test. That lets this suite validate the exact integration path used by `Readability.parse()`, including the bundled resource lookup, user script injection, JavaScript execution, JSON serialization, and Swift decoding into the `Readable` model.</p>
+        </article>
+      </body>
+    </html>
+    """
+
+    private static let sampleHTMLWithMalformedStateScript = """
+    <!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>\(sampleTitle)</title>
+      </head>
+      <body>
+        <article>
+          <h1>\(sampleTitle)</h1>
+          <p>The first paragraph gives Readability enough editorial structure to identify this page as an article instead of a generic collection of navigation elements. It contains deliberate, natural language sentences with enough substance to look like a real document and it mentions PicoDocs so the test can assert against unique content.</p>
+          <p>The second paragraph exists to verify that the bundled Readability.js script is not only present, but also capable of extracting meaningful content from a loaded document. If this script is missing, malformed, or not injected into the web view at document end, the production parser will fail before it can produce a structured article.</p>
+          <p>The third paragraph makes the article long enough to clear Readability's default character threshold while staying deterministic for a unit test. That lets this suite validate the exact integration path used by `Readability.parse()`, including the bundled resource lookup, user script injection, JavaScript execution, JSON serialization, and Swift decoding into the `Readable` model.</p>
+        </article>
+        <div class="components-AdLive-__AdLive__label">Player sponsored by</div>
+        <script id="initial-state" charSet="UTF-8" />
+          window.__IS_SSR__=true
+          window.__INITIAL_STATE__={"attachmentsReducer":{"audio_0":{"type":"attachments"}}}
+        </script>
       </body>
     </html>
     """
