@@ -25,7 +25,10 @@ public struct PlainTextConverter: DocumentConverter {
 
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
         let encoding = info.charset ?? .utf8
-        guard let text = String(data: data, encoding: encoding) ?? String(data: data, encoding: .utf8) else {
+        // Try the declared encoding, falling back to UTF-8 only when it differs.
+        let decoded = String(data: data, encoding: encoding)
+            ?? (encoding != .utf8 ? String(data: data, encoding: .utf8) : nil)
+        guard let text = decoded else {
             // Not decodable as text — defer to another converter.
             throw ConverterError.notAccepted
         }

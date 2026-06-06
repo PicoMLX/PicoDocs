@@ -127,8 +127,19 @@ public enum ContentTypeDetector {
 
     // MARK: - Helpers
 
+    /// Searches for an ASCII needle in the archive, bounding the scan to the
+    /// first and last 128 KB. ZIP local file headers for the main parts sit near
+    /// the start, and the central directory (which lists every entry name) sits
+    /// at the end — so this stays correct on large archives without scanning the
+    /// megabytes of compressed media in between.
     static func contains(_ data: Data, _ ascii: String) -> Bool {
-        data.range(of: Data(ascii.utf8)) != nil
+        let needle = Data(ascii.utf8)
+        let limit = 128 * 1024
+        if data.count <= 2 * limit {
+            return data.range(of: needle) != nil
+        }
+        return data.prefix(limit).range(of: needle) != nil
+            || data.suffix(limit).range(of: needle) != nil
     }
 
     enum Magic {

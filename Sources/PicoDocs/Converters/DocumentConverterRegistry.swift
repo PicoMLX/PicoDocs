@@ -16,6 +16,7 @@ public struct DocumentConverterRegistry: Sendable {
         let converter: any DocumentConverter
     }
 
+    /// Kept sorted by ascending priority (see `registering`).
     private let entries: [Entry]
 
     /// Standard priorities. Lower is tried first (more specific wins).
@@ -35,7 +36,13 @@ public struct DocumentConverterRegistry: Sendable {
     /// Returns a new registry with `converter` added. Value-returning so it can
     /// be chained on a `let` (third parties extend the engine this way).
     public func registering(_ converter: any DocumentConverter, priority: Double = Priority.specific) -> DocumentConverterRegistry {
-        DocumentConverterRegistry(entries: entries + [Entry(priority: priority, converter: converter)])
+        // Keep `entries` sorted by ascending priority at registration time so
+        // `convert` doesn't re-sort on every call. Insert after equal-priority
+        // entries to preserve registration order among ties (stable ordering).
+        var updated = entries
+        let index = updated.firstIndex { $0.priority > priority } ?? updated.endIndex
+        updated.insert(Entry(priority: priority, converter: converter), at: index)
+        return DocumentConverterRegistry(entries: updated)
     }
 
     /// The default registry with all built-in converters registered.
@@ -54,8 +61,8 @@ public struct DocumentConverterRegistry: Sendable {
     /// generic converter on a real failure, so e.g. a corrupt `.docx` surfaces
     /// as an error instead of being silently mis-handled as plain text.
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
-        let ordered = entries.sorted { $0.priority < $1.priority }
-        for entry in ordered {
+        // `entries` is kept sorted by ascending priority at registration time.
+        for entry in entries {
             try Task.checkCancellation()
             guard entry.converter.accepts(info) else { continue }
             do {

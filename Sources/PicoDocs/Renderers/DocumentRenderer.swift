@@ -17,7 +17,12 @@ public enum DocumentRenderer {
 
     public static func render(_ result: ConverterResult, to format: ExportFileType) throws -> String {
         switch format {
-        case .markdown, .plaintext:
+        case .markdown:
+            return result.sections.map(\.markdown).joined(separator: "\n\n")
+        case .plaintext:
+            // TODO (Phase 2+): strip Markdown syntax once converters emit it.
+            // Today the only converter (PlainText) emits no Markdown syntax, so
+            // the raw section text is already plain.
             return result.sections.map(\.markdown).joined(separator: "\n\n")
         case .html, .xml, .csv:
             throw PicoDocsError.unableToExportToRequestedFormat
