@@ -47,7 +47,15 @@ public enum ContentTypeDetector {
         if data.starts(with: Magic.zipLocal)
             || data.starts(with: Magic.zipEmpty)
             || data.starts(with: Magic.zipSpanned) {
-            return (classifyZip(data), 0.9)
+            let zipFormat = classifyZip(data)
+            // If the archive couldn't be subtyped (generic .zip) but the caller's
+            // filename/MIME claims a specific OOXML/EPUB document — e.g. a
+            // truncated `report.docx` that still begins with PK — honor that hint
+            // so it routes to the right converter rather than the generic zip path.
+            if zipFormat == .zip, let docHint = documentFormatFromHints(info) {
+                return (docHint, 0.5)
+            }
+            return (zipFormat, 0.9)
         }
         if data.starts(with: Magic.rtf) {
             // RTF is text-based; catch it before the text logic so it isn't
@@ -86,7 +94,7 @@ public enum ContentTypeDetector {
         }
 
         // 6. HTML content sniff (only when no specific text hint applied).
-        if looksLikeHTMLContent(data) {
+        if looksLikeHTMLContent(data, charset: info.charset) {
             return (.html, 0.7)
         }
 
@@ -107,6 +115,13 @@ public enum ContentTypeDetector {
         return classifyZipEntries(in: data, bounded: true)
     }
 
+    /// NOTE: a substring search over the central-directory bytes, not a strict
+    /// per-entry-name match — a best-effort *hint*. A contrived archive with an
+    /// entry like "backup/word/document.xml" could be mis-hinted as .docx. That's
+    /// acceptable here: detection only routes to a converter, and the Phase 3
+    /// OOXML/EPUB converters parse real entry names via ZIPFoundation and
+    /// re-validate, so a mis-hint fails cleanly rather than producing wrong
+    /// output. Strict entry-name parsing arrives with that work.
     private static func classifyZipEntries(in haystack: Data, bounded: Bool) -> DetectedFormat {
         func has(_ name: String) -> Bool {
             let needle = Data(name.utf8)
@@ -215,9 +230,17 @@ public enum ContentTypeDetector {
         return nil
     }
 
-    /// True if the leading sample looks like HTML by content (no hints).
-    static func looksLikeHTMLContent(_ data: Data) -> Bool {
-        let head = String(decoding: data.prefix(1024), as: UTF8.self).lowercased()
+    /// True if the leading sample looks like HTML by content. Decodes with the
+    /// resolved charset (e.g. a UTF-16 BOM) so wide-encoded markers are seen,
+    /// falling back to a lossy UTF-8 read.
+    static func looksLikeHTMLContent(_ data: Data, charset: String.Encoding?) -> Bool {
+        let prefix = data.prefix(1024)
+        let head: String
+        if let charset, let decoded = String(data: prefix, encoding: charset) {
+            head = decoded.lowercased()
+        } else {
+            head = String(decoding: prefix, as: UTF8.self).lowercased()
+        }
         return head.contains("<!doctype html")
             || head.contains("<html")
             || head.contains("<head")
@@ -236,10 +259,13 @@ public enum ContentTypeDetector {
     /// UTF-16-LE BOM bytes.
     static func encodingFromBOM(_ data: Data) -> String.Encoding? {
         let b = [UInt8](data.prefix(4))
-        if b.count >= 4, b[0] == 0xFF, b[1] == 0xFE, b[2] == 0x00, b[3] == 0x00 { return .utf32LittleEndian }
-        if b.count >= 4, b[0] == 0x00, b[1] == 0x00, b[2] == 0xFE, b[3] == 0xFF { return .utf32BigEndian }
-        if b.count >= 2, b[0] == 0xFF, b[1] == 0xFE { return .utf16LittleEndian }
-        if b.count >= 2, b[0] == 0xFE, b[1] == 0xFF { return .utf16BigEndian }
+        // Return the BOM-*consuming* .utf16/.utf32 (not endian-specific) variants:
+        // they read the BOM to determine byte order and strip it, so decoded text
+        // doesn't retain a stray leading U+FEFF.
+        if b.count >= 4, b[0] == 0xFF, b[1] == 0xFE, b[2] == 0x00, b[3] == 0x00 { return .utf32 }
+        if b.count >= 4, b[0] == 0x00, b[1] == 0x00, b[2] == 0xFE, b[3] == 0xFF { return .utf32 }
+        if b.count >= 2, b[0] == 0xFF, b[1] == 0xFE { return .utf16 }
+        if b.count >= 2, b[0] == 0xFE, b[1] == 0xFF { return .utf16 }
         if b.count >= 3, b[0] == 0xEF, b[1] == 0xBB, b[2] == 0xBF { return .utf8 }
         return nil
     }
