@@ -139,8 +139,10 @@ public struct WordConverter: DocumentConverter {
             case "w:br", "w:cr":
                 text += "  \n"
             default:
-                // NOTE: text-box content (w:drawing/w:pict -> w:txbxContent) and
-                // embedded images aren't extracted yet — a later enhancement.
+                // NOTE: text-box content (w:drawing/w:pict -> w:txbxContent),
+                // embedded images, and footnote/endnote references (whose text
+                // lives in word/footnotes.xml / endnotes.xml) aren't extracted
+                // yet — later enhancements.
                 continue
             }
         }
@@ -185,7 +187,9 @@ public struct WordConverter: DocumentConverter {
             var cells: [String] = []
             for tc in tr.children().array() where tc.tagName().lowercased() == "w:tc" {
                 var cellText = ""
-                for paragraph in tc.children().array() where paragraph.tagName().lowercased() == "w:p" {
+                // Gather all descendant paragraphs so paragraphs inside block
+                // content controls (w:sdt) within the cell are included too.
+                for paragraph in (try? tc.getElementsByTag("w:p").array()) ?? [] {
                     let t = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
@@ -195,6 +199,12 @@ public struct WordConverter: DocumentConverter {
                     .replacingOccurrences(of: "\r\n", with: "<br>")
                     .replacingOccurrences(of: "\r", with: "<br>")
                     .replacingOccurrences(of: "\n", with: "<br>"))
+                // Honor horizontally merged cells (w:gridSpan) so later columns
+                // stay aligned, by emitting empty placeholders for the span.
+                let span = gridSpan(of: tc)
+                if span > 1 {
+                    cells.append(contentsOf: Array(repeating: "", count: span - 1))
+                }
             }
             if !cells.isEmpty { rows.append(cells) }
         }
@@ -208,6 +218,13 @@ public struct WordConverter: DocumentConverter {
             md += "\n| " + pad(row).joined(separator: " | ") + " |"
         }
         return md
+    }
+
+    /// Number of grid columns a table cell spans (`w:gridSpan`); 1 if absent.
+    private static func gridSpan(of cell: Element) -> Int {
+        guard let value = try? cell.getElementsByTag("w:gridSpan").first()?.attr("w:val"),
+              let span = Int(value) else { return 1 }
+        return max(1, span)
     }
 
     // MARK: - Relationships (hyperlink targets)
