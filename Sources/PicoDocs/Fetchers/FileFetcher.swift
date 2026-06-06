@@ -7,14 +7,6 @@
 
 import Foundation
 import UniformTypeIdentifiers
-import CoreXLSX
-
-#if os(macOS)
-import Foundation
-#else
-import Foundation
-import XMLCoder
-#endif
 
 open class FileFetcher: FetcherProtocol {
     

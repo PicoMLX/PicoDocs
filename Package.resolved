@@ -2,30 +2,12 @@
   "originHash" : "f277e090f26c7fd7b524f8e5c8e415e8fe7b046c39a24b78aff8b822254a1934",
   "pins" : [
     {
-      "identity" : "aexml",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/tadija/AEXML",
-      "state" : {
-        "revision" : "db806756c989760b35108146381535aec231092b",
-        "version" : "4.7.0"
-      }
-    },
-    {
       "identity" : "corexlsx",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/CoreOffice/CoreXLSX",
       "state" : {
         "revision" : "1391f3832ea2eeee5186ea8abb81ea49ed0609cc",
         "version" : "0.14.2"
-      }
-    },
-    {
-      "identity" : "epubkit",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/ronaldmannak/EPUBKit",
-      "state" : {
-        "branch" : "main",
-        "revision" : "a653c85d5e7786899b5c9f70f30edcbd77b89b66"
       }
     },
     {
@@ -44,15 +26,6 @@
       "state" : {
         "revision" : "ca932442d7481700f5434a7b138c47dd42d9902b",
         "version" : "0.14.0"
-      }
-    },
-    {
-      "identity" : "zip",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/marmelroy/Zip",
-      "state" : {
-        "revision" : "67fa55813b9e7b3b9acee9c0ae501def28746d76",
-        "version" : "2.1.2"
       }
     },
     {
