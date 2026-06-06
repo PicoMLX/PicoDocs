@@ -35,6 +35,13 @@ public enum ContentTypeDetector {
             || data.starts(with: Magic.zipSpanned) {
             return (classifyZip(data), 0.9)
         }
+        if data.starts(with: Magic.rtf) {
+            // RTF is text-based, so it must be caught before the text heuristic,
+            // otherwise it falls through to `.plainText` and is exported as a raw
+            // `{\rtf ...}` control stream. No RTF converter is registered in the
+            // new engine yet, so this currently resolves to "unsupported".
+            return (.rtf, 0.95)
+        }
 
         // 2. HTML (textual sniff / hints).
         if looksLikeHTML(data, info: info) {
@@ -96,6 +103,9 @@ public enum ContentTypeDetector {
             if ut.conforms(to: .docx) { return .docx }
             if ut.conforms(to: .xlsx) { return .xlsx }
             if ut.conforms(to: .epub) { return .epub }
+            // RTF conforms to public.text, so it must be checked before the
+            // plain-text branch to avoid being treated as plain text.
+            if ut.conforms(to: .rtf) { return .rtf }
             if ut.conforms(to: .html) || ut.conforms(to: .xhtml) { return .html }
             if ut.conforms(to: .commaSeparatedText) { return .csv }
             if ut.conforms(to: .json) { return .json }
@@ -110,6 +120,7 @@ public enum ContentTypeDetector {
         case "xlsx": return .xlsx
         case "pptx": return .pptx
         case "epub": return .epub
+        case "rtf": return .rtf
         case "html", "htm", "xhtml": return .html
         case "csv": return .csv
         case "json": return .json
@@ -147,5 +158,6 @@ public enum ContentTypeDetector {
         static let zipLocal: [UInt8] = [0x50, 0x4B, 0x03, 0x04]     // "PK\x03\x04"
         static let zipEmpty: [UInt8] = [0x50, 0x4B, 0x05, 0x06]     // empty archive
         static let zipSpanned: [UInt8] = [0x50, 0x4B, 0x07, 0x08]   // spanned archive
+        static let rtf: [UInt8] = [0x7B, 0x5C, 0x72, 0x74, 0x66]    // "{\rtf"
     }
 }

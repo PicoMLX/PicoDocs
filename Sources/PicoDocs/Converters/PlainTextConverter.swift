@@ -16,9 +16,13 @@ public struct PlainTextConverter: DocumentConverter {
 
     public func accepts(_ info: StreamInfo) -> Bool {
         switch info.detectedFormat {
-        case .plainText, .csv, .json, .xml, .unknown, .none:
+        case .plainText, .csv, .json, .xml:
             return true
         default:
+            // Only accept formats positively identified as text. In particular
+            // reject .unknown, which can be a NUL-containing binary blob made of
+            // otherwise-valid UTF-8 bytes — decoding it would emit garbage into
+            // downstream conversion / RAG pipelines.
             return false
         }
     }

@@ -11,7 +11,7 @@
 import Foundation
 import UniformTypeIdentifiers
 
-public enum PicoDocs {
+public enum PicoDocsEngine {
 
     /// Convert raw `data` into the canonical, structured `ConverterResult`.
     ///
