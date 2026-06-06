@@ -176,7 +176,7 @@ struct ContentView: View {
         .onChange(of: outputFormat) { _, newValue in
             Task {
                 guard let document else { return }
-                await document.parse(to: newValue)
+                try? await document.parse(to: newValue)
             }
         }
     }
@@ -237,10 +237,10 @@ struct ContentView: View {
         self.document = doc
         
         // Fetch file's content
-        await doc.fetch()
-        
+        try await doc.fetch()
+
         // Convert
-        await doc.parse(to: self.outputFormat)
+        try await doc.parse(to: self.outputFormat)
     }
 }
 
@@ -289,8 +289,8 @@ struct MetadataView: View {
                         Text("Parsed")
                     case .downloaded:
                         Text("Downloaded")
-                    case .inProgress(let progress):
-                        Text("Downloading in progress (\(progress.fractionCompleted))")
+                    case .inProgress(let fraction):
+                        Text("Downloading in progress (\(fraction.formatted(.percent)))")
                     case .failed(let error):
                         Text("Download failed: \(error.localizedDescription)")
                             .foregroundStyle(.red)

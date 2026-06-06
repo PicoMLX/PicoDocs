@@ -53,7 +53,7 @@ dependencies: [
 
 ```swift
 let url = URL(string: "https://electrek.co/2025/01/14/top-10-best-selling-evs-us-2024/")!
-let doc = try PicoDocument(url: url)
+let doc = PicoDocument(url: url)
 try await doc.fetch()
 try await doc.parse()
 print(doc.exportedContent)
