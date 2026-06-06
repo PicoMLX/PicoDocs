@@ -8,15 +8,17 @@
 //
 //    1. Magic bytes (definitive): %PDF, PK ZIP, {\rtf
 //    2. Binary formats identified by hint (image / audio)
-//    3. Binary guard: a NUL byte means "not text" — don't let a text hint
-//       (e.g. a ".txt" name on a binary blob) force text decoding
-//    4. Specific text-format hints (extension / UTType) — these win over the
-//       loose HTML content sniff
-//    5. HTML content sniff
-//    6. Plain-text default
+//    3. Document formats identified by hint but missing magic (corrupt /
+//       mislabeled) — honored so they reach the right converter, not text
+//    4. Binary guard: a NUL byte means "not text" — unless a wide text encoding
+//       (UTF-16/UTF-32) is declared or detected via BOM, whose NULs are expected
+//    5. Specific text-format hints (extension / UTType) — win over the loose
+//       HTML content sniff
+//    6. HTML content sniff
+//    7. Plain-text default
 //
-//  ZIP subtyping reads the archive's central directory (authoritative + bounded)
-//  rather than pulling in an unzip dependency at the detection stage.
+//  ZIP subtyping reads the archive's central directory (authoritative, scanned
+//  in full) rather than pulling in an unzip dependency at the detection stage.
 //
 
 import Foundation
@@ -24,10 +26,14 @@ import UniformTypeIdentifiers
 
 public enum ContentTypeDetector {
 
-    /// Returns a copy of `info` with `detectedFormat` and `confidence` populated.
+    /// Returns a copy of `info` with `detectedFormat`/`confidence` populated, and
+    /// `charset` filled in from a byte-order mark when the caller didn't supply one.
     public static func classify(_ data: Data, info: StreamInfo) -> StreamInfo {
         var result = info
-        let (format, confidence) = detect(data, info: info)
+        if result.charset == nil, let bom = encodingFromBOM(data) {
+            result.charset = bom
+        }
+        let (format, confidence) = detect(data, info: result)
         result.detectedFormat = format
         result.confidence = confidence
         return result
@@ -50,56 +56,72 @@ public enum ContentTypeDetector {
             return (.rtf, 0.95)
         }
 
-        // 2. Binary formats identified by hint (legitimately binary, so checked
-        //    before the NUL/text logic).
+        // 2. Binary formats identified by hint (legitimately binary).
         if let ut = info.utType {
             if ut.conforms(to: .image) { return (.image, 0.6) }
             if ut.conforms(to: .audio) { return (.audio, 0.6) }
         }
 
-        // 3. Binary guard. A NUL byte in the leading sample is a strong binary
-        //    signal; since no magic/binary hint matched we can't identify it, and
-        //    must not let a text hint force decoding of binary bytes.
-        if looksBinary(data) {
+        // 3. Document formats identified by hint but lacking magic bytes (corrupt
+        //    or mislabeled). Honor the hint so they reach the right converter (or
+        //    report unsupported) instead of being mis-read as text.
+        if let docHint = documentFormatFromHints(info) {
+            return (docHint, 0.4)
+        }
+
+        // 4. Binary guard. A NUL byte normally signals binary — but wide text
+        //    encodings (UTF-16/UTF-32) legitimately contain NULs, so skip the
+        //    guard when such an encoding is declared or detected via BOM.
+        if !isWideEncoding(info.charset), looksBinary(data) {
             return (.unknown, 0.0)
         }
 
-        // --- Content is text from here (no NUL in the leading sample). ---
+        // --- Treat as text from here. ---
 
-        // 4. Specific text-format hints (extension / UTType) win over the loose
+        // 5. Specific text-format hints (extension / UTType) win over the loose
         //    HTML sniff, so a real ".txt" containing "<html" in prose stays text,
         //    and a ".csv" served as text/plain still resolves to .csv.
         if let hint = textFormatFromHints(info) {
             return (hint, 0.5)
         }
 
-        // 5. HTML content sniff (only when no specific text hint applied).
+        // 6. HTML content sniff (only when no specific text hint applied).
         if looksLikeHTMLContent(data) {
             return (.html, 0.7)
         }
 
-        // 6. Plain-text default.
+        // 7. Plain-text default.
         return (.plainText, 0.4)
     }
 
     // MARK: - ZIP subtyping
 
     /// Distinguish OOXML / EPUB / generic ZIP by scanning for well-known entry
-    /// names. Prefers the archive's central directory (authoritative + bounded,
-    /// since it contains only headers, not file data); falls back to a windowed
-    /// byte scan if the directory can't be located.
+    /// names. When the central directory can be located it is scanned in full
+    /// (it's authoritative and contains only headers); otherwise a windowed scan
+    /// of the whole archive is used as a fallback.
     static func classifyZip(_ data: Data) -> DetectedFormat {
-        let haystack = zipCentralDirectory(data) ?? data
-        if contains(haystack, "application/epub+zip") || contains(haystack, "META-INF/container.xml") {
+        if let centralDirectory = zipCentralDirectory(data) {
+            return classifyZipEntries(in: centralDirectory, bounded: false)
+        }
+        return classifyZipEntries(in: data, bounded: true)
+    }
+
+    private static func classifyZipEntries(in haystack: Data, bounded: Bool) -> DetectedFormat {
+        func has(_ name: String) -> Bool {
+            let needle = Data(name.utf8)
+            return bounded ? boundedContains(haystack, needle) : (haystack.range(of: needle) != nil)
+        }
+        if has("application/epub+zip") || has("META-INF/container.xml") {
             return .epub
         }
-        if contains(haystack, "word/document.xml") {
+        if has("word/document.xml") {
             return .docx
         }
-        if contains(haystack, "xl/workbook.xml") {
+        if has("xl/workbook.xml") {
             return .xlsx
         }
-        if contains(haystack, "ppt/presentation.xml") {
+        if has("ppt/presentation.xml") {
             return .pptx
         }
         return .zip
@@ -145,6 +167,26 @@ public enum ContentTypeDetector {
 
     // MARK: - Hints & heuristics
 
+    /// Resolves binary document formats (pdf/docx/xlsx/pptx/epub) from hints.
+    /// Used only for inputs that lack magic bytes (valid ones are caught earlier),
+    /// i.e. corrupt or mislabeled documents — honored rather than read as text.
+    static func documentFormatFromHints(_ info: StreamInfo) -> DetectedFormat? {
+        if let ut = info.utType {
+            if ut.conforms(to: .pdf) { return .pdf }
+            if ut.conforms(to: .docx) { return .docx }
+            if ut.conforms(to: .xlsx) { return .xlsx }
+            if ut.conforms(to: .epub) { return .epub }
+        }
+        switch info.fileExtension?.lowercased() {
+        case "pdf": return .pdf
+        case "docx": return .docx
+        case "xlsx": return .xlsx
+        case "pptx": return .pptx
+        case "epub": return .epub
+        default: return nil
+        }
+    }
+
     /// Resolves text-family formats from extension / UTType. The extension switch
     /// is consulted before the generic `.xml` / `.plainText` / `.text` UTType
     /// fallback so a specific extension (e.g. "data.csv" served as text/plain)
@@ -182,17 +224,40 @@ public enum ContentTypeDetector {
     }
 
     /// A NUL byte in the leading sample is a strong signal that the data is
-    /// binary rather than text.
+    /// binary rather than text (for UTF-8 / single-byte encodings).
     static func looksBinary(_ data: Data) -> Bool {
         guard !data.isEmpty else { return false }
         return data.prefix(8192).contains(0x00)
     }
 
-    /// Searches for an ASCII needle, bounding the scan to the first and last
-    /// 128 KB when handed a large blob. (When handed the central directory this
-    /// limit rarely matters, since the directory holds only entry headers.)
-    static func contains(_ data: Data, _ ascii: String) -> Bool {
-        let needle = Data(ascii.utf8)
+    /// Maps a leading byte-order mark to its encoding, if present. UTF-32 BOMs
+    /// are checked before UTF-16 because the UTF-32-LE BOM starts with the
+    /// UTF-16-LE BOM bytes.
+    static func encodingFromBOM(_ data: Data) -> String.Encoding? {
+        let b = [UInt8](data.prefix(4))
+        if b.count >= 4, b[0] == 0xFF, b[1] == 0xFE, b[2] == 0x00, b[3] == 0x00 { return .utf32LittleEndian }
+        if b.count >= 4, b[0] == 0x00, b[1] == 0x00, b[2] == 0xFE, b[3] == 0xFF { return .utf32BigEndian }
+        if b.count >= 2, b[0] == 0xFF, b[1] == 0xFE { return .utf16LittleEndian }
+        if b.count >= 2, b[0] == 0xFE, b[1] == 0xFF { return .utf16BigEndian }
+        if b.count >= 3, b[0] == 0xEF, b[1] == 0xBB, b[2] == 0xBF { return .utf8 }
+        return nil
+    }
+
+    /// True for UTF-16/UTF-32 encodings, whose text legitimately contains NUL
+    /// bytes and so must bypass the binary guard.
+    static func isWideEncoding(_ encoding: String.Encoding?) -> Bool {
+        guard let encoding else { return false }
+        let wide: Set<String.Encoding> = [
+            .utf16, .utf16BigEndian, .utf16LittleEndian,
+            .utf32, .utf32BigEndian, .utf32LittleEndian,
+        ]
+        return wide.contains(encoding)
+    }
+
+    /// Searches for a needle, bounding the scan to the first and last 128 KB.
+    /// Used for the whole-archive fallback when the central directory can't be
+    /// located; the directory itself is scanned in full (see `classifyZip`).
+    static func boundedContains(_ data: Data, _ needle: Data) -> Bool {
         let limit = 128 * 1024
         if data.count <= 2 * limit {
             return data.range(of: needle) != nil
