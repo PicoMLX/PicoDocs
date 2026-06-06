@@ -27,14 +27,14 @@ public struct EPUBConverter: DocumentConverter {
 
         // 1. META-INF/container.xml -> path to the OPF package document.
         guard let containerData = Self.readEntry(archive, path: "META-INF/container.xml"),
-              let containerXML = String(data: containerData, encoding: .utf8),
+              let containerXML = Self.decodeText(containerData),
               let opfPath = try Self.opfPath(fromContainer: containerXML) else {
             throw PicoDocsError.fileCorrupted
         }
 
         // 2. Parse the OPF: metadata, manifest (id -> href), spine (order).
         guard let opfData = Self.readEntry(archive, path: opfPath),
-              let opfXML = String(data: opfData, encoding: .utf8) else {
+              let opfXML = Self.decodeText(opfData) else {
             throw PicoDocsError.fileCorrupted
         }
         let opf = try SwiftSoup.parse(opfXML, "", SwiftSoup.Parser.xmlParser())
@@ -59,7 +59,7 @@ public struct EPUBConverter: DocumentConverter {
             guard let idref = try? itemref.attr("idref"), let href = manifest[idref] else { continue }
             let entryPath = Self.resolve(path: href, relativeTo: opfDir)
             guard let chapterData = Self.readEntry(archive, path: entryPath),
-                  let chapterHTML = String(data: chapterData, encoding: .utf8) else { continue }
+                  let chapterHTML = Self.decodeText(chapterData) else { continue }
             guard let (chapterTitle, markdown) = try? HTMLToMarkdown.convert(html: chapterHTML) else { continue }
             let trimmed = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
@@ -86,14 +86,24 @@ public struct EPUBConverter: DocumentConverter {
     // MARK: - Archive / OPF helpers
 
     static func readEntry(_ archive: Archive, path: String) -> Data? {
-        guard let entry = archive[path] else { return nil }
-        var data = Data()
+        // ZIP entries have no leading slash; strip one so resolved paths still match.
+        let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        guard let entry = archive[cleanPath] else { return nil }
+        var data = Data(capacity: Int(entry.uncompressedSize))
         do {
             _ = try archive.extract(entry) { data.append($0) }
         } catch {
             return nil
         }
         return data
+    }
+
+    /// Decodes text trying UTF-8, then UTF-16 (BOM-aware), then ISO Latin-1 as a
+    /// never-fails fallback, so non-UTF-8 EPUB parts aren't silently dropped.
+    static func decodeText(_ data: Data) -> String? {
+        if let utf8 = String(data: data, encoding: .utf8) { return utf8 }
+        if let utf16 = String(data: data, encoding: .utf16) { return utf16 }
+        return String(data: data, encoding: .isoLatin1)
     }
 
     static func opfPath(fromContainer xml: String) throws -> String? {
