@@ -21,7 +21,9 @@ public struct SpreadsheetConverter: DocumentConverter {
 
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
         let file = try XLSXFile(data: data)
-        let sharedStrings = try file.parseSharedStrings()
+        // A workbook may have no shared-strings part (e.g. numbers-only, or
+        // inline strings); don't fail the whole conversion when it's absent.
+        let sharedStrings = try? file.parseSharedStrings()
 
         var sections: [DocumentSection] = []
         var sheetNames: [String] = []
@@ -77,14 +79,19 @@ public struct SpreadsheetConverter: DocumentConverter {
         let raw: String
         if let sharedStrings, let stringValue = cell.stringValue(sharedStrings) {
             raw = stringValue
+        } else if let inlineString = cell.inlineString?.text {
+            raw = inlineString
         } else if let value = cell.value {
             raw = value
         } else {
             raw = ""
         }
-        // Markdown table cells are single-line; escape pipes and flatten newlines.
+        // Markdown table cells are single-line; escape pipes and flatten newlines
+        // (including Windows CRLF and bare CR, common in Excel-on-Windows files).
         return raw
             .replacingOccurrences(of: "|", with: "\\|")
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespaces)
     }
