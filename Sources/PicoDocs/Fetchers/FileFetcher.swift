@@ -56,7 +56,13 @@ open class FileFetcher: FetcherProtocol {
             // url is a file
             
             let data = try Data(contentsOf: self.url)
-            let utType = UTType(filenameExtension: self.url.path())
+            // Resolve the type from the file system's resource values first; this
+            // handles extensionless files and custom system-registered types more
+            // robustly. Fall back to the path extension. (The previous code passed
+            // `path()` — the full path — to `UTType(filenameExtension:)`, which
+            // expects a bare extension like "docx", so it almost always returned nil.)
+            let utType = (try? self.url.resourceValues(forKeys: [.contentTypeKey]))?.contentType
+                ?? UTType(filenameExtension: self.url.pathExtension)
             return (data, utType, nil)
         }
     }
