@@ -59,7 +59,7 @@ public struct WordConverter: DocumentConverter {
                 let table = renderTable(element, relationships: relationships)
                 if !table.isEmpty { blocks.append(table) }
             case "w:sdt":
-                if let content = element.getElementsByTag("w:sdtContent").first() {
+                if let content = try? element.getElementsByTag("w:sdtContent").first() {
                     blocks.append(contentsOf: try renderBlocks(in: content, relationships: relationships))
                 }
             default:
@@ -73,7 +73,7 @@ public struct WordConverter: DocumentConverter {
 
     static func renderParagraph(_ paragraph: Element, relationships: [String: String]) -> String? {
         let style = try? paragraph.getElementsByTag("w:pStyle").first()?.attr("w:val")
-        let isListItem = paragraph.getElementsByTag("w:numPr").first() != nil
+        let isListItem = (try? paragraph.getElementsByTag("w:numPr").first()) != nil
         let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return nil }
 
@@ -146,7 +146,7 @@ public struct WordConverter: DocumentConverter {
         }
         guard !text.isEmpty else { return "" }
 
-        let properties = run.getElementsByTag("w:rPr").first()
+        let properties = try? run.getElementsByTag("w:rPr").first()
         var result = text
         if isFormattingEnabled(properties, tag: "w:b") { result = "**\(result)**" }
         if isFormattingEnabled(properties, tag: "w:i") { result = "*\(result)*" }
@@ -156,7 +156,7 @@ public struct WordConverter: DocumentConverter {
     /// True when a run-property toggle (`w:b`/`w:i`) is present and not explicitly
     /// disabled (`w:val="false"/"0"/"none"`, used to override style hierarchies).
     private static func isFormattingEnabled(_ properties: Element?, tag: String) -> Bool {
-        guard let element = properties?.getElementsByTag(tag).first() else { return false }
+        guard let element = try? properties?.getElementsByTag(tag).first() else { return false }
         if let val = try? element.attr("w:val"), !val.isEmpty {
             return val != "false" && val != "0" && val != "none"
         }
@@ -219,7 +219,7 @@ public struct WordConverter: DocumentConverter {
             return [:]
         }
         var map: [String: String] = [:]
-        for rel in doc.getElementsByTag("Relationship").array() {
+        for rel in (try? doc.getElementsByTag("Relationship").array()) ?? [] {
             guard let id = try? rel.attr("Id"), let target = try? rel.attr("Target"),
                   !id.isEmpty, !target.isEmpty else { continue }
             map[id] = target
