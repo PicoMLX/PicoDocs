@@ -18,8 +18,9 @@ public class PicoDocument {
     public enum Status: Equatable {
         /// Document is waiting to be fetched
         case awaitingFetch
-        /// Document is currently being processed with progress information
-        case inProgress(Progress)
+        /// Document is currently being processed; the associated value is the
+        /// fraction complete in `0...1`.
+        case inProgress(fraction: Double)
         /// Document has been successfully downloaded
         case downloaded
         /// Document has been successfully parsed
@@ -31,8 +32,8 @@ public class PicoDocument {
             switch (lhs, rhs) {
             case (.awaitingFetch, .awaitingFetch), (.downloaded, .downloaded), (.parsed, .parsed):
                 return true
-            case let (.inProgress(lhsProgress), .inProgress(rhsProgress)):
-                return lhsProgress == rhsProgress
+            case let (.inProgress(lhsFraction), .inProgress(rhsFraction)):
+                return lhsFraction == rhsFraction
             case let (.failed(lhsError as NSError), .failed(rhsError as NSError)):
                 return lhsError == rhsError
             default:
