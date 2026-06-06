@@ -159,9 +159,14 @@ enum HTMLToMarkdown {
             let cells = tr.children().array().filter { ["td", "th"].contains($0.tagName().lowercased()) }
             guard !cells.isEmpty else { continue }
             rows.append(cells.map { cell in
-                ((try? cell.text()) ?? "")
-                    .replacingOccurrences(of: "|", with: "\\|")
+                // Render the cell's children through the walker so inline links /
+                // images / emphasis survive; collapse to a single line (table
+                // cells can't contain newlines) and escape pipes.
+                var rendered = ""
+                renderChildren(of: cell, into: &rendered)
+                return collapseWhitespace(rendered)
                     .trimmingCharacters(in: .whitespaces)
+                    .replacingOccurrences(of: "|", with: "\\|")
             })
         }
         guard !rows.isEmpty else { return "" }
