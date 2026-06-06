@@ -68,7 +68,7 @@ extension PicoDocument {
                 // A container document (directory, archive) has children but no
                 // content of its own; that's a success, not a failure.
                 if let children = await self.children, !children.isEmpty {
-                    await updateParsedDocument(ConverterResult())
+                    await updateParsedDocument(ConverterResult(), content: [])
                     return
                 }
                 throw PicoDocsError.emptyDocument
@@ -78,7 +78,8 @@ extension PicoDocument {
                 filename: self.filename,
                 url: self.originURL
             )
-            await updateParsedDocument(result)
+            let exported = try Self.exportedContent(from: result, format: type)
+            await updateParsedDocument(result, content: exported)
         } catch {
             await self.setError(error)
             throw error
@@ -99,9 +100,23 @@ extension PicoDocument {
         }
     }
 
-    /// Maps a `ConverterResult` from the engine onto the document's published state.
-    private func updateParsedDocument(_ result: ConverterResult) {
-        self.exportedContent = result.sections.map(\.markdown)
+    /// Renders the engine result to the requested export format. Markdown (the
+    /// canonical form) is returned per-section; other formats go through
+    /// `DocumentRenderer`, which throws `unableToExportToRequestedFormat` for the
+    /// formats not yet implemented (html/xml/csv) rather than silently returning
+    /// Markdown.
+    private static func exportedContent(from result: ConverterResult, format: ExportFileType?) throws -> [String] {
+        switch format ?? .markdown {
+        case .markdown:
+            return result.sections.map(\.markdown)
+        default:
+            return [try DocumentRenderer.render(result, to: format ?? .markdown)]
+        }
+    }
+
+    /// Maps a `ConverterResult` (and its rendered content) onto the published state.
+    private func updateParsedDocument(_ result: ConverterResult, content: [String]) {
+        self.exportedContent = content
         self.title = result.title
         self.author = result.author
         self.cover = result.cover
