@@ -26,22 +26,24 @@ enum HTMLToMarkdown {
 
     // MARK: - Walking
 
-    private static func renderChildren(of node: Node, into out: inout String) {
+    private static func renderChildren(of node: Node, into out: inout String, preserveWhitespace: Bool = false) {
         for child in node.getChildNodes() {
-            render(child, into: &out)
+            render(child, into: &out, preserveWhitespace: preserveWhitespace)
         }
     }
 
-    /// Renders an element's children to a trimmed inline string.
+    /// Renders an element's children to a trimmed inline string (whitespace
+    /// collapsed — used for headings, links, emphasis, etc.).
     private static func inlineString(_ element: Element) -> String {
         var s = ""
         renderChildren(of: element, into: &s)
         return collapseWhitespace(s).trimmingCharacters(in: .whitespaces)
     }
 
-    private static func render(_ node: Node, into out: inout String) {
+    private static func render(_ node: Node, into out: inout String, preserveWhitespace: Bool = false) {
         if let text = node as? TextNode {
-            out += collapseWhitespace(text.getWholeText())
+            let whole = text.getWholeText()
+            out += preserveWhitespace ? whole : collapseWhitespace(whole)
             return
         }
         guard let element = node as? Element else { return }
@@ -71,24 +73,25 @@ enum HTMLToMarkdown {
 
         case "code":
             if element.parent()?.tagName().lowercased() == "pre" {
-                renderChildren(of: element, into: &out) // inside a fenced block
+                renderChildren(of: element, into: &out, preserveWhitespace: true) // inside a fenced block
             } else {
                 let t = (try? element.text()) ?? ""
                 if !t.isEmpty { out += "`\(t)`" }
             }
 
         case "pre":
-            let code = (try? element.text()) ?? ""
-            out += "\n\n```\n\(code)\n```\n\n"
+            out += "\n\n```\n"
+            renderChildren(of: element, into: &out, preserveWhitespace: true)
+            out += "\n```\n\n"
 
         case "a":
             let text = inlineString(element)
-            let href = (try? element.attr("href")) ?? ""
+            let href = resolvedURL(element, attribute: "href")
             out += (href.isEmpty || text.isEmpty) ? text : "[\(text)](\(href))"
 
         case "img":
             let alt = (try? element.attr("alt")) ?? ""
-            let src = (try? element.attr("src")) ?? ""
+            let src = resolvedURL(element, attribute: "src")
             if !src.isEmpty { out += "![\(alt)](\(src))" }
 
         case "ul":
@@ -99,7 +102,7 @@ enum HTMLToMarkdown {
 
         case "blockquote":
             var inner = ""
-            renderChildren(of: element, into: &inner)
+            renderChildren(of: element, into: &inner, preserveWhitespace: preserveWhitespace)
             let quoted = normalizeBlankLines(inner)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .components(separatedBy: "\n")
@@ -113,12 +116,21 @@ enum HTMLToMarkdown {
 
         case "p", "div", "section", "article", "main", "header", "footer", "figure", "figcaption":
             out += "\n\n"
-            renderChildren(of: element, into: &out)
+            renderChildren(of: element, into: &out, preserveWhitespace: preserveWhitespace)
             out += "\n\n"
 
         default:
-            renderChildren(of: element, into: &out)
+            renderChildren(of: element, into: &out, preserveWhitespace: preserveWhitespace)
         }
+    }
+
+    /// Resolves an element attribute to an absolute URL (against the parse base
+    /// URI), falling back to the raw attribute value when there's no base.
+    private static func resolvedURL(_ element: Element, attribute: String) -> String {
+        if let absolute = try? element.absUrl(attribute), !absolute.isEmpty {
+            return absolute
+        }
+        return (try? element.attr(attribute)) ?? ""
     }
 
     private static func renderList(_ element: Element, ordered: Bool) -> String {
