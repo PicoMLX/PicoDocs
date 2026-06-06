@@ -10,7 +10,10 @@ import UniformTypeIdentifiers
 
 public extension UTType {
 
-    // Custom types
+    // Custom types. UniformTypeIdentifiers has no built-in static constants for
+    // the Office/OOXML formats (`UTType.docx`/`.xlsx`/`.doc` do not exist in the
+    // SDK — only the system *identifiers* are registered), so we declare them
+    // here. Removing these would break the `.docx`/`.xlsx` references below.
     static let doc = UTType(importedAs: "com.microsoft.word.doc", conformingTo: .data)
     // DOCX/XLSX are OOXML packages = ZIP containers, not XML. Declaring them
     // `conformingTo: .xml` made them conform to the XML / plain-text dispatch
