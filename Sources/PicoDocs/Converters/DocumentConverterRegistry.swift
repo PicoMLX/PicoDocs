@@ -49,12 +49,15 @@ public struct DocumentConverterRegistry: Sendable {
     public static let `default`: DocumentConverterRegistry = makeDefault()
 
     static func makeDefault() -> DocumentConverterRegistry {
-        DocumentConverterRegistry()
+        var registry = DocumentConverterRegistry()
             .registering(HTMLConverter(), priority: Priority.specific)
             .registering(SpreadsheetConverter(), priority: Priority.specific)
             .registering(EPUBConverter(), priority: Priority.specific)
             .registering(WordConverter(), priority: Priority.specific)
-            .registering(PlainTextConverter(), priority: Priority.generic)
+        #if canImport(PDFKit)
+        registry = registry.registering(PDFConverter(), priority: Priority.specific)
+        #endif
+        return registry.registering(PlainTextConverter(), priority: Priority.generic)
     }
 
     /// Convert `data` using the first accepting converter (ascending priority).
