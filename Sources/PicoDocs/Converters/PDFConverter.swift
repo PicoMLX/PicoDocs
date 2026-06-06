@@ -23,6 +23,10 @@ public struct PDFConverter: DocumentConverter {
         guard let document = PDFDocument(data: data) else {
             throw PicoDocsError.fileCorrupted
         }
+        // A password-protected PDF parses but stays locked; pages yield no text.
+        guard !document.isLocked else {
+            throw PicoDocsError.noAccess
+        }
 
         var sections: [DocumentSection] = []
         for index in 0..<document.pageCount {
@@ -40,9 +44,14 @@ public struct PDFConverter: DocumentConverter {
 
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
 
-        let title = document.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String
+        let attributes = document.documentAttributes
+        let title = (attributes?[PDFDocumentAttribute.titleAttribute] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let author = (attributes?[PDFDocumentAttribute.authorAttribute] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         return ConverterResult(
             title: (title?.isEmpty == false) ? title : info.filename,
+            author: (author?.isEmpty == false) ? author : nil,
             sections: sections
         )
     }
