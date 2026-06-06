@@ -105,7 +105,7 @@ extension PicoDocument {
     /// `DocumentRenderer`, which throws `unableToExportToRequestedFormat` for the
     /// formats not yet implemented (html/xml/csv) rather than silently returning
     /// Markdown.
-    private static func exportedContent(from result: ConverterResult, format: ExportFileType?) throws -> [String] {
+    private nonisolated static func exportedContent(from result: ConverterResult, format: ExportFileType?) throws -> [String] {
         switch format ?? .markdown {
         case .markdown:
             return result.sections.map(\.markdown)
