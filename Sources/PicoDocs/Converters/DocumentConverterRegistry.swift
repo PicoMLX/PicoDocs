@@ -53,6 +53,7 @@ public struct DocumentConverterRegistry: Sendable {
             .registering(HTMLConverter(), priority: Priority.specific)
             .registering(SpreadsheetConverter(), priority: Priority.specific)
             .registering(EPUBConverter(), priority: Priority.specific)
+            .registering(WordConverter(), priority: Priority.specific)
             .registering(PlainTextConverter(), priority: Priority.generic)
     }
 
