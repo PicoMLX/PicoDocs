@@ -56,6 +56,9 @@ public struct EPUBConverter: DocumentConverter {
         var sections: [DocumentSection] = []
         for itemref in (try? opf.getElementsByTag("itemref").array()) ?? [] {
             try Task.checkCancellation()
+            // Skip non-linear spine items: auxiliary content (popups, end matter,
+            // alternate views) that's outside the primary reading order.
+            if (try? itemref.attr("linear"))?.lowercased() == "no" { continue }
             guard let idref = try? itemref.attr("idref"), let href = manifest[idref] else { continue }
             let entryPath = Self.resolve(path: href, relativeTo: opfDir)
             guard let chapterData = Self.readEntry(archive, path: entryPath),
@@ -119,9 +122,23 @@ public struct EPUBConverter: DocumentConverter {
     /// ZIP entry path, decoding percent-encoding and normalizing `..`/`.`.
     static func resolve(path href: String, relativeTo dir: String) -> String {
         let decoded = href.removingPercentEncoding ?? href
-        guard !dir.isEmpty else { return decoded }
-        let combined = (dir as NSString).appendingPathComponent(decoded)
-        return (combined as NSString).standardizingPath
+        // Normalize "."/".." against the OPF directory manually. These are logical
+        // ZIP entry paths, not filesystem paths, so avoid NSString.standardizingPath
+        // (filesystem-aware and platform-dependent for relative paths) and resolve
+        // the components ourselves. A leading "/" is root-relative, so ignore dir.
+        let startsWithSlash = decoded.hasPrefix("/")
+        var components: [String] = (dir.isEmpty || startsWithSlash) ? [] : dir.split(separator: "/").map(String.init)
+        for part in decoded.split(separator: "/") {
+            switch part {
+            case ".":
+                continue
+            case "..":
+                if !components.isEmpty { components.removeLast() }
+            default:
+                components.append(String(part))
+            }
+        }
+        return components.joined(separator: "/")
     }
 
     /// Best-effort cover image lookup (EPUB3 `properties="cover-image"`, then
