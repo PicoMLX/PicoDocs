@@ -290,7 +290,7 @@ struct MetadataView: View {
                     case .downloaded:
                         Text("Downloaded")
                     case .inProgress(let fraction):
-                        Text("Downloading in progress (\(fraction))")
+                        Text("Downloading in progress (\(fraction.formatted(.percent)))")
                     case .failed(let error):
                         Text("Download failed: \(error.localizedDescription)")
                             .foregroundStyle(.red)

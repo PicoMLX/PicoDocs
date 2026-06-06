@@ -20,12 +20,16 @@ extension PicoDocument {
             let (data, utType, urls) = try await fetcher.fetch(progressHandler: progressHandler)
 
             // Fetch children. A child failure is recorded on the child and is not
-            // fatal to the parent.
+            // fatal to the parent. Sequential by design: a child must infer its
+            // OWN type (don't pass the parent's utType), and the parent's
+            // progressHandler isn't forwarded (it would jump 0->100 per child).
+            // TaskGroup parallelism is a possible later optimization (complicated
+            // here by the non-Sendable progressHandler).
             if let urls, recursive {
                 for childURL in urls {
-                    let child = await PicoDocument(url: childURL, utType: utType, parent: self)
+                    let child = await PicoDocument(url: childURL, parent: self)
                     do {
-                        try await child.fetch(recursive: recursive, progressHandler: progressHandler)
+                        try await child.fetch(recursive: recursive)
                     } catch {
                         await child.setError(error)
                     }
@@ -61,6 +65,12 @@ extension PicoDocument {
 
         do {
             guard let originalContent = await self.originalContent else {
+                // A container document (directory, archive) has children but no
+                // content of its own; that's a success, not a failure.
+                if let children = await self.children, !children.isEmpty {
+                    await updateParsedDocument(ConverterResult())
+                    return
+                }
                 throw PicoDocsError.emptyDocument
             }
             let result = try await PicoDocsEngine.convert(
