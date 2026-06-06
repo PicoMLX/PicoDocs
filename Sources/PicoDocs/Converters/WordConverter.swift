@@ -1,0 +1,209 @@
+//
+//  WordConverter.swift
+//  PicoDocs
+//
+//  Converts DOCX (OOXML WordprocessingML) to Markdown: unzip with ZIPFoundation,
+//  walk word/document.xml via SwiftSoup's XML parser, and map paragraph styles /
+//  runs / hyperlinks / tables to Markdown. Replaces the old NSAttributedString
+//  DOCX path (lossy, font-size heading guessing, and a hard throw on iOS).
+//
+
+import Foundation
+import ZIPFoundation
+import SwiftSoup
+
+public struct WordConverter: DocumentConverter {
+
+    public init() {}
+
+    public func accepts(_ info: StreamInfo) -> Bool {
+        info.detectedFormat == .docx
+    }
+
+    public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
+        guard let archive = Archive(data: data, accessMode: .read) else {
+            throw PicoDocsError.fileCorrupted
+        }
+        guard let documentData = Self.readEntry(archive, path: "word/document.xml"),
+              let documentXML = Self.decodeText(documentData) else {
+            throw PicoDocsError.fileCorrupted
+        }
+
+        let relationships = Self.parseRelationships(archive)
+        let document = try SwiftSoup.parse(documentXML, "", SwiftSoup.Parser.xmlParser())
+        guard let body = try document.getElementsByTag("w:body").first() else {
+            throw PicoDocsError.emptyDocument
+        }
+
+        var blocks: [String] = []
+        for element in body.children().array() {
+            try Task.checkCancellation()
+            switch element.tagName().lowercased() {
+            case "w:p":
+                if let markdown = Self.renderParagraph(element, relationships: relationships), !markdown.isEmpty {
+                    blocks.append(markdown)
+                }
+            case "w:tbl":
+                let table = Self.renderTable(element, relationships: relationships)
+                if !table.isEmpty { blocks.append(table) }
+            default:
+                continue
+            }
+        }
+
+        let markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !markdown.isEmpty else { throw PicoDocsError.emptyDocument }
+        return ConverterResult(title: info.filename, sections: [DocumentSection(kind: .body, markdown: markdown)])
+    }
+
+    // MARK: - Paragraphs
+
+    static func renderParagraph(_ paragraph: Element, relationships: [String: String]) -> String? {
+        let style = try? paragraph.getElementsByTag("w:pStyle").first()?.attr("w:val")
+        let isListItem = paragraph.getElementsByTag("w:numPr").first() != nil
+        let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return nil }
+
+        if let level = headingLevel(forStyle: style) {
+            return String(repeating: "#", count: level) + " " + text
+        }
+        if isListItem {
+            return "- " + text
+        }
+        return text
+    }
+
+    static func headingLevel(forStyle style: String?) -> Int? {
+        guard let style = style?.lowercased() else { return nil }
+        if style == "title" { return 1 }
+        if style.hasPrefix("heading"), let n = Int(style.dropFirst("heading".count)) {
+            return min(max(n, 1), 6)
+        }
+        return nil
+    }
+
+    // MARK: - Inline content (runs, hyperlinks)
+
+    static func renderInline(_ container: Element, relationships: [String: String]) -> String {
+        var out = ""
+        for child in container.children().array() {
+            switch child.tagName().lowercased() {
+            case "w:ppr":
+                continue // paragraph properties, not content
+            case "w:r":
+                out += renderRun(child)
+            case "w:hyperlink":
+                let inner = renderInlineRuns(child)
+                let relId = (try? child.attr("r:id")) ?? ""
+                if let url = relationships[relId], !url.isEmpty, !inner.isEmpty {
+                    out += "[\(inner)](\(url))"
+                } else {
+                    out += inner
+                }
+            default:
+                // smartTag / ins / other wrappers: recurse for nested runs
+                out += renderInline(child, relationships: relationships)
+            }
+        }
+        return out
+    }
+
+    static func renderInlineRuns(_ container: Element) -> String {
+        var out = ""
+        for child in container.children().array() where child.tagName().lowercased() == "w:r" {
+            out += renderRun(child)
+        }
+        return out
+    }
+
+    static func renderRun(_ run: Element) -> String {
+        var text = ""
+        for node in run.children().array() {
+            switch node.tagName().lowercased() {
+            case "w:t":
+                // Use the raw text node to preserve significant whitespace
+                // (w:t may carry xml:space="preserve").
+                text += node.textNodes().first?.getWholeText() ?? ((try? node.text()) ?? "")
+            case "w:tab":
+                text += "\t"
+            case "w:br", "w:cr":
+                text += "  \n"
+            default:
+                continue
+            }
+        }
+        guard !text.isEmpty else { return "" }
+
+        let properties = run.getElementsByTag("w:rPr").first()
+        var result = text
+        if properties?.getElementsByTag("w:b").first() != nil { result = "**\(result)**" }
+        if properties?.getElementsByTag("w:i").first() != nil { result = "*\(result)*" }
+        return result
+    }
+
+    // MARK: - Tables
+
+    static func renderTable(_ table: Element, relationships: [String: String]) -> String {
+        var rows: [[String]] = []
+        for tr in table.children().array() where tr.tagName().lowercased() == "w:tr" {
+            var cells: [String] = []
+            for tc in tr.children().array() where tc.tagName().lowercased() == "w:tc" {
+                var cellText = ""
+                for paragraph in tc.children().array() where paragraph.tagName().lowercased() == "w:p" {
+                    let t = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
+                    if !t.isEmpty { cellText += (cellText.isEmpty ? "" : " ") + t }
+                }
+                cells.append(cellText.replacingOccurrences(of: "|", with: "\\|"))
+            }
+            if !cells.isEmpty { rows.append(cells) }
+        }
+        guard !rows.isEmpty else { return "" }
+
+        let columns = rows.map(\.count).max() ?? 0
+        func pad(_ row: [String]) -> [String] { row + Array(repeating: "", count: max(0, columns - row.count)) }
+        var md = "| " + pad(rows[0]).joined(separator: " | ") + " |\n"
+        md += "| " + Array(repeating: "---", count: columns).joined(separator: " | ") + " |"
+        for row in rows.dropFirst() {
+            md += "\n| " + pad(row).joined(separator: " | ") + " |"
+        }
+        return md
+    }
+
+    // MARK: - Relationships (hyperlink targets)
+
+    static func parseRelationships(_ archive: Archive) -> [String: String] {
+        guard let data = readEntry(archive, path: "word/_rels/document.xml.rels"),
+              let xml = decodeText(data),
+              let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
+            return [:]
+        }
+        var map: [String: String] = [:]
+        for rel in (try? doc.getElementsByTag("Relationship").array()) ?? [] {
+            guard let id = try? rel.attr("Id"), let target = try? rel.attr("Target"),
+                  !id.isEmpty, !target.isEmpty else { continue }
+            map[id] = target
+        }
+        return map
+    }
+
+    // MARK: - Archive helpers
+    // (mirror EPUBConverter's; candidates for a shared ZIP utility later.)
+
+    static func readEntry(_ archive: Archive, path: String) -> Data? {
+        let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        guard let entry = archive[cleanPath] else { return nil }
+        var data = Data(capacity: Int(entry.uncompressedSize))
+        do {
+            _ = try archive.extract(entry) { data.append($0) }
+        } catch {
+            return nil
+        }
+        return data
+    }
+
+    static func decodeText(_ data: Data) -> String? {
+        if let utf8 = String(data: data, encoding: .utf8) { return utf8 }
+        if let utf16 = String(data: data, encoding: .utf16) { return utf16 }
+        return String(data: data, encoding: .isoLatin1)
+    }
+}
