@@ -35,25 +35,38 @@ public struct WordConverter: DocumentConverter {
             throw PicoDocsError.emptyDocument
         }
 
+        let blocks = try Self.renderBlocks(in: body, relationships: relationships)
+        let markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !markdown.isEmpty else { throw PicoDocsError.emptyDocument }
+        return ConverterResult(title: info.filename, sections: [DocumentSection(kind: .body, markdown: markdown)])
+    }
+
+    // MARK: - Blocks
+
+    /// Renders the block-level children of a container (the body, or a content
+    /// control's content) to Markdown blocks, recursing into `w:sdt` content
+    /// controls (forms/templates wrap paragraphs and tables in them).
+    static func renderBlocks(in container: Element, relationships: [String: String]) throws -> [String] {
         var blocks: [String] = []
-        for element in body.children().array() {
+        for element in container.children().array() {
             try Task.checkCancellation()
             switch element.tagName().lowercased() {
             case "w:p":
-                if let markdown = Self.renderParagraph(element, relationships: relationships), !markdown.isEmpty {
+                if let markdown = renderParagraph(element, relationships: relationships), !markdown.isEmpty {
                     blocks.append(markdown)
                 }
             case "w:tbl":
-                let table = Self.renderTable(element, relationships: relationships)
+                let table = renderTable(element, relationships: relationships)
                 if !table.isEmpty { blocks.append(table) }
+            case "w:sdt":
+                if let content = element.getElementsByTag("w:sdtContent").first() {
+                    blocks.append(contentsOf: try renderBlocks(in: content, relationships: relationships))
+                }
             default:
                 continue
             }
         }
-
-        let markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !markdown.isEmpty else { throw PicoDocsError.emptyDocument }
-        return ConverterResult(title: info.filename, sections: [DocumentSection(kind: .body, markdown: markdown)])
+        return blocks
     }
 
     // MARK: - Paragraphs
@@ -76,8 +89,10 @@ public struct WordConverter: DocumentConverter {
     static func headingLevel(forStyle style: String?) -> Int? {
         guard let style = style?.lowercased() else { return nil }
         if style == "title" { return 1 }
-        if style.hasPrefix("heading"), let n = Int(style.dropFirst("heading".count)) {
-            return min(max(n, 1), 6)
+        if style.hasPrefix("heading") {
+            // Tolerate "heading1", "heading 1", "heading-1", etc.
+            let suffix = style.dropFirst("heading".count).filter { $0.isNumber }
+            if let n = Int(suffix) { return min(max(n, 1), 6) }
         }
         return nil
     }
@@ -93,25 +108,17 @@ public struct WordConverter: DocumentConverter {
             case "w:r":
                 out += renderRun(child)
             case "w:hyperlink":
-                let inner = renderInlineRuns(child)
+                let inner = renderInline(child, relationships: relationships)
                 let relId = (try? child.attr("r:id")) ?? ""
                 if let url = relationships[relId], !url.isEmpty, !inner.isEmpty {
-                    out += "[\(inner)](\(url))"
+                    out += "[\(escapeLinkLabel(inner))](\(escapeLinkDestination(url)))"
                 } else {
                     out += inner
                 }
             default:
-                // smartTag / ins / other wrappers: recurse for nested runs
+                // smartTag / ins / proofErr / other wrappers: recurse for nested runs.
                 out += renderInline(child, relationships: relationships)
             }
-        }
-        return out
-    }
-
-    static func renderInlineRuns(_ container: Element) -> String {
-        var out = ""
-        for child in container.children().array() where child.tagName().lowercased() == "w:r" {
-            out += renderRun(child)
         }
         return out
     }
@@ -121,14 +128,18 @@ public struct WordConverter: DocumentConverter {
         for node in run.children().array() {
             switch node.tagName().lowercased() {
             case "w:t":
-                // Use the raw text node to preserve significant whitespace
+                // Read raw text nodes to preserve significant whitespace
                 // (w:t may carry xml:space="preserve").
-                text += node.textNodes().first?.getWholeText() ?? ((try? node.text()) ?? "")
+                for child in node.getChildNodes() {
+                    if let textNode = child as? TextNode { text += textNode.getWholeText() }
+                }
             case "w:tab":
                 text += "\t"
             case "w:br", "w:cr":
                 text += "  \n"
             default:
+                // NOTE: text-box content (w:drawing/w:pict -> w:txbxContent) and
+                // embedded images aren't extracted yet — a later enhancement.
                 continue
             }
         }
@@ -136,9 +147,33 @@ public struct WordConverter: DocumentConverter {
 
         let properties = run.getElementsByTag("w:rPr").first()
         var result = text
-        if properties?.getElementsByTag("w:b").first() != nil { result = "**\(result)**" }
-        if properties?.getElementsByTag("w:i").first() != nil { result = "*\(result)*" }
+        if isFormattingEnabled(properties, tag: "w:b") { result = "**\(result)**" }
+        if isFormattingEnabled(properties, tag: "w:i") { result = "*\(result)*" }
         return result
+    }
+
+    /// True when a run-property toggle (`w:b`/`w:i`) is present and not explicitly
+    /// disabled (`w:val="false"/"0"/"none"`, used to override style hierarchies).
+    private static func isFormattingEnabled(_ properties: Element?, tag: String) -> Bool {
+        guard let element = properties?.getElementsByTag(tag).first() else { return false }
+        if let val = try? element.attr("w:val"), !val.isEmpty {
+            return val != "false" && val != "0" && val != "none"
+        }
+        return true
+    }
+
+    private static func escapeLinkLabel(_ text: String) -> String {
+        text.replacingOccurrences(of: "[", with: "\\[")
+            .replacingOccurrences(of: "]", with: "\\]")
+    }
+
+    private static func escapeLinkDestination(_ url: String) -> String {
+        // Spaces / parens break inline link destinations; wrap in <> (a valid
+        // CommonMark destination form) when present.
+        if url.contains(" ") || url.contains("(") || url.contains(")") {
+            return "<\(url)>"
+        }
+        return url
     }
 
     // MARK: - Tables
@@ -151,9 +186,14 @@ public struct WordConverter: DocumentConverter {
                 var cellText = ""
                 for paragraph in tc.children().array() where paragraph.tagName().lowercased() == "w:p" {
                     let t = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
-                    if !t.isEmpty { cellText += (cellText.isEmpty ? "" : " ") + t }
+                    if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
-                cells.append(cellText.replacingOccurrences(of: "|", with: "\\|"))
+                // Single-line Markdown cells: escape pipes; CR/LF become <br>.
+                cells.append(cellText
+                    .replacingOccurrences(of: "|", with: "\\|")
+                    .replacingOccurrences(of: "\r\n", with: "<br>")
+                    .replacingOccurrences(of: "\r", with: "<br>")
+                    .replacingOccurrences(of: "\n", with: "<br>"))
             }
             if !cells.isEmpty { rows.append(cells) }
         }
@@ -178,7 +218,7 @@ public struct WordConverter: DocumentConverter {
             return [:]
         }
         var map: [String: String] = [:]
-        for rel in (try? doc.getElementsByTag("Relationship").array()) ?? [] {
+        for rel in doc.getElementsByTag("Relationship").array() {
             guard let id = try? rel.attr("Id"), let target = try? rel.attr("Target"),
                   !id.isEmpty, !target.isEmpty else { continue }
             map[id] = target
