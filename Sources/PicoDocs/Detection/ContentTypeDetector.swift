@@ -2,14 +2,21 @@
 //  ContentTypeDetector.swift
 //  PicoDocs
 //
-//  Content-based type detection. Resolves a `DetectedFormat` from magic bytes
-//  first, then falls back to UTType / extension / MIME. Runs once per input and
-//  stamps the result into `StreamInfo` so converters can trust it.
+//  Content-based type detection. Runs once per input and stamps the result into
+//  `StreamInfo` so converters can trust it. The resolution pipeline is ordered
+//  by decreasing trust:
 //
-//  ZIP subtyping (docx/xlsx/pptx/epub) reads the archive's central directory
-//  (which authoritatively lists every entry name) and scans it for well-known
-//  parts — avoiding an unzip dependency at the detection stage. The converters
-//  do real extraction later.
+//    1. Magic bytes (definitive): %PDF, PK ZIP, {\rtf
+//    2. Binary formats identified by hint (image / audio)
+//    3. Binary guard: a NUL byte means "not text" — don't let a text hint
+//       (e.g. a ".txt" name on a binary blob) force text decoding
+//    4. Specific text-format hints (extension / UTType) — these win over the
+//       loose HTML content sniff
+//    5. HTML content sniff
+//    6. Plain-text default
+//
+//  ZIP subtyping reads the archive's central directory (authoritative + bounded)
+//  rather than pulling in an unzip dependency at the detection stage.
 //
 
 import Foundation
@@ -27,7 +34,7 @@ public enum ContentTypeDetector {
     }
 
     static func detect(_ data: Data, info: StreamInfo) -> (DetectedFormat, Double) {
-        // 1. Magic bytes (highest confidence).
+        // 1. Magic bytes (definitive).
         if data.starts(with: Magic.pdf) {
             return (.pdf, 1.0)
         }
@@ -37,29 +44,42 @@ public enum ContentTypeDetector {
             return (classifyZip(data), 0.9)
         }
         if data.starts(with: Magic.rtf) {
-            // RTF is text-based, so it must be caught before the text heuristic,
-            // otherwise it falls through to `.plainText` and is exported as a raw
-            // `{\rtf ...}` control stream. No RTF converter is registered in the
-            // new engine yet, so this currently resolves to "unsupported".
+            // RTF is text-based; catch it before the text logic so it isn't
+            // emitted as a raw `{\rtf ...}` control stream. No RTF converter is
+            // registered yet, so this resolves to "unsupported".
             return (.rtf, 0.95)
         }
 
-        // 2. HTML (textual sniff / hints).
-        if looksLikeHTML(data, info: info) {
+        // 2. Binary formats identified by hint (legitimately binary, so checked
+        //    before the NUL/text logic).
+        if let ut = info.utType {
+            if ut.conforms(to: .image) { return (.image, 0.6) }
+            if ut.conforms(to: .audio) { return (.audio, 0.6) }
+        }
+
+        // 3. Binary guard. A NUL byte in the leading sample is a strong binary
+        //    signal; since no magic/binary hint matched we can't identify it, and
+        //    must not let a text hint force decoding of binary bytes.
+        if looksBinary(data) {
+            return (.unknown, 0.0)
+        }
+
+        // --- Content is text from here (no NUL in the leading sample). ---
+
+        // 4. Specific text-format hints (extension / UTType) win over the loose
+        //    HTML sniff, so a real ".txt" containing "<html" in prose stays text,
+        //    and a ".csv" served as text/plain still resolves to .csv.
+        if let hint = textFormatFromHints(info) {
+            return (hint, 0.5)
+        }
+
+        // 5. HTML content sniff (only when no specific text hint applied).
+        if looksLikeHTMLContent(data) {
             return (.html, 0.7)
         }
 
-        // 3. UTType / extension / MIME hints.
-        if let hinted = formatFromHints(info) {
-            return (hinted, 0.5)
-        }
-
-        // 4. Last resort: decodable text vs binary.
-        if looksLikeText(data) {
-            return (.plainText, 0.4)
-        }
-
-        return (.unknown, 0.0)
+        // 6. Plain-text default.
+        return (.plainText, 0.4)
     }
 
     // MARK: - ZIP subtyping
@@ -123,47 +143,20 @@ public enum ContentTypeDetector {
         return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
     }
 
-    // MARK: - Heuristics
+    // MARK: - Hints & heuristics
 
-    static func looksLikeHTML(_ data: Data, info: StreamInfo) -> Bool {
-        if let mime = info.mimeType?.lowercased(), mime.contains("html") {
-            return true
-        }
-        if let ext = info.fileExtension?.lowercased(), ["html", "htm", "xhtml"].contains(ext) {
-            return true
-        }
-        let head = String(decoding: data.prefix(1024), as: UTF8.self).lowercased()
-        return head.contains("<!doctype html")
-            || head.contains("<html")
-            || head.contains("<head")
-            || head.contains("<body")
-    }
-
-    static func formatFromHints(_ info: StreamInfo) -> DetectedFormat? {
-        // Specific UTType conformances first.
+    /// Resolves text-family formats from extension / UTType. The extension switch
+    /// is consulted before the generic `.xml` / `.plainText` / `.text` UTType
+    /// fallback so a specific extension (e.g. "data.csv" served as text/plain)
+    /// isn't masked by a generic MIME-derived type.
+    static func textFormatFromHints(_ info: StreamInfo) -> DetectedFormat? {
         if let ut = info.utType {
-            if ut.conforms(to: .pdf) { return .pdf }
-            if ut.conforms(to: .docx) { return .docx }
-            if ut.conforms(to: .xlsx) { return .xlsx }
-            if ut.conforms(to: .epub) { return .epub }
-            // RTF conforms to public.text, so check it before the plain-text branch.
             if ut.conforms(to: .rtf) { return .rtf }
             if ut.conforms(to: .html) || ut.conforms(to: .xhtml) { return .html }
             if ut.conforms(to: .commaSeparatedText) { return .csv }
             if ut.conforms(to: .json) { return .json }
-            if ut.conforms(to: .image) { return .image }
-            if ut.conforms(to: .audio) { return .audio }
-            // NOTE: generic .xml / .plainText / .text are intentionally checked
-            // *after* the extension switch, so a specific extension (e.g.
-            // "data.csv" served as text/plain) isn't masked by a generic text
-            // UTType derived from the MIME type.
         }
         switch info.fileExtension?.lowercased() {
-        case "pdf": return .pdf
-        case "docx": return .docx
-        case "xlsx": return .xlsx
-        case "pptx": return .pptx
-        case "epub": return .epub
         case "rtf": return .rtf
         case "html", "htm", "xhtml": return .html
         case "csv": return .csv
@@ -172,7 +165,6 @@ public enum ContentTypeDetector {
         case "md", "markdown", "txt", "text": return .plainText
         default: break
         }
-        // Generic text fallbacks last.
         if let ut = info.utType {
             if ut.conforms(to: .xml) { return .xml }
             if ut.conforms(to: .plainText) || ut.conforms(to: .text) { return .plainText }
@@ -180,13 +172,21 @@ public enum ContentTypeDetector {
         return nil
     }
 
-    static func looksLikeText(_ data: Data) -> Bool {
-        guard !data.isEmpty else { return false }
-        // A NUL byte in the leading sample is a strong binary signal.
-        return !data.prefix(8192).contains(0x00)
+    /// True if the leading sample looks like HTML by content (no hints).
+    static func looksLikeHTMLContent(_ data: Data) -> Bool {
+        let head = String(decoding: data.prefix(1024), as: UTF8.self).lowercased()
+        return head.contains("<!doctype html")
+            || head.contains("<html")
+            || head.contains("<head")
+            || head.contains("<body")
     }
 
-    // MARK: - Helpers
+    /// A NUL byte in the leading sample is a strong signal that the data is
+    /// binary rather than text.
+    static func looksBinary(_ data: Data) -> Bool {
+        guard !data.isEmpty else { return false }
+        return data.prefix(8192).contains(0x00)
+    }
 
     /// Searches for an ASCII needle, bounding the scan to the first and last
     /// 128 KB when handed a large blob. (When handed the central directory this
