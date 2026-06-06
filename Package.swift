@@ -25,6 +25,7 @@ let package = Package(
         .package(url: "https://github.com/CoreOffice/CoreXLSX", from: "0.14.2"),
         .package(url: "https://github.com/ronaldmannak/EPUBKit", branch: "main"),
         .package(url: "https://github.com/scinfu/SwiftSoup", from: "2.7.6"),
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", from: "0.9.19"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -35,6 +36,7 @@ let package = Package(
                 .product(name: "CoreXLSX", package: "CoreXLSX"),
                 .product(name: "EPUBKit", package: "EPUBKit"),
                 .product(name: "SwiftSoup", package: "SwiftSoup"),
+                .product(name: "ZIPFoundation", package: "ZIPFoundation"),
             ],
             resources: [
                 .process("Localizable.xcstrings"),
