@@ -125,16 +125,17 @@ public struct EPUBConverter: DocumentConverter {
         // Normalize "."/".." against the OPF directory manually. These are logical
         // ZIP entry paths, not filesystem paths, so avoid NSString.standardizingPath
         // (filesystem-aware and platform-dependent for relative paths) and resolve
-        // the components ourselves.
-        var components: [String] = dir.isEmpty ? [] : dir.split(separator: "/").map(String.init)
-        for part in decoded.split(separator: "/").map(String.init) {
+        // the components ourselves. A leading "/" is root-relative, so ignore dir.
+        let startsWithSlash = decoded.hasPrefix("/")
+        var components: [String] = (dir.isEmpty || startsWithSlash) ? [] : dir.split(separator: "/").map(String.init)
+        for part in decoded.split(separator: "/") {
             switch part {
-            case "", ".":
+            case ".":
                 continue
             case "..":
                 if !components.isEmpty { components.removeLast() }
             default:
-                components.append(part)
+                components.append(String(part))
             }
         }
         return components.joined(separator: "/")
