@@ -21,6 +21,7 @@ public extension UTType {
     static let docx = UTType(importedAs: "org.openxmlformats.wordprocessingml.document", conformingTo: .zip)
 //    static let xls = UTType(importedAs: "com.microsoft.excel.xls", conformingTo: .spreadsheet)
     static let xlsx = UTType(importedAs: "org.openxmlformats.spreadsheetml.sheet", conformingTo: .zip)
+    static let pptx = UTType(importedAs: "org.openxmlformats.presentationml.presentation", conformingTo: .zip)
     static let xhtml = UTType(importedAs: "public.xhtml", conformingTo: .xml)
     static let webloc = UTType(importedAs: "com.apple.web-internet-location")
 

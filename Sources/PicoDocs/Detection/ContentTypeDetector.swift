@@ -175,6 +175,7 @@ public enum ContentTypeDetector {
             if ut.conforms(to: .pdf) { return .pdf }
             if ut.conforms(to: .docx) { return .docx }
             if ut.conforms(to: .xlsx) { return .xlsx }
+            if ut.conforms(to: .pptx) { return .pptx }
             if ut.conforms(to: .epub) { return .epub }
         }
         switch info.fileExtension?.lowercased() {
