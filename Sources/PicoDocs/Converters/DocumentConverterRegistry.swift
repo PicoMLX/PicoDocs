@@ -51,6 +51,7 @@ public struct DocumentConverterRegistry: Sendable {
     static func makeDefault() -> DocumentConverterRegistry {
         DocumentConverterRegistry()
             .registering(HTMLConverter(), priority: Priority.specific)
+            .registering(SpreadsheetConverter(), priority: Priority.specific)
             .registering(PlainTextConverter(), priority: Priority.generic)
     }
 
