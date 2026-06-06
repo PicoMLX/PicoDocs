@@ -90,9 +90,10 @@ public struct WordConverter: DocumentConverter {
         guard let style = style?.lowercased() else { return nil }
         if style == "title" { return 1 }
         if style.hasPrefix("heading") {
-            // Tolerate "heading1", "heading 1", "heading-1", etc.
-            let suffix = style.dropFirst("heading".count).filter { $0.isNumber }
-            if let n = Int(suffix) { return min(max(n, 1), 6) }
+            // Tolerate "heading1", "heading 1", "heading-1", etc. (filter returns
+            // [Character], so wrap in String before Int(_:)).
+            let digits = String(style.dropFirst("heading".count).filter { $0.isNumber })
+            if let n = Int(digits) { return min(max(n, 1), 6) }
         }
         return nil
     }
