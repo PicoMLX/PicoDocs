@@ -103,15 +103,15 @@ extension PicoDocument {
         }
     }
 
-    /// Renders the engine result to the requested export format. Markdown (the
-    /// canonical form) is returned per-section; other formats go through
-    /// `DocumentRenderer`, which throws `unableToExportToRequestedFormat` for the
-    /// formats not yet implemented (html/xml/csv) rather than silently returning
-    /// Markdown.
+    /// Per-format export of the engine result. Markdown is returned per content
+    /// section (so EPUB chapters / XLSX sheets stay individually addressable),
+    /// excluding `.image` byte-carrier sections — they're already referenced
+    /// inline by the body, so they'd otherwise show as a duplicate image-only
+    /// chunk. Other formats are rendered to a single string by `DocumentRenderer`.
     private nonisolated static func exportedContent(from result: ConverterResult, format: ExportFileType?) throws -> [String] {
         switch format ?? .markdown {
         case .markdown:
-            return result.sections.map(\.markdown)
+            return result.sections.filter { $0.kind != .image }.map(\.markdown)
         default:
             return [try DocumentRenderer.render(result, to: format ?? .markdown)]
         }
