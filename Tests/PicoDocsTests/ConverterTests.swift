@@ -96,6 +96,16 @@ struct ConverterTests {
         #expect(md.contains("Fallback only content."))   // kept (not dropped as a redundant fallback)
     }
 
+    @Test("DOCX renders a table that is inside a text box")
+    func docxTextBoxWithTable() async throws {
+        let md = try await PicoDocsEngine.convert(
+            data: Fixture.data("textbox-with-table", "docx"), filename: "textbox-with-table.docx"
+        ).markdown()
+        #expect(md.contains("Before box."))
+        #expect(md.contains("Inner cell A."))   // table inside the text box still renders its cells
+        #expect(md.contains("Inner cell B."))
+    }
+
     @Test("DOCX hyperlink wrapping an image keeps the image (renderer-safe)")
     func docxLinkedImage() async throws {
         let md = try await PicoDocsEngine.convert(

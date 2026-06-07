@@ -142,6 +142,20 @@ public struct WordConverter: DocumentConverter {
         ancestor(of: element, named: tag) != nil
     }
 
+    /// True when `paragraph` is inside a `w:txbxContent` that is nested *within*
+    /// `boundary` (a table cell) — i.e. a text box inside the cell, whose content
+    /// is emitted separately by extractTextBoxes. Walking up from the paragraph,
+    /// a `w:txbxContent` found before reaching `boundary` is such a nested text
+    /// box; reaching `boundary` first means any text box is an ancestor of the
+    /// cell (a table inside a text box), so the cell's own paragraphs still render.
+    private static func isInsideTextBox(_ paragraph: Element, before boundary: Element) -> Bool {
+        for ancestor in paragraph.parents() {
+            if ancestor === boundary { return false }
+            if ancestor.tagName().lowercased() == "w:txbxcontent" { return true }
+        }
+        return false
+    }
+
     /// True when a text box's `w:txbxContent` is the `mc:Fallback` (legacy VML)
     /// copy of a text box also present in the `mc:Choice` — i.e. a duplicate to
     /// skip. A fallback that is the *only* copy (the Choice has no text box) is
@@ -313,10 +327,12 @@ public struct WordConverter: DocumentConverter {
                 var cellText = ""
                 // Gather all descendant paragraphs so paragraphs inside block
                 // content controls (w:sdt) within the cell are included too. Skip
-                // text-box paragraphs (w:txbxContent) — those are emitted once by
-                // extractTextBoxes, so rendering them here too would duplicate them.
+                // paragraphs belonging to a text box nested in this cell — those are
+                // emitted once by extractTextBoxes, so rendering them here too would
+                // duplicate them. (A table inside a text box is not skipped, so its
+                // own cells still render — see isInsideTextBox.)
                 for paragraph in (try? tc.getElementsByTag("w:p").array()) ?? [] {
-                    if isInside(paragraph, named: "w:txbxcontent") { continue }
+                    if isInsideTextBox(paragraph, before: tc) { continue }
                     let t = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
