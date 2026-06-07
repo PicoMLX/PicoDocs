@@ -36,6 +36,15 @@ struct ConverterTests {
         #expect(image?.metadata["base64"]?.isEmpty == false)
     }
 
+    @Test("DOCX footnotes are extracted as Markdown footnote definitions")
+    func docxFootnotes() async throws {
+        let md = try await PicoDocsEngine.convert(
+            data: Fixture.data("footnote", "docx"), filename: "footnote.docx"
+        ).markdown()
+        #expect(md.contains("Body text[^fn2]"))                       // inline reference at position
+        #expect(md.contains("[^fn2]: This is the footnote text."))     // definition appended
+    }
+
     @Test("DOCX hyperlink wrapping an image keeps the image (renderer-safe)")
     func docxLinkedImage() async throws {
         let md = try await PicoDocsEngine.convert(
@@ -53,6 +62,20 @@ struct ConverterTests {
         )
         #expect(html.contains("<img src=\"data:image/png;base64,"))
         #expect(!html.contains("src=\"image1.png\""))
+    }
+
+    @Test("DOCX part-path resolution honors the owning part's base directory")
+    func docxResolvePartPath() {
+        // Body part / standard-location notes: targets are relative to `word`.
+        #expect(WordConverter.resolvePartPath("media/image1.png", relativeTo: "word")
+            == "word/media/image1.png")
+        // A notes part in a subfolder resolves `../media/...` against `word/notes`
+        // — i.e. back up to `word/media`, not the package root (the round-3 fix).
+        #expect(WordConverter.resolvePartPath("../media/image1.png", relativeTo: "word/notes")
+            == "word/media/image1.png")
+        // A package-absolute target (leading "/") ignores the base directory.
+        #expect(WordConverter.resolvePartPath("/word/media/image1.png", relativeTo: "word/notes")
+            == "word/media/image1.png")
     }
 
     @Test("XLSX converts each sheet's cells to Markdown")

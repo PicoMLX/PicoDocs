@@ -36,11 +36,47 @@ public struct WordConverter: DocumentConverter {
         }
 
         let blocks = try Self.renderBlocks(in: body, relationships: relationships)
-        let markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        var markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Extract embedded images as separate .image sections (bytes preserved
-        // for downstream OCR/captioning); the body Markdown references them inline.
-        let imageSections = Self.extractImages(from: body, relationships: relationships, archive: archive)
+        // Footnote/endnote text lives in separate parts; append the referenced
+        // ones as Markdown footnote definitions (the body carries `[^fnN]`/
+        // `[^enN]` reference markers at their positions).
+        //
+        // NOTE: these are CommonMark footnote markers in the canonical Markdown.
+        // The non-Markdown renderers (DocumentRenderer HTML/plaintext) don't
+        // render `[^id]` footnotes yet, so those exports show the literal markers
+        // — a deliberately deferred renderer follow-up; Markdown export, the
+        // canonical product, is correct.
+        let notes = Self.parseNotes(archive)
+        let definitions = Self.referencedNoteIDs(in: body).compactMap { id in
+            notes[id].map { text in
+                // Indent continuation lines (from a manual w:br inside the note) so
+                // a multi-line note stays one CommonMark footnote definition rather
+                // than splitting into a separate top-level paragraph.
+                "[^\(id)]: \(text.replacingOccurrences(of: "\n", with: "\n    "))"
+            }
+        }
+        if !definitions.isEmpty {
+            markdown += (markdown.isEmpty ? "" : "\n\n") + definitions.joined(separator: "\n")
+        }
+
+        // Extract embedded images (body + notes) as separate .image sections
+        // (bytes preserved for downstream OCR/captioning, and for HTML data-URL
+        // embedding); the Markdown references them inline.
+        var imageSections = Self.extractImages(from: body, relationships: relationships, archive: archive)
+        imageSections += Self.extractNoteImages(archive)
+        // De-duplicate an image referenced from both the body and a note (by
+        // archive path). NOTE: image identity downstream (the inline `src` and the
+        // renderer's data-URL embedding) is keyed by basename, so two *different*
+        // images that share a basename would collide — only possible when a note
+        // part lives in its own subfolder with its own media. Unique/path-aware
+        // image names are a deferred cross-cutting follow-up; standard DOCX layouts
+        // (all media under `word/media/` with unique names) are unaffected.
+        var seenImagePaths = Set<String>()
+        imageSections = imageSections.filter { section in
+            guard let path = section.sourcePath else { return true }
+            return seenImagePaths.insert(path).inserted
+        }
 
         var sections: [DocumentSection] = []
         if !markdown.isEmpty {
@@ -182,10 +218,13 @@ public struct WordConverter: DocumentConverter {
             case "w:drawing", "w:pict":
                 flushText()
                 out += imageMarkdown(in: node, relationships: relationships)   // not wrapped in emphasis
+            case "w:footnotereference":
+                if let id = try? node.attr("w:id"), !id.isEmpty { textBuffer += "[^fn\(id)]" }
+            case "w:endnotereference":
+                if let id = try? node.attr("w:id"), !id.isEmpty { textBuffer += "[^en\(id)]" }
             default:
-                // NOTE: text-box content (w:txbxContent) and footnote/endnote
-                // references (whose text lives in word/footnotes.xml /
-                // endnotes.xml) aren't extracted yet — later enhancements.
+                // NOTE: text-box content (w:txbxContent) isn't extracted yet —
+                // a later enhancement.
                 continue
             }
         }
@@ -275,8 +314,8 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Relationships (hyperlink targets)
 
-    static func parseRelationships(_ archive: Archive) -> [String: String] {
-        guard let data = readEntry(archive, path: "word/_rels/document.xml.rels"),
+    static func parseRelationships(_ archive: Archive, path: String = "word/_rels/document.xml.rels") -> [String: String] {
+        guard let data = readEntry(archive, path: path),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
             return [:]
@@ -288,6 +327,119 @@ public struct WordConverter: DocumentConverter {
             map[id] = target
         }
         return map
+    }
+
+    // MARK: - Footnotes / endnotes
+
+    /// Parses footnote and endnote text (stored in separate parts) into a map
+    /// keyed by reference id (`fn<id>` / `en<id>`), skipping the auto separator
+    /// and continuation notes.
+    static func parseNotes(_ archive: Archive) -> [String: String] {
+        var notes: [String: String] = [:]
+        // Resolve each note part from its document relationship Target (falling
+        // back to the standard name), then render it against that part's own
+        // relationships so inline hyperlinks/images inside notes resolve correctly.
+        for (typeSuffix, fallback, tag, prefix) in [
+            ("/footnotes", "word/footnotes.xml", "w:footnote", "fn"),
+            ("/endnotes", "word/endnotes.xml", "w:endnote", "en"),
+        ] {
+            let part = relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
+            let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part))
+            for (key, value) in parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships) {
+                notes[key] = value
+            }
+        }
+        return notes
+    }
+
+    /// The Target of the first `document.xml.rels` relationship whose Type ends
+    /// with `typeSuffix` (e.g. "/footnotes"); relative to `word/`.
+    private static func relationshipTarget(_ archive: Archive, typeSuffix: String) -> String? {
+        guard let data = readEntry(archive, path: "word/_rels/document.xml.rels"),
+              let xml = decodeText(data),
+              let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
+            return nil
+        }
+        for rel in (try? doc.getElementsByTag("Relationship").array()) ?? [] {
+            guard let type = try? rel.attr("Type"), type.hasSuffix(typeSuffix),
+                  let target = try? rel.attr("Target"), !target.isEmpty else { continue }
+            return target
+        }
+        return nil
+    }
+
+    /// The `_rels` path for a part (e.g. "word/footnotes.xml" -> "word/_rels/footnotes.xml.rels").
+    private static func relationshipsPath(forPart part: String) -> String {
+        let directory = (part as NSString).deletingLastPathComponent
+        let file = (part as NSString).lastPathComponent
+        return directory.isEmpty ? "_rels/\(file).rels" : "\(directory)/_rels/\(file).rels"
+    }
+
+    /// Note types that are structural auto-separators, not real referenced notes.
+    private static let separatorNoteTypes: Set<String> = [
+        "separator", "continuationSeparator", "continuationNotice",
+    ]
+
+    private static func parseNotePart(_ archive: Archive, path: String, tag: String, prefix: String, relationships: [String: String]) -> [String: String] {
+        guard let data = readEntry(archive, path: path),
+              let xml = decodeText(data),
+              let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
+            return [:]
+        }
+        var notes: [String: String] = [:]
+        for note in (try? doc.getElementsByTag(tag).array()) ?? [] {
+            guard let id = try? note.attr("w:id"), !id.isEmpty else { continue }
+            // Skip only the auto separator/continuation notes; keep ordinary
+            // referenced notes even when explicitly typed "normal".
+            if let type = try? note.attr("w:type"), separatorNoteTypes.contains(type) { continue }
+            let text = ((try? note.getElementsByTag("w:p").array()) ?? [])
+                .map { renderInline($0, relationships: relationships).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            guard !text.isEmpty else { continue }
+            notes["\(prefix)\(id)"] = text
+        }
+        return notes
+    }
+
+    /// Reference ids (`fn<id>`/`en<id>`) found in the body, de-duplicated —
+    /// footnotes then endnotes, the order their definitions are appended.
+    static func referencedNoteIDs(in body: Element) -> [String] {
+        var ids: [String] = []
+        var seen = Set<String>()
+        func collect(tag: String, prefix: String) {
+            for ref in (try? body.getElementsByTag(tag).array()) ?? [] {
+                guard let id = try? ref.attr("w:id"), !id.isEmpty else { continue }
+                let key = "\(prefix)\(id)"
+                if seen.insert(key).inserted { ids.append(key) }
+            }
+        }
+        collect(tag: "w:footnoteReference", prefix: "fn")
+        collect(tag: "w:endnoteReference", prefix: "en")
+        return ids
+    }
+
+    /// Extracts embedded images from the footnote/endnote parts as `.image`
+    /// sections, using each part's own relationships — so an image inside a note
+    /// is preserved/embeddable like a body image (notes reference it inline).
+    static func extractNoteImages(_ archive: Archive) -> [DocumentSection] {
+        var sections: [DocumentSection] = []
+        for (typeSuffix, fallback, rootTag) in [
+            ("/footnotes", "word/footnotes.xml", "w:footnotes"),
+            ("/endnotes", "word/endnotes.xml", "w:endnotes"),
+        ] {
+            let part = relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
+            guard let data = readEntry(archive, path: part),
+                  let xml = decodeText(data),
+                  let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()),
+                  let root = try? doc.getElementsByTag(rootTag).first() else { continue }
+            let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part))
+            // A note part's image targets resolve relative to the note part's own
+            // folder (usually `word`, but a subfolder when the part lives in one).
+            let partDirectory = (part as NSString).deletingLastPathComponent
+            sections.append(contentsOf: extractImages(from: root, relationships: relationships, archive: archive, partDirectory: partDirectory))
+        }
+        return sections
     }
 
     // MARK: - Images
@@ -328,7 +480,7 @@ public struct WordConverter: DocumentConverter {
 
     /// Extracts each embedded image once as an `.image` section carrying the raw
     /// bytes (base64) and MIME type, so consumers can render or caption them.
-    static func extractImages(from body: Element, relationships: [String: String], archive: Archive) -> [DocumentSection] {
+    static func extractImages(from body: Element, relationships: [String: String], archive: Archive, partDirectory: String = "word") -> [DocumentSection] {
         let blips = (try? body.getElementsByTag("a:blip").array()) ?? []
         let vmlImages = (try? body.getElementsByTag("v:imagedata").array()) ?? []
 
@@ -339,7 +491,7 @@ public struct WordConverter: DocumentConverter {
             if relId.isEmpty { relId = (try? element.attr("r:id")) ?? "" }
             guard !relId.isEmpty, let target = relationships[relId], !target.isEmpty else { continue }
 
-            let mediaPath = resolveMediaPath(target)
+            let mediaPath = resolvePartPath(target, relativeTo: partDirectory)
             guard !seen.contains(mediaPath) else { continue }
             seen.insert(mediaPath)
 
@@ -359,13 +511,21 @@ public struct WordConverter: DocumentConverter {
         return sections
     }
 
-    /// Resolves a `document.xml.rels` image Target (relative to `word/`) to its
-    /// path inside the archive. Normalizes segment-by-segment (single pass), so
-    /// `.`/`..` are collapsed without any risk of looping.
-    private static func resolveMediaPath(_ target: String) -> String {
-        // A leading "/" is package-absolute; otherwise the target is relative to
-        // the part's folder (`word/`).
-        let combined = target.hasPrefix("/") ? String(target.dropFirst()) : "word/\(target)"
+    /// Resolves a relationship Target to its path inside the archive — used for
+    /// image media and note parts. A leading "/" is package-absolute; otherwise
+    /// the Target is relative to `baseDirectory`, the folder of the part whose
+    /// `.rels` it came from (e.g. `word` for `word/document.xml`, or `word/notes`
+    /// for a notes part stored in a subfolder). Normalizes segment-by-segment
+    /// (single pass), so `.`/`..` are collapsed without any risk of looping.
+    static func resolvePartPath(_ target: String, relativeTo baseDirectory: String) -> String {
+        let combined: String
+        if target.hasPrefix("/") {
+            combined = String(target.dropFirst())
+        } else if baseDirectory.isEmpty {
+            combined = target
+        } else {
+            combined = "\(baseDirectory)/\(target)"
+        }
         var stack: [String] = []
         for raw in combined.split(separator: "/", omittingEmptySubsequences: true) {
             let segment = String(raw)
