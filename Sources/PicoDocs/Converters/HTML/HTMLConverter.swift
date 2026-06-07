@@ -4,10 +4,13 @@
 //
 //  Converts HTML to Markdown via the pure-Swift SwiftSoup walker. Replaces the
 //  old behavior where HTML was returned as raw markup (issue #2). Reader-mode
-//  cleanup (Readability) is a separate, optional pass added later.
+//  cleanup runs by default via `ReadabilityScorer` (keep the article, drop
+//  nav/ads/boilerplate); set `StreamInfo.enhanceReadability = false` to convert
+//  the full body verbatim.
 //
 
 import Foundation
+import SwiftSoup
 
 public struct HTMLConverter: DocumentConverter {
 
@@ -26,14 +29,36 @@ public struct HTMLConverter: DocumentConverter {
         guard let html = decoded else {
             throw ConverterError.decodingFailed
         }
+        let baseURI = info.url?.absoluteString ?? ""
 
-        let (title, markdown) = try HTMLToMarkdown.convert(html: html, baseURI: info.url?.absoluteString)
+        // Reader-mode extraction (default on): keep the main article, drop
+        // nav/ads/boilerplate. The scorer mutates the DOM it walks, so it gets
+        // its own parse; a confident hit returns immediately, otherwise we fall
+        // through to converting the full document body (no regression).
+        if info.enhanceReadability,
+           let scored = try? SwiftSoup.parse(html, baseURI),
+           let result = ReadabilityScorer.parse(scored) {
+            let markdown = HTMLToMarkdown.convert(element: result.article)
+            if !markdown.isEmpty {
+                let title = result.readable.title.isEmpty
+                    ? (try? scored.title()).flatMap { $0.isEmpty ? nil : $0 }
+                    : result.readable.title
+                let section = DocumentSection(title: title, kind: .body, markdown: markdown)
+                return ConverterResult(title: title, author: result.readable.byline, sections: [section])
+            }
+        }
+
+        // Full-document fallback (Readability disabled, or no confident article).
+        let document = try SwiftSoup.parse(html, baseURI)
+        let documentTitle = (try? document.title()).flatMap { $0.isEmpty ? nil : $0 }
+        let body = document.body() ?? document
+        let markdown = HTMLToMarkdown.convert(element: body)
         guard !markdown.isEmpty else {
             throw PicoDocsError.emptyDocument
         }
 
-        let section = DocumentSection(title: title, kind: .body, markdown: markdown)
-        return ConverterResult(title: title, sections: [section])
+        let section = DocumentSection(title: documentTitle, kind: .body, markdown: markdown)
+        return ConverterResult(title: documentTitle, sections: [section])
     }
 
     /// Sniffs a document-declared charset (`<meta charset="...">` or

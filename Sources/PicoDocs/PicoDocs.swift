@@ -28,9 +28,16 @@ public enum PicoDocsEngine {
         mimeType: String? = nil,
         url: URL? = nil,
         charset: String.Encoding? = nil,
+        enhanceReadability: Bool = true,
         registry: DocumentConverterRegistry = .default
     ) async throws -> ConverterResult {
-        let info = makeStreamInfo(filename: filename, mimeType: mimeType, url: url, charset: charset)
+        let info = makeStreamInfo(
+            filename: filename,
+            mimeType: mimeType,
+            url: url,
+            charset: charset,
+            enhanceReadability: enhanceReadability
+        )
         let resolved = ContentTypeDetector.classify(data, info: info)
         return try await registry.convert(data, info: resolved)
     }
@@ -43,6 +50,7 @@ public enum PicoDocsEngine {
         url: URL? = nil,
         charset: String.Encoding? = nil,
         to format: ExportFileType = .markdown,
+        enhanceReadability: Bool = true,
         registry: DocumentConverterRegistry = .default
     ) async throws -> String {
         let result = try await convert(
@@ -51,6 +59,7 @@ public enum PicoDocsEngine {
             mimeType: mimeType,
             url: url,
             charset: charset,
+            enhanceReadability: enhanceReadability,
             registry: registry
         )
         return try DocumentRenderer.render(result, to: format)
@@ -58,7 +67,7 @@ public enum PicoDocsEngine {
 
     // MARK: - StreamInfo construction
 
-    static func makeStreamInfo(filename: String?, mimeType: String?, url: URL?, charset: String.Encoding?) -> StreamInfo {
+    static func makeStreamInfo(filename: String?, mimeType: String?, url: URL?, charset: String.Encoding?, enhanceReadability: Bool = true) -> StreamInfo {
         let ext = fileExtension(filename: filename, url: url)
         // Use only the base type (before any ";" parameters) for UTType lookup.
         let baseMIME = mimeType?.split(separator: ";").first.map {
@@ -75,7 +84,8 @@ public enum PicoDocsEngine {
             mimeType: mimeType,
             utType: utType,
             url: url,
-            charset: charset ?? encoding(fromMIME: mimeType)
+            charset: charset ?? encoding(fromMIME: mimeType),
+            enhanceReadability: enhanceReadability
         )
     }
 

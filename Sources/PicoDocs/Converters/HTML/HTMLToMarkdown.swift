@@ -24,6 +24,16 @@ enum HTMLToMarkdown {
         return (title, markdown)
     }
 
+    /// Renders an already-parsed `Element` (e.g. the body, or the subtree the
+    /// Readability scorer selected) to Markdown. Relative links resolve against
+    /// the element's owner-document base URI. `Document` is an `Element`, so the
+    /// whole document can be passed too.
+    static func convert(element: Element) -> String {
+        var out = ""
+        renderChildren(of: element, into: &out)
+        return normalizeBlankLines(out).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: - Walking
 
     private static func renderChildren(of node: Node, into out: inout String, preserveWhitespace: Bool = false) {
