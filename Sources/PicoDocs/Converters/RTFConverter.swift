@@ -26,6 +26,13 @@ public struct RTFConverter: DocumentConverter {
         guard let rtf = String(data: data, encoding: .isoLatin1), !rtf.isEmpty else {
             throw ConverterError.decodingFailed
         }
+        // A valid RTF document begins with the {\rtf signature. When .rtf was
+        // inferred from a filename/MIME hint rather than the magic bytes, reject
+        // mislabeled or corrupt input here (strict failure) instead of emitting
+        // its raw text as a "document".
+        guard rtf.drop(while: { $0.isWhitespace }).hasPrefix("{\\rtf") else {
+            throw PicoDocsError.fileCorrupted
+        }
         let markdown = Self.markdown(fromRTF: rtf)
         guard !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PicoDocsError.emptyDocument
@@ -57,6 +64,7 @@ public struct RTFConverter: DocumentConverter {
         var italic = false
         var ignore = false
         var ucSkip = 1
+        var ansiEncoding: String.Encoding = .windowsCP1252
         var stack: [GroupState] = []
         var pendingHighSurrogate: Int?
 
@@ -115,6 +123,21 @@ public struct RTFConverter: DocumentConverter {
                         appendText("\n")
                     case "tab", "cell":
                         appendText("\t")
+                    case "emdash": appendText("\u{2014}")
+                    case "endash": appendText("\u{2013}")
+                    case "bullet": appendText("\u{2022}")
+                    case "lquote": appendText("\u{2018}")
+                    case "rquote": appendText("\u{2019}")
+                    case "ldblquote": appendText("\u{201C}")
+                    case "rdblquote": appendText("\u{201D}")
+                    case "emspace", "enspace", "qmspace": appendText(" ")
+                    case "ansicpg":
+                        if let param, let encoding = Self.encoding(forCodepage: param) { ansiEncoding = encoding }
+                    case "bin":
+                        // \binN: the next N bytes are raw binary (often inside an
+                        // ignored \pict/\object) and may contain { } or \ — skip
+                        // them so they can't corrupt group/brace parsing.
+                        if let param, param > 0 { i += min(param, n - i) }
                     case "plain":
                         bold = false; italic = false
                     case "b":
@@ -188,7 +211,7 @@ public struct RTFConverter: DocumentConverter {
                     case "*": ignore = true                    // ignorable destination
                     case "'":
                         if i + 1 < n, let byte = UInt8(String([chars[i], chars[i + 1]]), radix: 16) {
-                            appendText(Self.decodeANSIByte(byte))
+                            appendText(Self.decodeByte(byte, encoding: ansiEncoding))
                             i += 2
                         }
                     case "\n", "\r":
@@ -209,15 +232,27 @@ public struct RTFConverter: DocumentConverter {
         return paragraphs.joined(separator: "\n\n")
     }
 
-    /// Decodes a single `\'hh` byte using the Windows-1252 (ANSI) code page — the
-    /// near-universal default for `\ansi` RTF — so bytes 0x80–0x9F become smart
-    /// quotes/dashes rather than C1 control characters. Falls back to Latin-1 for
-    /// the few CP1252-undefined bytes.
-    private static func decodeANSIByte(_ byte: UInt8) -> String {
-        if let decoded = String(bytes: [byte], encoding: .windowsCP1252), !decoded.isEmpty {
+    /// Decodes a single `\'hh` byte using the document's declared code page
+    /// (`\ansicpgN`, defaulting to Windows-1252 for `\ansi`) — so bytes 0x80–0x9F
+    /// become the right punctuation/letters rather than C1 control characters.
+    /// Falls back to Windows-1252, then Latin-1, for undecodable bytes.
+    private static func decodeByte(_ byte: UInt8, encoding: String.Encoding) -> String {
+        if let decoded = String(bytes: [byte], encoding: encoding), !decoded.isEmpty {
+            return decoded
+        }
+        if encoding != .windowsCP1252,
+           let decoded = String(bytes: [byte], encoding: .windowsCP1252), !decoded.isEmpty {
             return decoded
         }
         return Unicode.Scalar(UInt32(byte)).map { String(Character($0)) } ?? ""
+    }
+
+    /// Maps an RTF `\ansicpgN` Windows code page number to a `String.Encoding`.
+    private static func encoding(forCodepage codepage: Int) -> String.Encoding? {
+        guard codepage > 0 else { return nil }
+        let cfEncoding = CFStringConvertWindowsCodepageToEncoding(UInt32(codepage))
+        guard cfEncoding != kCFStringEncodingInvalidId else { return nil }
+        return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cfEncoding))
     }
 
     /// Renders one formatting run, keeping emphasis markers hugging the text (so

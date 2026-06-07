@@ -86,6 +86,41 @@ struct ConverterTests {
         #expect(md.contains("Helloworld."))
     }
 
+    @Test("A mislabeled .rtf without the RTF header throws (strict failure)")
+    func rtfMislabeledThrows() async throws {
+        let notRTF = Data("this is not actually an RTF file".utf8)
+        await #expect(throws: (any Error).self) {
+            _ = try await PicoDocsEngine.convert(data: notRTF, filename: "notes.rtf")
+        }
+    }
+
+    @Test("RTF special-character control words become punctuation")
+    func rtfSpecialChars() async throws {
+        let rtf = "{\\rtf1\\ansi A\\emdash B, \\bullet item, \\ldblquote q\\rdblquote .\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "s.rtf").markdown()
+        #expect(md.contains("A\u{2014}B"))            // em dash
+        #expect(md.contains("\u{2022}"))              // bullet
+        #expect(md.contains("\u{201C}q\u{201D}"))     // curly double quotes
+    }
+
+    @Test("RTF honors a declared non-1252 code page for hex escapes")
+    func rtfCodePage1251() async throws {
+        // CP1251: 0xE0 -> U+0430, 0xE1 -> U+0431 (Cyrillic a/b).
+        let rtf = "{\\rtf1\\ansi\\ansicpg1251 \\'e0\\'e1 done.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "c.rtf").markdown()
+        #expect(md.contains("\u{0430}\u{0431}"))
+    }
+
+    @Test("RTF \\binN binary payload doesn't corrupt brace parsing")
+    func rtfBinaryPayload() async throws {
+        // The byte after \bin1 is a '}' that must not close the \pict group.
+        let rtf = "{\\rtf1\\ansi Before {\\pict\\bin1 }X} After.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "b.rtf").markdown()
+        #expect(md.contains("Before"))
+        #expect(md.contains("After."))
+        #expect(!md.contains("X"))
+    }
+
     @Test("A corrupt DOCX throws instead of degrading to plain text")
     func corruptDocxIsStrict() async throws {
         // Detected as .docx by the filename hint, but the bytes aren't a zip — the
