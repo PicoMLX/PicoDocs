@@ -36,7 +36,18 @@ public struct WordConverter: DocumentConverter {
         }
 
         let blocks = try Self.renderBlocks(in: body, relationships: relationships)
-        let markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        var markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Footnote/endnote text lives in separate parts; append the referenced
+        // ones as Markdown footnote definitions (the body carries `[^fnN]`/
+        // `[^enN]` reference markers at their positions).
+        let notes = Self.parseNotes(archive, relationships: relationships)
+        let definitions = Self.referencedNoteIDs(in: body).compactMap { id in
+            notes[id].map { "[^\(id)]: \($0)" }
+        }
+        if !definitions.isEmpty {
+            markdown += (markdown.isEmpty ? "" : "\n\n") + definitions.joined(separator: "\n")
+        }
 
         // Extract embedded images as separate .image sections (bytes preserved
         // for downstream OCR/captioning); the body Markdown references them inline.
@@ -182,10 +193,13 @@ public struct WordConverter: DocumentConverter {
             case "w:drawing", "w:pict":
                 flushText()
                 out += imageMarkdown(in: node, relationships: relationships)   // not wrapped in emphasis
+            case "w:footnotereference":
+                if let id = try? node.attr("w:id"), !id.isEmpty { textBuffer += "[^fn\(id)]" }
+            case "w:endnotereference":
+                if let id = try? node.attr("w:id"), !id.isEmpty { textBuffer += "[^en\(id)]" }
             default:
-                // NOTE: text-box content (w:txbxContent) and footnote/endnote
-                // references (whose text lives in word/footnotes.xml /
-                // endnotes.xml) aren't extracted yet — later enhancements.
+                // NOTE: text-box content (w:txbxContent) isn't extracted yet —
+                // a later enhancement.
                 continue
             }
         }
@@ -288,6 +302,57 @@ public struct WordConverter: DocumentConverter {
             map[id] = target
         }
         return map
+    }
+
+    // MARK: - Footnotes / endnotes
+
+    /// Parses footnote and endnote text (stored in separate parts) into a map
+    /// keyed by reference id (`fn<id>` / `en<id>`), skipping the auto separator
+    /// and continuation notes.
+    static func parseNotes(_ archive: Archive, relationships: [String: String]) -> [String: String] {
+        var notes = parseNotePart(archive, path: "word/footnotes.xml", tag: "w:footnote", prefix: "fn", relationships: relationships)
+        for (key, value) in parseNotePart(archive, path: "word/endnotes.xml", tag: "w:endnote", prefix: "en", relationships: relationships) {
+            notes[key] = value
+        }
+        return notes
+    }
+
+    private static func parseNotePart(_ archive: Archive, path: String, tag: String, prefix: String, relationships: [String: String]) -> [String: String] {
+        guard let data = readEntry(archive, path: path),
+              let xml = decodeText(data),
+              let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
+            return [:]
+        }
+        var notes: [String: String] = [:]
+        for note in (try? doc.getElementsByTag(tag).array()) ?? [] {
+            guard let id = try? note.attr("w:id"), !id.isEmpty else { continue }
+            // Skip the auto separator / continuation-separator notes (w:type).
+            if let type = try? note.attr("w:type"), !type.isEmpty { continue }
+            let text = ((try? note.getElementsByTag("w:p").array()) ?? [])
+                .map { renderInline($0, relationships: relationships).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            guard !text.isEmpty else { continue }
+            notes["\(prefix)\(id)"] = text
+        }
+        return notes
+    }
+
+    /// Reference ids (`fn<id>`/`en<id>`) found in the body, de-duplicated —
+    /// footnotes then endnotes, the order their definitions are appended.
+    static func referencedNoteIDs(in body: Element) -> [String] {
+        var ids: [String] = []
+        var seen = Set<String>()
+        func collect(tag: String, prefix: String) {
+            for ref in (try? body.getElementsByTag(tag).array()) ?? [] {
+                guard let id = try? ref.attr("w:id"), !id.isEmpty else { continue }
+                let key = "\(prefix)\(id)"
+                if seen.insert(key).inserted { ids.append(key) }
+            }
+        }
+        collect(tag: "w:footnoteReference", prefix: "fn")
+        collect(tag: "w:endnoteReference", prefix: "en")
+        return ids
     }
 
     // MARK: - Images

@@ -36,6 +36,15 @@ struct ConverterTests {
         #expect(image?.metadata["base64"]?.isEmpty == false)
     }
 
+    @Test("DOCX footnotes are extracted as Markdown footnote definitions")
+    func docxFootnotes() async throws {
+        let md = try await PicoDocsEngine.convert(
+            data: Fixture.data("footnote", "docx"), filename: "footnote.docx"
+        ).markdown()
+        #expect(md.contains("Body text[^fn2]"))                       // inline reference at position
+        #expect(md.contains("[^fn2]: This is the footnote text."))     // definition appended
+    }
+
     @Test("DOCX hyperlink wrapping an image keeps the image (renderer-safe)")
     func docxLinkedImage() async throws {
         let md = try await PicoDocsEngine.convert(
