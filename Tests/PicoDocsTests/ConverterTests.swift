@@ -391,6 +391,41 @@ struct DocumentRendererTests {
         #expect(!html.contains("<section class=\"footnotes\">"))            // no orphaned note section
     }
 
+    @Test("A footnote label defined twice renders only once")
+    func footnoteDuplicateDefinition() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^a]\n\n[^a]: first\n[^a]: second"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.components(separatedBy: "<li id=\"fn-a\">").count == 2)   // exactly one definition
+        #expect(html.contains("<li id=\"fn-a\">first</li>"))                    // first definition wins
+        #expect(!html.contains("second"))
+    }
+
+    @Test("Footnote definitions indented up to three spaces are recognized")
+    func footnoteIndentedDefinition() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^a]\n\n   [^a]: note"),   // 3-space indent
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("Body<sup class=\"footnote-ref\"><a href=\"#fn-a\">1</a></sup>"))
+        #expect(html.contains("<li id=\"fn-a\">note</li>"))
+        #expect(!html.contains("[^a]: note"))   // extracted, not left literal in the body
+    }
+
+    @Test("Body footnote references keep document order ahead of nested ones")
+    func footnoteNestedNumberingOrder() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^a] then[^b]\n\n[^a]: see [^c]\n[^b]: b\n[^c]: c"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        // Body refs are 1 then 2 (not 1 then 3); the note-only ref [^c] is 3.
+        #expect(html.contains("Body<sup class=\"footnote-ref\"><a href=\"#fn-a\">1</a></sup> then<sup class=\"footnote-ref\"><a href=\"#fn-b\">2</a></sup>"))
+        #expect(html.contains("<li id=\"fn-a\">see <sup class=\"footnote-ref\"><a href=\"#fn-c\">3</a></sup></li>"))
+        #expect(html.contains("<li id=\"fn-b\">b</li>"))
+        #expect(html.contains("<li id=\"fn-c\">c</li>"))
+    }
+
     @Test("HTML rendering handles combined and nested emphasis")
     func htmlEmphasis() throws {
         let result = ConverterResult(sections: [

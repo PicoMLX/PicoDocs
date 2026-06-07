@@ -71,9 +71,7 @@ public enum DocumentRenderer {
         var text = out.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
         // Append numbered definitions for referenced notes (parseBlocks would
         // otherwise leak them as plain text); references were numbered above.
-        let referenced = notes
-            .filter { numbers[$0.id] != nil }
-            .sorted { numbers[$0.id]! < numbers[$1.id]! }
+        let referenced = referencedNotes(notes, numbers)
         if !referenced.isEmpty {
             let defs = referenced
                 .map { "[\(numbers[$0.id]!)] " + stripInline($0.text.replacingOccurrences(of: "\n", with: " "), footnoteNumbers: numbers) }
@@ -190,7 +188,9 @@ public enum DocumentRenderer {
                 i += 1
                 continue
             }
-            if !inFence, let (id, first) = parseFootnoteDefinition(lines[i]) {
+            // Allow up to 3 leading spaces before a definition (Markdown block
+            // indentation); 4+ spaces is an indented code block, left in the body.
+            if !inFence, let (id, first) = parseFootnoteDefinition(dropLeadingSpaces(lines[i], max: 3)) {
                 var textLines = [first]
                 i += 1
                 while i < lines.count {                       // indented continuation lines
@@ -222,21 +222,37 @@ public enum DocumentRenderer {
         return (id, text)
     }
 
+    /// Drops up to `max` leading spaces (used to allow Markdown's 1-3 space block
+    /// indentation before a footnote definition without consuming a 4-space code indent).
+    private static func dropLeadingSpaces(_ line: String, max: Int) -> String {
+        var count = 0
+        var index = line.startIndex
+        while index < line.endIndex, line[index] == " ", count < max {
+            count += 1
+            index = line.index(after: index)
+        }
+        return String(line[index...])
+    }
+
     /// Numbers footnotes in the order their `[^id]` reference is actually rendered:
     /// it scans the parsed blocks with code spans and links removed (mirroring the
     /// inline pipeline), so markers inside code, or consumed by a link, aren't
-    /// counted, and recurses into a numbered note's body so notes referenced only
-    /// from other notes are numbered too. Unreferenced definitions get no number
-    /// (and so aren't rendered), matching how Markdown footnote processors treat them.
+    /// counted. Body references are numbered first, then numbered notes' bodies are
+    /// scanned breadth-first, so a note referenced only from another note is still
+    /// numbered while visible body numbers stay in document order. Unreferenced
+    /// definitions get no number (and so aren't rendered), matching how Markdown
+    /// footnote processors treat them.
     private static func footnoteNumbers(blocks: [Block], notes: [(id: String, text: String)]) -> [String: Int] {
         let noteText = Dictionary(notes.map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })
         var numbers: [String: Int] = [:]
         var next = 1
 
-        func number(_ id: String) {
-            guard let text = noteText[id], numbers[id] == nil else { return }
+        var pending: [String] = []   // numbered notes whose bodies still need scanning
+
+        func register(_ id: String) {
+            guard noteText[id] != nil, numbers[id] == nil else { return }
             numbers[id] = next; next += 1
-            scan(text)   // a note referenced here may itself reference further notes
+            pending.append(id)        // defer scanning its body (breadth-first)
         }
         func scan(_ text: String) {
             // Mirror inlineHTML/stripInline: code spans and links become
@@ -246,7 +262,7 @@ public enum DocumentRenderer {
             var cursor = afterLinks.startIndex
             while let open = afterLinks.range(of: "[^", range: cursor..<afterLinks.endIndex) {
                 guard let close = afterLinks.range(of: "]", range: open.upperBound..<afterLinks.endIndex) else { break }
-                number(String(afterLinks[open.upperBound..<close.lowerBound]))
+                register(String(afterLinks[open.upperBound..<close.lowerBound]))
                 cursor = close.upperBound
             }
         }
@@ -261,17 +277,31 @@ public enum DocumentRenderer {
             case .table(let rows): rows.forEach { $0.forEach(scan) }
             }
         }
+        // Number notes referenced only from other notes after all body references
+        // (breadth-first), so visible body numbers stay in document order.
+        var index = 0
+        while index < pending.count {
+            scan(noteText[pending[index]] ?? "")
+            index += 1
+        }
         return numbers
     }
 
     /// The trailing `<section class="footnotes">` list, ordered by footnote number,
     /// each item carrying a backreference to its inline marker.
+    /// Referenced notes, de-duplicated by id (first definition wins), ordered by
+    /// footnote number — so a label defined more than once still renders once.
+    private static func referencedNotes(_ notes: [(id: String, text: String)], _ numbers: [String: Int]) -> [(id: String, text: String)] {
+        var seen = Set<String>()
+        return notes
+            .filter { numbers[$0.id] != nil && seen.insert($0.id).inserted }
+            .sorted { numbers[$0.id]! < numbers[$1.id]! }
+    }
+
     /// The trailing `<section class="footnotes">` list of referenced notes, ordered
     /// by number. Returns "" when no note is referenced.
     private static func footnotesHTML(notes: [(id: String, text: String)], numbers: [String: Int]) -> String {
-        let items = notes
-            .filter { numbers[$0.id] != nil }
-            .sorted { numbers[$0.id]! < numbers[$1.id]! }
+        let items = referencedNotes(notes, numbers)
             .map { note -> String in
                 // Escape the id for attribute context (it comes from document text).
                 // Render the note body with the same numbers so a reference inside a
