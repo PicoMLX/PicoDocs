@@ -66,19 +66,19 @@ enum ReadabilityScorer {
         }
 
         // Scale each candidate by (1 - link density) and pick the best.
-        var topCandidate: Element?
+        var bestCandidate: Element?
         var topScore = -Double.greatestFiniteMagnitude
         for (key, element) in candidates {
             let scaled = (scores[key] ?? 0) * (1 - linkDensity(element))
             scores[key] = scaled
             if scaled > topScore {
                 topScore = scaled
-                topCandidate = element
+                bestCandidate = element
             }
         }
-        guard let article = topCandidate else { return nil }
+        guard let topCandidate = bestCandidate else { return nil }
 
-        appendQualifyingSiblings(to: article, topScore: topScore, scores: scores)
+        let article = assembleArticle(topCandidate, topScore: topScore, scores: scores)
 
         let articleText = text(article)
         guard articleText.count >= minArticleTextLength else { return nil }
@@ -121,21 +121,29 @@ enum ReadabilityScorer {
         "and", "article", "body", "column", "content", "main", "shadow",
     ]
 
-    private static func stripUnlikelyNodes(in body: Element) {
-        for element in descendants(of: body) {
-            let tag = element.tagName().lowercased()
-            if tag == "body" || tag == "a" { continue }
-            if stripTags.contains(tag) {
-                try? element.remove()
-                continue
+    /// Recursively removes never-content tags and unlikely-candidate nodes,
+    /// pruning whole subtrees in place. We never recurse into a node we remove,
+    /// so discarded subtrees aren't processed (cheaper than flattening the whole
+    /// tree first, then revisiting children of already-removed ancestors).
+    private static func stripUnlikelyNodes(in element: Element) {
+        for child in element.children().array() {
+            let tag = child.tagName().lowercased()
+            // Never strip anchors themselves, but still descend into kept nodes.
+            if tag != "a" {
+                if stripTags.contains(tag) {
+                    try? child.remove()
+                    continue
+                }
+                let signature = (attr(child, "class") + " " + attr(child, "id") + " " + attr(child, "role"))
+                    .lowercased()
+                if !signature.isEmpty,
+                   unlikely.contains(where: { signature.contains($0) }),
+                   !maybe.contains(where: { signature.contains($0) }) {
+                    try? child.remove()
+                    continue
+                }
             }
-            let signature = (attr(element, "class") + " " + attr(element, "id") + " " + attr(element, "role"))
-                .lowercased()
-            guard !signature.isEmpty else { continue }
-            if unlikely.contains(where: { signature.contains($0) }),
-               !maybe.contains(where: { signature.contains($0) }) {
-                try? element.remove()
-            }
+            stripUnlikelyNodes(in: child)
         }
     }
 
@@ -216,35 +224,45 @@ enum ReadabilityScorer {
 
     // MARK: - Sibling aggregation
 
-    /// Pull in sibling nodes that also look like content (Readability merges the
-    /// top candidate's qualifying siblings into the article).
-    private static func appendQualifyingSiblings(to article: Element, topScore: Double, scores: [ObjectIdentifier: Double]) {
-        guard let parent = article.parent() else { return }
+    /// Assembles the final article subtree. Readability merges the top candidate
+    /// with its qualifying siblings; to preserve reading order we keep them in
+    /// place and instead prune only the *non*-qualifying siblings from the shared
+    /// parent, returning that parent. Because nothing is moved, original DOM order
+    /// and per-node base URIs (link resolution) are preserved — the same ordered
+    /// set as Readability's "wrap siblings in a new container", without allocating
+    /// a node or relying on element-construction APIs.
+    private static func assembleArticle(_ topCandidate: Element, topScore: Double, scores: [ObjectIdentifier: Double]) -> Element {
+        // For a body-level candidate there are no meaningful siblings to merge
+        // (its only sibling would be <head>); return it directly.
+        guard topCandidate.tagName().lowercased() != "body", let parent = topCandidate.parent() else {
+            return topCandidate
+        }
         let threshold = max(10.0, topScore * 0.2)
 
         for sibling in parent.children().array() {
-            if sibling === article { continue }
-
-            var qualifies = false
-            if let siblingScore = scores[ObjectIdentifier(sibling)], siblingScore >= threshold {
-                qualifies = true
-            } else if sibling.tagName().lowercased() == "p" {
-                let siblingText = text(sibling)
-                let density = linkDensity(sibling)
-                if siblingText.count > 80, density < 0.25 {
-                    qualifies = true
-                } else if siblingText.count > 0, density == 0,
-                          siblingText.range(of: #"\.( |$)"#, options: .regularExpression) != nil {
-                    qualifies = true
-                }
-            }
-
-            if qualifies {
-                // Moves `sibling` under `article`; safe because we iterate a
-                // snapshot array, and the owner document (base URI) is unchanged.
-                _ = try? article.appendChild(sibling)
+            if sibling === topCandidate { continue }
+            if !siblingQualifies(sibling, threshold: threshold, scores: scores) {
+                try? sibling.remove()
             }
         }
+        return parent
+    }
+
+    /// Whether a sibling of the top candidate looks like article content worth
+    /// keeping (mirrors Readability's sibling-merge test).
+    private static func siblingQualifies(_ sibling: Element, threshold: Double, scores: [ObjectIdentifier: Double]) -> Bool {
+        if let siblingScore = scores[ObjectIdentifier(sibling)], siblingScore >= threshold {
+            return true
+        }
+        guard sibling.tagName().lowercased() == "p" else { return false }
+        let siblingText = text(sibling)
+        let density = linkDensity(sibling)
+        if siblingText.count > 80, density < 0.25 { return true }
+        if siblingText.count > 0, density == 0,
+           siblingText.range(of: #"\.( |$)"#, options: .regularExpression) != nil {
+            return true
+        }
+        return false
     }
 
     // MARK: - Metadata

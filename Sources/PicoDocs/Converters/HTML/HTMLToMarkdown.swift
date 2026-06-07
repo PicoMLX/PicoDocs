@@ -28,9 +28,13 @@ enum HTMLToMarkdown {
     /// Readability scorer selected) to Markdown. Relative links resolve against
     /// the element's owner-document base URI. `Document` is an `Element`, so the
     /// whole document can be passed too.
+    ///
+    /// Renders the element *itself*, not just its children, so a semantic root
+    /// (e.g. a `<table>` chosen as the Readability top candidate) goes through
+    /// the matching block handler rather than having its cells concatenated.
     static func convert(element: Element) -> String {
         var out = ""
-        renderChildren(of: element, into: &out)
+        render(element, into: &out)
         return normalizeBlankLines(out).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
