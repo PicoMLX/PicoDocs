@@ -41,11 +41,12 @@ public enum DocumentRenderer {
 
     private static func renderPlaintext(_ result: ConverterResult) -> String {
         let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
-        let numbers = footnoteNumbers(in: bodyMarkdown, notes: notes)
+        let parsed = parseBlocks(bodyMarkdown)
+        let numbers = footnoteNumbers(blocks: parsed, notes: notes)
         var out: [String] = []
         // Inline `[^id]` references become `[N]` inside `stripInline` (code spans
         // protected; code blocks keep literal markers).
-        for block in parseBlocks(bodyMarkdown) {
+        for block in parsed {
             switch block {
             case .heading(_, let text):
                 out.append(stripInline(text, footnoteNumbers: numbers))
@@ -68,12 +69,14 @@ public enum DocumentRenderer {
             }
         }
         var text = out.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        // Append the numbered definitions (parseBlocks would otherwise leak them
-        // as plain text); the inline `[^id]` references were already numbered above.
-        if !notes.isEmpty {
-            let defs = notes
-                .sorted { (numbers[$0.id] ?? .max) < (numbers[$1.id] ?? .max) }
-                .map { "[\(numbers[$0.id] ?? 0)] " + stripInline($0.text.replacingOccurrences(of: "\n", with: " ")) }
+        // Append numbered definitions for referenced notes (parseBlocks would
+        // otherwise leak them as plain text); references were numbered above.
+        let referenced = notes
+            .filter { numbers[$0.id] != nil }
+            .sorted { numbers[$0.id]! < numbers[$1.id]! }
+        if !referenced.isEmpty {
+            let defs = referenced
+                .map { "[\(numbers[$0.id]!)] " + stripInline($0.text.replacingOccurrences(of: "\n", with: " "), footnoteNumbers: numbers) }
                 .joined(separator: "\n")
             text += "\n\n" + defs
         }
@@ -84,12 +87,13 @@ public enum DocumentRenderer {
 
     private static func renderHTML(_ result: ConverterResult) -> String {
         let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
-        let numbers = footnoteNumbers(in: bodyMarkdown, notes: notes)
+        let parsed = parseBlocks(bodyMarkdown)
+        let numbers = footnoteNumbers(blocks: parsed, notes: notes)
         var blocks: [String] = []
         // Inline `[^id]` references are turned into superscript links inside
         // `inlineHTML` (so code spans are protected and code blocks, which never
         // reach `inlineHTML`, keep literal markers).
-        for block in parseBlocks(bodyMarkdown) {
+        for block in parsed {
             switch block {
             case .heading(let level, let text):
                 blocks.append("<h\(level)>\(inlineHTML(text, footnoteNumbers: numbers))</h\(level)>")
@@ -112,9 +116,8 @@ public enum DocumentRenderer {
             }
         }
         var bodyHTML = blocks.joined(separator: "\n")
-        if !notes.isEmpty {
-            bodyHTML += "\n" + footnotesHTML(notes: notes, numbers: numbers)
-        }
+        let footnotes = footnotesHTML(notes: notes, numbers: numbers)
+        if !footnotes.isEmpty { bodyHTML += "\n" + footnotes }
         let title = result.title.map { "<title>\(escapeHTML($0))</title>\n" } ?? ""
         var html = """
         <!DOCTYPE html>
@@ -219,35 +222,67 @@ public enum DocumentRenderer {
         return (id, text)
     }
 
-    /// Numbers footnotes by the order their `[^id]` reference first appears in the
-    /// body (unreferenced definitions follow, in definition order).
-    private static func footnoteNumbers(in body: String, notes: [(id: String, text: String)]) -> [String: Int] {
+    /// Numbers footnotes in the order their `[^id]` reference is actually rendered:
+    /// it scans the parsed blocks with code spans and links removed (mirroring the
+    /// inline pipeline), so markers inside code, or consumed by a link, aren't
+    /// counted, and recurses into a numbered note's body so notes referenced only
+    /// from other notes are numbered too. Unreferenced definitions get no number
+    /// (and so aren't rendered), matching how Markdown footnote processors treat them.
+    private static func footnoteNumbers(blocks: [Block], notes: [(id: String, text: String)]) -> [String: Int] {
+        let noteText = Dictionary(notes.map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })
         var numbers: [String: Int] = [:]
         var next = 1
-        let referenced = notes.compactMap { note -> (id: String, pos: Int)? in
-            guard let range = body.range(of: "[^\(note.id)]") else { return nil }
-            return (note.id, body.distance(from: body.startIndex, to: range.lowerBound))
-        }.sorted { $0.pos < $1.pos }
-        for item in referenced where numbers[item.id] == nil { numbers[item.id] = next; next += 1 }
-        for note in notes where numbers[note.id] == nil { numbers[note.id] = next; next += 1 }
+
+        func number(_ id: String) {
+            guard let text = noteText[id], numbers[id] == nil else { return }
+            numbers[id] = next; next += 1
+            scan(text)   // a note referenced here may itself reference further notes
+        }
+        func scan(_ text: String) {
+            // Mirror inlineHTML/stripInline: code spans and links become
+            // placeholders, so a `[^id]` inside them isn't treated as a reference.
+            let (afterCode, _) = extractCodeSpans(text)
+            let (afterLinks, _) = extractLinks(afterCode)
+            var cursor = afterLinks.startIndex
+            while let open = afterLinks.range(of: "[^", range: cursor..<afterLinks.endIndex) {
+                guard let close = afterLinks.range(of: "]", range: open.upperBound..<afterLinks.endIndex) else { break }
+                number(String(afterLinks[open.upperBound..<close.lowerBound]))
+                cursor = close.upperBound
+            }
+        }
+
+        for block in blocks {
+            switch block {
+            case .code, .rule: continue        // code blocks never render footnote refs
+            case .heading(_, let text): scan(text)
+            case .paragraph(let text): scan(text)
+            case .blockquote(let lines): lines.forEach(scan)
+            case .list(_, let items): items.forEach(scan)
+            case .table(let rows): rows.forEach { $0.forEach(scan) }
+            }
+        }
         return numbers
     }
 
     /// The trailing `<section class="footnotes">` list, ordered by footnote number,
     /// each item carrying a backreference to its inline marker.
+    /// The trailing `<section class="footnotes">` list of referenced notes, ordered
+    /// by number. Returns "" when no note is referenced.
     private static func footnotesHTML(notes: [(id: String, text: String)], numbers: [String: Int]) -> String {
         let items = notes
-            .sorted { (numbers[$0.id] ?? .max) < (numbers[$1.id] ?? .max) }
+            .filter { numbers[$0.id] != nil }
+            .sorted { numbers[$0.id]! < numbers[$1.id]! }
             .map { note -> String in
-                // The id comes from document text, so escape it for attribute
-                // context. No backreference link: inline references intentionally
-                // omit a per-occurrence `id`, so there is no unique anchor to
-                // return to (this keeps anchor ids unique under repeated refs).
-                let inner = inlineHTML(note.text.replacingOccurrences(of: "\n", with: " "))
+                // Escape the id for attribute context (it comes from document text).
+                // Render the note body with the same numbers so a reference inside a
+                // note is rendered too. No backreference link: references omit a
+                // per-occurrence `id`, so there's no unique anchor to return to
+                // (which keeps element ids unique under repeated references).
+                let inner = inlineHTML(note.text.replacingOccurrences(of: "\n", with: " "), footnoteNumbers: numbers)
                 return "<li id=\"fn-\(escapeHTML(note.id))\">\(inner)</li>"
             }
             .joined(separator: "\n")
-        return "<section class=\"footnotes\">\n<hr>\n<ol>\n\(items)\n</ol>\n</section>"
+        return items.isEmpty ? "" : "<section class=\"footnotes\">\n<hr>\n<ol>\n\(items)\n</ol>\n</section>"
     }
 
     // MARK: - XML

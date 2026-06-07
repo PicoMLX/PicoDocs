@@ -358,6 +358,39 @@ struct DocumentRendererTests {
         #expect(html.contains("<li id=\"fn-fn1\">note</li>"))
     }
 
+    @Test("Footnote numbering ignores code markers and drops unreferenced notes")
+    func footnoteNumberingIgnoresCode() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Intro `[^a]` then[^b].\n\n[^a]: Note A\n[^b]: Note B"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("then<sup class=\"footnote-ref\"><a href=\"#fn-b\">1</a></sup>"))  // b is 1 (code `[^a]` ignored)
+        #expect(html.contains("<code>[^a]</code>"))            // code marker preserved
+        #expect(html.contains("<li id=\"fn-b\">Note B</li>"))   // b rendered
+        #expect(!html.contains("Note A"))                       // a referenced only in code -> dropped
+    }
+
+    @Test("Footnote references inside note bodies are rendered")
+    func footnoteNestedReferenceHTML() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^a]\n\n[^a]: see [^b]\n[^b]: other"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("Body<sup class=\"footnote-ref\"><a href=\"#fn-a\">1</a></sup>"))
+        #expect(html.contains("<li id=\"fn-a\">see <sup class=\"footnote-ref\"><a href=\"#fn-b\">2</a></sup></li>"))
+        #expect(html.contains("<li id=\"fn-b\">other</li>"))
+    }
+
+    @Test("A footnote token consumed by a link is not orphaned")
+    func footnoteConsumedByLink() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "[see[^fn1](https://e.com)\n\n[^fn1]: note"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<a href=\"https://e.com\">see[^fn1</a>"))   // link wins; label stays literal
+        #expect(!html.contains("<section class=\"footnotes\">"))            // no orphaned note section
+    }
+
     @Test("HTML rendering handles combined and nested emphasis")
     func htmlEmphasis() throws {
         let result = ConverterResult(sections: [
