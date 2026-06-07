@@ -117,9 +117,13 @@ enum ReadabilityScorer {
         "newsletter", "promo", "subscribe", "signup", "sign-up", "paywall",
     ]
 
-    /// Substrings that keep a node even if it also matched `unlikely`.
+    /// Substrings that keep a node even if it also matched `unlikely`. Includes
+    /// the positive article signals (`post`/`entry`/`hentry`) so common article
+    /// header/lead wrappers like `entry-header` or `post-header` survive (they
+    /// match `unlikely` via "header" but carry the visible title/byline/lead).
     private static let maybe: [String] = [
         "and", "article", "body", "column", "content", "main", "shadow",
+        "post", "entry", "hentry", "h-entry",
     ]
 
     /// Recursively removes never-content tags and unlikely-candidate nodes,
@@ -293,26 +297,26 @@ enum ReadabilityScorer {
         return nil
     }
 
-    /// Tags that carry article structure/content on their own, even without a
-    /// score — so pruning around the top candidate (especially when `<body>`
-    /// wins a flat layout) keeps headings, lists, tables, quotes and figures
-    /// rather than dropping them and losing structure.
-    private static let structuralContentTags: Set<String> = [
-        "h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "dl", "blockquote",
-        "pre", "table", "figure", "figcaption", "article", "section", "main",
-        "header", "hr",
+    /// Tags safe to preserve unconditionally during pruning: headings and rules
+    /// are short and structural with no boilerplate risk — unlike `<ul>`/
+    /// `<section>`/`<table>`/`<header>` wrappers, which may be navigation or
+    /// related-link blocks and so must still pass the link-density check.
+    private static let unconditionalKeepTags: Set<String> = [
+        "h1", "h2", "h3", "h4", "h5", "h6", "hr",
     ]
 
     /// Whether an element should be kept when assembling the article (the top
     /// candidate's qualifying siblings, or — when `<body>` itself wins — body's
-    /// own children). Keeps scored candidates, article-structure tags, and any
-    /// text-bearing block (e.g. a leaf `<div>`/`<pre>`) with low link density;
-    /// drops residual navigation/boilerplate (high link density) and empties.
+    /// own children). Headings/rules are always kept and a strongly-scored
+    /// candidate is kept; everything else — including structural tags like
+    /// `<ul>`/`<section>`/`<table>`/`<header>` — must read like content (real
+    /// text, low link density), so navigation and related-link blocks are dropped
+    /// rather than kept by tag alone.
     private static func keepAsArticleContent(_ element: Element, threshold: Double, scores: [ObjectIdentifier: Double]) -> Bool {
-        if let score = scores[ObjectIdentifier(element)], score >= threshold {
+        if unconditionalKeepTags.contains(element.tagName().lowercased()) {
             return true
         }
-        if structuralContentTags.contains(element.tagName().lowercased()) {
+        if let score = scores[ObjectIdentifier(element)], score >= threshold {
             return true
         }
         let elementText = text(element)
