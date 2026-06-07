@@ -111,6 +111,15 @@ struct ConverterTests {
         #expect(md.contains("\u{0430}\u{0431}"))
     }
 
+    @Test("RTF \\line is a hard break and \\page separates content")
+    func rtfLineAndPageBreaks() async throws {
+        let rtf = "{\\rtf1\\ansi Line one\\line Line two.\\page Next page.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "l.rtf").markdown()
+        #expect(md.contains("Line one  \nLine two."))   // hard break preserved
+        #expect(md.contains("Next page."))
+        #expect(!md.contains("Line two.Next page."))     // \page kept them separate
+    }
+
     @Test("RTF \\binN binary payload doesn't corrupt brace parsing")
     func rtfBinaryPayload() async throws {
         // The byte after \bin1 is a '}' that must not close the \pict group.

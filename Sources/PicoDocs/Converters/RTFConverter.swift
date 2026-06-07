@@ -117,10 +117,10 @@ public struct RTFConverter: DocumentConverter {
                     if i < n, chars[i] == " " { i += 1 }
 
                     switch word {
-                    case "par", "row", "sect":
+                    case "par", "row", "sect", "page":
                         if !ignore { flushParagraph() }   // a \par inside a skipped destination isn't a body break
                     case "line":
-                        appendText("\n")
+                        appendText("  \n")                // Markdown hard break (matches the DOCX w:br path)
                     case "tab", "cell":
                         appendText("\t")
                     case "emdash": appendText("\u{2014}")
@@ -236,6 +236,11 @@ public struct RTFConverter: DocumentConverter {
     /// (`\ansicpgN`, defaulting to Windows-1252 for `\ansi`) — so bytes 0x80–0x9F
     /// become the right punctuation/letters rather than C1 control characters.
     /// Falls back to Windows-1252, then Latin-1, for undecodable bytes.
+    ///
+    /// Each `\'hh` is decoded on its own. Multibyte ANSI code pages (e.g. 932
+    /// Shift-JIS) that split one character across consecutive `\'hh` escapes are
+    /// not reassembled here — a deliberately deferred legacy niche, since modern
+    /// RTF emits non-ASCII (including CJK) as `\uN`, which is handled in full.
     private static func decodeByte(_ byte: UInt8, encoding: String.Encoding) -> String {
         if let decoded = String(bytes: [byte], encoding: encoding), !decoded.isEmpty {
             return decoded
