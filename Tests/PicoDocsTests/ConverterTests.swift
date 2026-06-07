@@ -166,11 +166,59 @@ struct DocumentRendererTests {
         #expect(rendered.contains("second"))
     }
 
-    @Test("Unimplemented formats throw rather than leak Markdown")
-    func unsupportedFormatThrows() {
-        let result = ConverterResult(sections: [DocumentSection(kind: .body, markdown: "x")])
-        #expect(throws: PicoDocsError.self) {
-            _ = try DocumentRenderer.render(result, to: .html)
-        }
+    @Test("HTML rendering converts headings, emphasis, links, and tables")
+    func html() throws {
+        let result = ConverterResult(title: "Doc", sections: [
+            DocumentSection(kind: .body, markdown: "# Title\n\nHello **world** and a [link](https://example.com).\n\n| A | B |\n| --- | --- |\n| 1 | 2 |"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<h1>Title</h1>"))
+        #expect(html.contains("<strong>world</strong>"))
+        #expect(html.contains("<a href=\"https://example.com\">link</a>"))
+        #expect(html.contains("<th>A</th>"))
+        #expect(html.contains("<td>1</td>"))
+    }
+
+    @Test("HTML rendering escapes special characters")
+    func htmlEscaping() throws {
+        let result = ConverterResult(sections: [DocumentSection(kind: .body, markdown: "1 < 2 & 3 > 0")])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("1 &lt; 2 &amp; 3 &gt; 0"))
+    }
+
+    @Test("Plaintext rendering strips Markdown syntax")
+    func plaintext() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "# Heading\n\nHello **world** with a [link](https://example.com)."),
+        ])
+        let text = try DocumentRenderer.render(result, to: .plaintext)
+        #expect(text.contains("Heading"))
+        #expect(text.contains("Hello world with a link."))
+        #expect(!text.contains("**"))
+        #expect(!text.contains("#"))
+        #expect(!text.contains("]("))
+    }
+
+    @Test("CSV rendering turns Markdown tables into CSV rows")
+    func csv() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .sheet, markdown: "| Name | Score |\n| --- | --- |\n| Alice | 42 |\n| Bob, Jr | 7 |"),
+        ])
+        let csv = try DocumentRenderer.render(result, to: .csv)
+        #expect(csv.contains("Name,Score"))
+        #expect(csv.contains("Alice,42"))
+        #expect(csv.contains("\"Bob, Jr\",7"))   // a field with a comma is quoted
+    }
+
+    @Test("XML rendering wraps sections with escaped content")
+    func xml() throws {
+        let result = ConverterResult(title: "T & U", sections: [
+            DocumentSection(title: "S", kind: .body, markdown: "a < b"),
+        ])
+        let xml = try DocumentRenderer.render(result, to: .xml)
+        #expect(xml.contains("<?xml version=\"1.0\""))
+        #expect(xml.contains("title=\"T &amp; U\""))
+        #expect(xml.contains("<section kind=\"body\" title=\"S\">"))
+        #expect(xml.contains("a &lt; b"))
     }
 }
