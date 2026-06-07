@@ -310,16 +310,50 @@ public struct WordConverter: DocumentConverter {
     /// keyed by reference id (`fn<id>` / `en<id>`), skipping the auto separator
     /// and continuation notes.
     static func parseNotes(_ archive: Archive) -> [String: String] {
-        // Footnotes/endnotes have their own relationship parts, so inline
-        // hyperlinks/images inside notes resolve against those, not the body's.
-        let footnoteRels = parseRelationships(archive, path: "word/_rels/footnotes.xml.rels")
-        var notes = parseNotePart(archive, path: "word/footnotes.xml", tag: "w:footnote", prefix: "fn", relationships: footnoteRels)
-        let endnoteRels = parseRelationships(archive, path: "word/_rels/endnotes.xml.rels")
-        for (key, value) in parseNotePart(archive, path: "word/endnotes.xml", tag: "w:endnote", prefix: "en", relationships: endnoteRels) {
-            notes[key] = value
+        var notes: [String: String] = [:]
+        // Resolve each note part from its document relationship Target (falling
+        // back to the standard name), then render it against that part's own
+        // relationships so inline hyperlinks/images inside notes resolve correctly.
+        for (typeSuffix, fallback, tag, prefix) in [
+            ("/footnotes", "word/footnotes.xml", "w:footnote", "fn"),
+            ("/endnotes", "word/endnotes.xml", "w:endnote", "en"),
+        ] {
+            let part = relationshipTarget(archive, typeSuffix: typeSuffix).map(resolvePartPath) ?? fallback
+            let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part))
+            for (key, value) in parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships) {
+                notes[key] = value
+            }
         }
         return notes
     }
+
+    /// The Target of the first `document.xml.rels` relationship whose Type ends
+    /// with `typeSuffix` (e.g. "/footnotes"); relative to `word/`.
+    private static func relationshipTarget(_ archive: Archive, typeSuffix: String) -> String? {
+        guard let data = readEntry(archive, path: "word/_rels/document.xml.rels"),
+              let xml = decodeText(data),
+              let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
+            return nil
+        }
+        for rel in (try? doc.getElementsByTag("Relationship").array()) ?? [] {
+            guard let type = try? rel.attr("Type"), type.hasSuffix(typeSuffix),
+                  let target = try? rel.attr("Target"), !target.isEmpty else { continue }
+            return target
+        }
+        return nil
+    }
+
+    /// The `_rels` path for a part (e.g. "word/footnotes.xml" -> "word/_rels/footnotes.xml.rels").
+    private static func relationshipsPath(forPart part: String) -> String {
+        let directory = (part as NSString).deletingLastPathComponent
+        let file = (part as NSString).lastPathComponent
+        return directory.isEmpty ? "_rels/\(file).rels" : "\(directory)/_rels/\(file).rels"
+    }
+
+    /// Note types that are structural auto-separators, not real referenced notes.
+    private static let separatorNoteTypes: Set<String> = [
+        "separator", "continuationSeparator", "continuationNotice",
+    ]
 
     private static func parseNotePart(_ archive: Archive, path: String, tag: String, prefix: String, relationships: [String: String]) -> [String: String] {
         guard let data = readEntry(archive, path: path),
@@ -330,8 +364,9 @@ public struct WordConverter: DocumentConverter {
         var notes: [String: String] = [:]
         for note in (try? doc.getElementsByTag(tag).array()) ?? [] {
             guard let id = try? note.attr("w:id"), !id.isEmpty else { continue }
-            // Skip the auto separator / continuation-separator notes (w:type).
-            if let type = try? note.attr("w:type"), !type.isEmpty { continue }
+            // Skip only the auto separator/continuation notes; keep ordinary
+            // referenced notes even when explicitly typed "normal".
+            if let type = try? note.attr("w:type"), separatorNoteTypes.contains(type) { continue }
             let text = ((try? note.getElementsByTag("w:p").array()) ?? [])
                 .map { renderInline($0, relationships: relationships).trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
@@ -408,7 +443,7 @@ public struct WordConverter: DocumentConverter {
             if relId.isEmpty { relId = (try? element.attr("r:id")) ?? "" }
             guard !relId.isEmpty, let target = relationships[relId], !target.isEmpty else { continue }
 
-            let mediaPath = resolveMediaPath(target)
+            let mediaPath = resolvePartPath(target)
             guard !seen.contains(mediaPath) else { continue }
             seen.insert(mediaPath)
 
@@ -428,10 +463,11 @@ public struct WordConverter: DocumentConverter {
         return sections
     }
 
-    /// Resolves a `document.xml.rels` image Target (relative to `word/`) to its
-    /// path inside the archive. Normalizes segment-by-segment (single pass), so
-    /// `.`/`..` are collapsed without any risk of looping.
-    private static func resolveMediaPath(_ target: String) -> String {
+    /// Resolves a relationship Target (relative to `word/`, or package-absolute
+    /// with a leading "/") to its path inside the archive — used for image media
+    /// and note parts. Normalizes segment-by-segment (single pass), so `.`/`..`
+    /// are collapsed without any risk of looping.
+    private static func resolvePartPath(_ target: String) -> String {
         // A leading "/" is package-absolute; otherwise the target is relative to
         // the part's folder (`word/`).
         let combined = target.hasPrefix("/") ? String(target.dropFirst()) : "word/\(target)"
