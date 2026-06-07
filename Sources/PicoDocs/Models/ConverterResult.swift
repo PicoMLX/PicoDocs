@@ -36,7 +36,11 @@ public struct ConverterResult: Sendable, Equatable, Codable {
     }
 
     /// Convenience: the whole document as a single Markdown string.
+    ///
+    /// `.image` sections are excluded: they're extracted byte carriers (their
+    /// data lives in `metadata`) and are already referenced inline by the body,
+    /// so including them here would render a duplicate trailing image.
     public func markdown() -> String {
-        sections.map(\.markdown).joined(separator: "\n\n")
+        sections.lazy.filter { $0.kind != .image }.map(\.markdown).joined(separator: "\n\n")
     }
 }

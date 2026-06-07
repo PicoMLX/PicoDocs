@@ -135,22 +135,38 @@ public struct WordConverter: DocumentConverter {
     }
 
     static func renderRun(_ run: Element, relationships: [String: String]) -> String {
-        var text = ""
-        var images = ""
+        let properties = try? run.getElementsByTag("w:rPr").first()
+        let bold = isFormattingEnabled(properties, tag: "w:b")
+        let italic = isFormattingEnabled(properties, tag: "w:i")
+
+        var out = ""
+        var textBuffer = ""
+        // Emit accumulated text (with the run's emphasis) before the next image,
+        // so images keep their position in runs that interleave text and drawings.
+        func flushText() {
+            guard !textBuffer.isEmpty else { return }
+            var fragment = textBuffer
+            if bold { fragment = "**\(fragment)**" }
+            if italic { fragment = "*\(fragment)*" }
+            out += fragment
+            textBuffer = ""
+        }
+
         for node in run.children().array() {
             switch node.tagName().lowercased() {
             case "w:t":
                 // Read raw text nodes to preserve significant whitespace
                 // (w:t may carry xml:space="preserve").
                 for child in node.getChildNodes() {
-                    if let textNode = child as? TextNode { text += textNode.getWholeText() }
+                    if let textNode = child as? TextNode { textBuffer += textNode.getWholeText() }
                 }
             case "w:tab":
-                text += "\t"
+                textBuffer += "\t"
             case "w:br", "w:cr":
-                text += "  \n"
+                textBuffer += "  \n"
             case "w:drawing", "w:pict":
-                images += imageMarkdown(in: node, relationships: relationships)
+                flushText()
+                out += imageMarkdown(in: node, relationships: relationships)   // not wrapped in emphasis
             default:
                 // NOTE: text-box content (w:txbxContent) and footnote/endnote
                 // references (whose text lives in word/footnotes.xml /
@@ -158,15 +174,8 @@ public struct WordConverter: DocumentConverter {
                 continue
             }
         }
-
-        var result = text
-        if !result.isEmpty {
-            let properties = try? run.getElementsByTag("w:rPr").first()
-            if isFormattingEnabled(properties, tag: "w:b") { result = "**\(result)**" }
-            if isFormattingEnabled(properties, tag: "w:i") { result = "*\(result)*" }
-        }
-        // Image references carry their own Markdown and aren't wrapped in emphasis.
-        return result + images
+        flushText()
+        return out
     }
 
     /// True when a run-property toggle (`w:b`/`w:i`) is present and not explicitly

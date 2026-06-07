@@ -28,6 +28,8 @@ struct ConverterTests {
         let md = result.markdown()
         #expect(md.contains("Before image."))
         #expect(md.contains("![A red dot](image1.png)"))   // alt text + filename, inline at position
+        // Referenced once: the .image section's bytes don't render a duplicate.
+        #expect(md.components(separatedBy: "image1.png").count == 2)
         let image = result.sections.first { $0.kind == .image }
         #expect(image?.sourcePath == "word/media/image1.png")
         #expect(image?.metadata["mimeType"] == "image/png")
