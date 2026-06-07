@@ -22,6 +22,18 @@ struct ConverterTests {
         #expect(md.contains("Hello from a Word document."))
     }
 
+    @Test("DOCX extracts embedded images: inline reference + an image section with bytes")
+    func docxImages() async throws {
+        let result = try await PicoDocsEngine.convert(data: Fixture.data("image", "docx"), filename: "image.docx")
+        let md = result.markdown()
+        #expect(md.contains("Before image."))
+        #expect(md.contains("![A red dot](image1.png)"))   // alt text + filename, inline at position
+        let image = result.sections.first { $0.kind == .image }
+        #expect(image?.sourcePath == "word/media/image1.png")
+        #expect(image?.metadata["mimeType"] == "image/png")
+        #expect(image?.metadata["base64"]?.isEmpty == false)
+    }
+
     @Test("XLSX converts each sheet's cells to Markdown")
     func xlsx() async throws {
         let md = try await PicoDocsEngine.convert(data: Fixture.data("sample", "xlsx"), filename: "sample.xlsx").markdown()

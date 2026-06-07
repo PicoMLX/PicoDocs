@@ -37,8 +37,18 @@ public struct WordConverter: DocumentConverter {
 
         let blocks = try Self.renderBlocks(in: body, relationships: relationships)
         let markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !markdown.isEmpty else { throw PicoDocsError.emptyDocument }
-        return ConverterResult(title: info.filename, sections: [DocumentSection(kind: .body, markdown: markdown)])
+
+        // Extract embedded images as separate .image sections (bytes preserved
+        // for downstream OCR/captioning); the body Markdown references them inline.
+        let imageSections = Self.extractImages(from: body, relationships: relationships, archive: archive)
+
+        var sections: [DocumentSection] = []
+        if !markdown.isEmpty {
+            sections.append(DocumentSection(kind: .body, markdown: markdown))
+        }
+        sections.append(contentsOf: imageSections)
+        guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
+        return ConverterResult(title: info.filename, sections: sections)
     }
 
     // MARK: - Blocks
@@ -107,7 +117,7 @@ public struct WordConverter: DocumentConverter {
             case "w:ppr":
                 continue // paragraph properties, not content
             case "w:r":
-                out += renderRun(child)
+                out += renderRun(child, relationships: relationships)
             case "w:hyperlink":
                 let inner = renderInline(child, relationships: relationships)
                 let relId = (try? child.attr("r:id")) ?? ""
@@ -124,8 +134,9 @@ public struct WordConverter: DocumentConverter {
         return out
     }
 
-    static func renderRun(_ run: Element) -> String {
+    static func renderRun(_ run: Element, relationships: [String: String]) -> String {
         var text = ""
+        var images = ""
         for node in run.children().array() {
             switch node.tagName().lowercased() {
             case "w:t":
@@ -138,21 +149,24 @@ public struct WordConverter: DocumentConverter {
                 text += "\t"
             case "w:br", "w:cr":
                 text += "  \n"
+            case "w:drawing", "w:pict":
+                images += imageMarkdown(in: node, relationships: relationships)
             default:
-                // NOTE: text-box content (w:drawing/w:pict -> w:txbxContent),
-                // embedded images, and footnote/endnote references (whose text
-                // lives in word/footnotes.xml / endnotes.xml) aren't extracted
-                // yet — later enhancements.
+                // NOTE: text-box content (w:txbxContent) and footnote/endnote
+                // references (whose text lives in word/footnotes.xml /
+                // endnotes.xml) aren't extracted yet — later enhancements.
                 continue
             }
         }
-        guard !text.isEmpty else { return "" }
 
-        let properties = try? run.getElementsByTag("w:rPr").first()
         var result = text
-        if isFormattingEnabled(properties, tag: "w:b") { result = "**\(result)**" }
-        if isFormattingEnabled(properties, tag: "w:i") { result = "*\(result)*" }
-        return result
+        if !result.isEmpty {
+            let properties = try? run.getElementsByTag("w:rPr").first()
+            if isFormattingEnabled(properties, tag: "w:b") { result = "**\(result)**" }
+            if isFormattingEnabled(properties, tag: "w:i") { result = "*\(result)*" }
+        }
+        // Image references carry their own Markdown and aren't wrapped in emphasis.
+        return result + images
     }
 
     /// True when a run-property toggle (`w:b`/`w:i`) is present and not explicitly
@@ -242,6 +256,96 @@ public struct WordConverter: DocumentConverter {
             map[id] = target
         }
         return map
+    }
+
+    // MARK: - Images
+
+    /// Inline Markdown image reference for a `w:drawing`/`w:pict`, using the
+    /// drawing's alt text (`descr`/`name`) and the embedded media's filename.
+    static func imageMarkdown(in drawing: Element, relationships: [String: String]) -> String {
+        guard let target = imageTarget(in: drawing, relationships: relationships) else { return "" }
+        let filename = (target as NSString).lastPathComponent
+        return "![\(escapeLinkLabel(imageAltText(in: drawing)))](\(escapeLinkDestination(filename)))"
+    }
+
+    /// The relationship Target (e.g. "media/image1.png") an image references via
+    /// `a:blip/@r:embed` (DrawingML) or `v:imagedata/@r:id` (legacy VML).
+    private static func imageTarget(in drawing: Element, relationships: [String: String]) -> String? {
+        var relId = (try? drawing.getElementsByTag("a:blip").first()?.attr("r:embed")) ?? ""
+        if relId.isEmpty { relId = (try? drawing.getElementsByTag("v:imagedata").first()?.attr("r:id")) ?? "" }
+        guard !relId.isEmpty, let target = relationships[relId], !target.isEmpty else { return nil }
+        return target
+    }
+
+    /// Alt text for an image: `descr` then `name` (from `wp:docPr`, then
+    /// `pic:cNvPr`); falls back to "image".
+    private static func imageAltText(in drawing: Element) -> String {
+        for tag in ["wp:docPr", "pic:cNvPr"] {
+            guard let element = try? drawing.getElementsByTag(tag).first() else { continue }
+            if let descr = try? element.attr("descr"), !descr.isEmpty { return descr }
+            if let name = try? element.attr("name"), !name.isEmpty { return name }
+        }
+        return "image"
+    }
+
+    /// Extracts each embedded image once as an `.image` section carrying the raw
+    /// bytes (base64) and MIME type, so consumers can render or caption them.
+    static func extractImages(from body: Element, relationships: [String: String], archive: Archive) -> [DocumentSection] {
+        let blips = (try? body.getElementsByTag("a:blip").array()) ?? []
+        let vmlImages = (try? body.getElementsByTag("v:imagedata").array()) ?? []
+
+        var sections: [DocumentSection] = []
+        var seen = Set<String>()
+        for element in blips + vmlImages {
+            var relId = (try? element.attr("r:embed")) ?? ""
+            if relId.isEmpty { relId = (try? element.attr("r:id")) ?? "" }
+            guard !relId.isEmpty, let target = relationships[relId], !target.isEmpty else { continue }
+
+            let mediaPath = resolveMediaPath(target)
+            guard !seen.contains(mediaPath) else { continue }
+            seen.insert(mediaPath)
+
+            guard let bytes = readEntry(archive, path: mediaPath), !bytes.isEmpty else { continue }
+            let filename = (target as NSString).lastPathComponent
+            sections.append(DocumentSection(
+                title: filename,
+                kind: .image,
+                markdown: "![\(filename)](\(filename))",
+                sourcePath: mediaPath,
+                metadata: [
+                    "mimeType": mimeType(forExtension: (filename as NSString).pathExtension),
+                    "base64": bytes.base64EncodedString(),
+                ]
+            ))
+        }
+        return sections
+    }
+
+    /// Resolves a `document.xml.rels` image Target (relative to `word/`) to its
+    /// path inside the archive.
+    private static func resolveMediaPath(_ target: String) -> String {
+        if target.hasPrefix("/") { return String(target.dropFirst()) }   // package-absolute
+        var path = "word/" + target
+        // Collapse "segment/../" produced by "../media/..." targets.
+        while path.range(of: "/../") != nil {
+            path = path.replacingOccurrences(of: "[^/]+/\\.\\./", with: "", options: .regularExpression)
+        }
+        return path
+    }
+
+    private static func mimeType(forExtension ext: String) -> String {
+        switch ext.lowercased() {
+        case "png": return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "gif": return "image/gif"
+        case "bmp": return "image/bmp"
+        case "tif", "tiff": return "image/tiff"
+        case "svg": return "image/svg+xml"
+        case "webp": return "image/webp"
+        case "emf": return "image/emf"
+        case "wmf": return "image/wmf"
+        default: return "application/octet-stream"
+        }
     }
 
     // MARK: - Archive helpers
