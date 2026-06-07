@@ -55,6 +55,7 @@ public struct DocumentConverterRegistry: Sendable {
             .registering(EPUBConverter(), priority: Priority.specific)
             .registering(WordConverter(), priority: Priority.specific)
             .registering(RTFConverter(), priority: Priority.specific)
+            .registering(CSVConverter(), priority: Priority.specific)
         #if canImport(PDFKit)
         registry = registry.registering(PDFConverter(), priority: Priority.specific)
         #endif

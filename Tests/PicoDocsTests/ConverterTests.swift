@@ -63,6 +63,19 @@ struct ConverterTests {
         #expect(md.contains("Alice"))
     }
 
+    @Test("CSV converts to a Markdown table and round-trips back to CSV")
+    func csvInput() async throws {
+        let csv = "Name,Score\nAlice,42\n\"Bob, Jr\",7"
+        let result = try await PicoDocsEngine.convert(data: Data(csv.utf8), filename: "data.csv")
+        let md = result.markdown()
+        #expect(md.contains("| Name | Score |"))
+        #expect(md.contains("| Alice | 42 |"))
+        #expect(md.contains("| Bob, Jr | 7 |"))   // comma inside a quoted field stays one cell
+        let roundTrip = try DocumentRenderer.render(result, to: .csv)
+        #expect(roundTrip.contains("Name,Score"))
+        #expect(roundTrip.contains("\"Bob, Jr\",7"))
+    }
+
     @Test("EPUB converts spine chapters and reads metadata")
     func epub() async throws {
         let result = try await PicoDocsEngine.convert(data: Fixture.data("sample", "epub"), filename: "sample.epub")
