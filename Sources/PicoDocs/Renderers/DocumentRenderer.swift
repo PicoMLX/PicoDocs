@@ -388,7 +388,7 @@ public enum DocumentRenderer {
                 // (second row), so all-dash data rows elsewhere are preserved.
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { unescapePipes($0) }
+                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.unescape($0) }
                     if !(rowIndex == 1 && isTableSeparatorRow(cells)) {
                         rows.append(cells.map { csvField($0) }.joined(separator: ","))
                     }
@@ -451,7 +451,7 @@ public enum DocumentRenderer {
                 var rows: [[String]] = []
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { unescapePipes($0) }
+                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.unescape($0) }
                     // The header/body separator is conventionally the second row;
                     // only drop an all-dash row there, so real data rows that
                     // happen to be all dashes elsewhere are kept.
@@ -549,19 +549,28 @@ public enum DocumentRenderer {
     private static func parseTableRow(_ line: String) -> [String] {
         var cells = line.trimmingCharacters(in: .whitespaces)
         if cells.hasPrefix("|") { cells.removeFirst() }
-        if cells.hasSuffix("|") { cells.removeLast() }
-        // Split on unescaped pipes only.
+        if cells.hasSuffix("|") {
+            // Strip the trailing delimiter only if the pipe is unescaped (an even
+            // number of backslashes precede it); otherwise it's a literal `\|` in
+            // a row that omits the closing delimiter.
+            let backslashes = cells.dropLast().reversed().prefix { $0 == "\\" }.count
+            if backslashes.isMultiple(of: 2) { cells.removeLast() }
+        }
+        // Split on unescaped pipes only; a backslash escapes the next character,
+        // so `\|` stays in the cell while `\\|` is a literal backslash + delimiter.
         var result: [String] = []
         var current = ""
-        var previous: Character?
+        var escaped = false
         for character in cells {
-            if character == "|", previous != "\\" {
-                result.append(current.trimmingCharacters(in: .whitespaces))
-                current = ""
+            if escaped {
+                current.append(character); escaped = false
+            } else if character == "\\" {
+                current.append(character); escaped = true
+            } else if character == "|" {
+                result.append(current.trimmingCharacters(in: .whitespaces)); current = ""
             } else {
                 current.append(character)
             }
-            previous = character
         }
         result.append(current.trimmingCharacters(in: .whitespaces))
         return result
@@ -575,9 +584,6 @@ public enum DocumentRenderer {
         }
     }
 
-    private static func unescapePipes(_ s: String) -> String {
-        s.replacingOccurrences(of: "\\|", with: "|")
-    }
 
     // MARK: - Inline rendering
 

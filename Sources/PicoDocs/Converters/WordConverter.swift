@@ -45,11 +45,8 @@ public struct WordConverter: DocumentConverter {
         // ones as Markdown footnote definitions (the body carries `[^fnN]`/
         // `[^enN]` reference markers at their positions).
         //
-        // NOTE: these are CommonMark footnote markers in the canonical Markdown.
-        // The non-Markdown renderers (DocumentRenderer HTML/plaintext) don't
-        // render `[^id]` footnotes yet, so those exports show the literal markers
-        // — a deliberately deferred renderer follow-up; Markdown export, the
-        // canonical product, is correct.
+        // NOTE: these are CommonMark footnote markers in the canonical Markdown;
+        // DocumentRenderer also renders them for the HTML and plaintext exports.
         let notes = Self.parseNotes(archive)
         let definitions = Self.referencedNoteIDs(in: body).compactMap { id in
             notes[id].map { text in
@@ -355,9 +352,8 @@ public struct WordConverter: DocumentConverter {
                     let t = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
-                // Single-line Markdown cells: escape pipes; CR/LF become <br>.
-                cells.append(cellText
-                    .replacingOccurrences(of: "|", with: "\\|")
+                // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
+                cells.append(MarkdownTableCell.escapeDelimiters(cellText)
                     .replacingOccurrences(of: "\r\n", with: "<br>")
                     .replacingOccurrences(of: "\r", with: "<br>")
                     .replacingOccurrences(of: "\n", with: "<br>"))

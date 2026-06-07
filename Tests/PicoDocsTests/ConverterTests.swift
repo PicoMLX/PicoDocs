@@ -186,6 +186,15 @@ struct ConverterTests {
         #expect(rows.last == [""])
     }
 
+    @Test("CSV cell with a backslash and a pipe round-trips through the Markdown table")
+    func csvBackslashPipeCell() async throws {
+        let csv = "Col\na\\b|c"   // value: a\b|c (backslash, then a literal pipe)
+        let result = try await PicoDocsEngine.convert(data: Data(csv.utf8), filename: "t.csv")
+        #expect(result.markdown().contains("a\\\\b\\|c"))   // escaped in the table as a\\b\|c
+        let text = try DocumentRenderer.render(result, to: .plaintext)
+        #expect(text.contains("a\\b|c"))                     // unescaped back to a\b|c
+    }
+
     @Test("EPUB converts spine chapters and reads metadata")
     func epub() async throws {
         let result = try await PicoDocsEngine.convert(data: Fixture.data("sample", "epub"), filename: "sample.epub")
@@ -352,6 +361,28 @@ struct DocumentRendererTests {
         let html = try DocumentRenderer.render(result, to: .html)
         #expect(!html.contains("a\" onmouseover=\"alert"))   // the raw quote cannot close href
         #expect(html.contains("&quot;"))
+    }
+
+    @Test("Table cells round-trip backslashes and escaped pipes")
+    func tableCellBackslashEscaping() throws {
+        // Cell value `a\b|c`, escaped in the table as `a\\b\|c`.
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "| K | V |\n| --- | --- |\n| key | a\\\\b\\|c |"),
+        ])
+        // Plaintext re-parses the table: `\\` -> `\`, `\|` -> `|`, and the escaped
+        // pipe does not split the cell.
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains("a\\b|c"))
+        // HTML keeps the literal backslash and pipe in the cell.
+        #expect(try DocumentRenderer.render(result, to: .html).contains("<td>a\\b|c</td>"))
+    }
+
+    @Test("Table row without a closing delimiter keeps a trailing escaped pipe")
+    func tableCellTrailingEscapedPipe() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "| K | V |\n| --- | --- |\n| key | a\\|"),
+        ])
+        // The trailing `\|` is a literal pipe, not the (absent) closing delimiter.
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains("key\ta|"))
     }
 
     @Test("Footnote references inside code spans are not rewritten (HTML)")
