@@ -135,6 +135,36 @@ struct ConverterTests {
         #expect(!html.contains("src=\"image1.png\""))
     }
 
+    @Test("HTML embedding leaves basename-colliding images unresolved, embeds unique ones")
+    func htmlImageEmbedCollision() throws {
+        // Body refers to images by basename; two *distinct* images sharing a
+        // basename (e.g. body media + a note part's own media) are ambiguous in
+        // the body HTML, so neither is embedded (an honest broken ref beats a
+        // confidently wrong image). A uniquely-named image still embeds.
+        let body = DocumentSection(kind: .body, markdown: "![a](image1.png)\n\n![b](image2.png)")
+        let dupA = DocumentSection(
+            kind: .image, markdown: "![a](image1.png)", sourcePath: "word/media/image1.png",
+            metadata: ["mimeType": "image/png", "base64": "AAAA"]
+        )
+        let dupB = DocumentSection(
+            kind: .image, markdown: "![a](image1.png)", sourcePath: "word/notes/media/image1.png",
+            metadata: ["mimeType": "image/png", "base64": "BBBB"]
+        )
+        let unique = DocumentSection(
+            kind: .image, markdown: "![b](image2.png)", sourcePath: "word/media/image2.png",
+            metadata: ["mimeType": "image/png", "base64": "CCCC"]
+        )
+        let result = ConverterResult(title: "t", sections: [body, dupA, dupB, unique])
+        let html = try DocumentRenderer.render(result, to: .html)
+        // Ambiguous basename: neither image embedded, ref left unresolved.
+        #expect(!html.contains("base64,AAAA"))
+        #expect(!html.contains("base64,BBBB"))
+        #expect(html.contains("src=\"image1.png\""))
+        // Unique basename: embedded as a data URL.
+        #expect(html.contains("src=\"data:image/png;base64,CCCC\""))
+        #expect(!html.contains("src=\"image2.png\""))
+    }
+
     @Test("DOCX part-path resolution honors the owning part's base directory")
     func docxResolvePartPath() {
         // Body part / standard-location notes: targets are relative to `word`.
