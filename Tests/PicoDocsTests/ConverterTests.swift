@@ -426,6 +426,16 @@ struct DocumentRendererTests {
         #expect(html.contains("<li id=\"fn-c\">c</li>"))
     }
 
+    @Test("Multi-paragraph footnotes keep blank-line continuations out of the body")
+    func footnoteMultiParagraph() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^a]\n\n[^a]: first\n\n    second"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("second</li>"))     // continuation captured inside the note
+        #expect(!html.contains("<p>second</p>"))   // not leaked as a body paragraph
+    }
+
     @Test("HTML rendering handles combined and nested emphasis")
     func htmlEmphasis() throws {
         let result = ConverterResult(sections: [

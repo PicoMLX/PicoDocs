@@ -194,8 +194,18 @@ public enum DocumentRenderer {
                 var textLines = [first]
                 i += 1
                 while i < lines.count {                       // indented continuation lines
-                    if lines[i].hasPrefix("    ") { textLines.append(String(lines[i].dropFirst(4))); i += 1 }
-                    else if lines[i].hasPrefix("\t") { textLines.append(String(lines[i].dropFirst())); i += 1 }
+                    let line = lines[i]
+                    if line.hasPrefix("    ") { textLines.append(String(line.dropFirst(4))); i += 1 }
+                    else if line.hasPrefix("\t") { textLines.append(String(line.dropFirst())); i += 1 }
+                    else if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                        // A blank line continues the note only when an indented line
+                        // follows (a multi-paragraph footnote); otherwise it ends it.
+                        var j = i + 1
+                        while j < lines.count, lines[j].trimmingCharacters(in: .whitespaces).isEmpty { j += 1 }
+                        guard j < lines.count, lines[j].hasPrefix("    ") || lines[j].hasPrefix("\t") else { break }
+                        textLines.append("")
+                        i += 1
+                    }
                     else { break }
                 }
                 notes.append((id, textLines.joined(separator: "\n")))
