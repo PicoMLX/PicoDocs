@@ -124,7 +124,9 @@ public struct WordConverter: DocumentConverter {
     /// in `mc:Choice` is skipped so its text isn't duplicated.
     static func extractTextBoxes(from body: Element, relationships: [String: String]) throws -> [String] {
         var blocks: [String] = []
-        for txbx in (try? body.getElementsByTag("w:txbxContent").array()) ?? [] {
+        // Iterate the Elements sequence directly (no intermediate array copy).
+        guard let textBoxes = try? body.getElementsByTag("w:txbxContent") else { return blocks }
+        for txbx in textBoxes {
             if isInsideFallback(txbx) { continue }
             blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships))
         }
@@ -134,7 +136,8 @@ public struct WordConverter: DocumentConverter {
     /// True when an element is inside an `mc:Fallback` (the alternate-content copy
     /// that duplicates the primary `mc:Choice` representation).
     private static func isInsideFallback(_ element: Element) -> Bool {
-        element.parents().array().contains { $0.tagName().lowercased() == "mc:fallback" }
+        // `parents()` is a sequence of ancestor Elements; `contains` short-circuits.
+        element.parents().contains { $0.tagName().lowercased() == "mc:fallback" }
     }
 
     // MARK: - Paragraphs
