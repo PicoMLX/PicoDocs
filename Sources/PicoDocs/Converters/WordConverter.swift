@@ -322,15 +322,22 @@ public struct WordConverter: DocumentConverter {
     }
 
     /// Resolves a `document.xml.rels` image Target (relative to `word/`) to its
-    /// path inside the archive.
+    /// path inside the archive. Normalizes segment-by-segment (single pass), so
+    /// `.`/`..` are collapsed without any risk of looping.
     private static func resolveMediaPath(_ target: String) -> String {
-        if target.hasPrefix("/") { return String(target.dropFirst()) }   // package-absolute
-        var path = "word/" + target
-        // Collapse "segment/../" produced by "../media/..." targets.
-        while path.range(of: "/../") != nil {
-            path = path.replacingOccurrences(of: "[^/]+/\\.\\./", with: "", options: .regularExpression)
+        // A leading "/" is package-absolute; otherwise the target is relative to
+        // the part's folder (`word/`).
+        let combined = target.hasPrefix("/") ? String(target.dropFirst()) : "word/\(target)"
+        var stack: [String] = []
+        for raw in combined.split(separator: "/", omittingEmptySubsequences: true) {
+            let segment = String(raw)
+            if segment == ".." {
+                if !stack.isEmpty { stack.removeLast() }
+            } else if segment != "." {
+                stack.append(segment)
+            }
         }
-        return path
+        return stack.joined(separator: "/")
     }
 
     private static func mimeType(forExtension ext: String) -> String {
