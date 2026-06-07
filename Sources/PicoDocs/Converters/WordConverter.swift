@@ -122,11 +122,15 @@ public struct WordConverter: DocumentConverter {
                 let inner = renderInline(child, relationships: relationships)
                 let relId = (try? child.attr("r:id")) ?? ""
                 if let url = relationships[relId], !url.isEmpty, !inner.isEmpty {
-                    // A hyperlink wrapping an image becomes a linked image
-                    // ([![alt](src)](url)); don't escape the nested image's
-                    // brackets. Plain text labels are still escaped.
-                    let label = inner.contains("![") ? inner : escapeLinkLabel(inner)
-                    out += "[\(label)](\(escapeLinkDestination(url)))"
+                    if isImageOnlyMarkdown(inner) {
+                        // Hyperlink wrapping an image: keep the image. A nested
+                        // linked image ([![alt](src)](url)) isn't round-trippable
+                        // through the renderers, so we drop the outer link rather
+                        // than emit syntax they can't parse.
+                        out += inner
+                    } else {
+                        out += "[\(escapeLinkLabel(inner))](\(escapeLinkDestination(url)))"
+                    }
                 } else {
                     out += inner
                 }
@@ -195,6 +199,14 @@ public struct WordConverter: DocumentConverter {
     private static func escapeLinkLabel(_ text: String) -> String {
         text.replacingOccurrences(of: "[", with: "\\[")
             .replacingOccurrences(of: "]", with: "\\]")
+    }
+
+    /// Whether `text` is exactly a single Markdown image (produced by an image
+    /// run), so a wrapping hyperlink shouldn't escape its brackets. Deliberately
+    /// strict (prefix `![` and suffix `)`) so a plain link whose visible text
+    /// merely contains `![` is still escaped normally.
+    private static func isImageOnlyMarkdown(_ text: String) -> Bool {
+        text.hasPrefix("![") && text.hasSuffix(")")
     }
 
     private static func escapeLinkDestination(_ url: String) -> String {

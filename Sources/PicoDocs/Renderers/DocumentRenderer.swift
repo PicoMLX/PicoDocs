@@ -93,7 +93,7 @@ public enum DocumentRenderer {
             }
         }
         let title = result.title.map { "<title>\(escapeHTML($0))</title>\n" } ?? ""
-        return """
+        var html = """
         <!DOCTYPE html>
         <html>
         <head>
@@ -104,6 +104,28 @@ public enum DocumentRenderer {
         </body>
         </html>
         """
+        // Make HTML export self-contained: rewrite `<img src="filename">`
+        // references to data URLs using the bytes carried on `.image` sections
+        // (the body Markdown keeps clean filename refs for the other formats).
+        html = embedImageDataURLs(html, sections: result.sections)
+        return html
+    }
+
+    /// Replaces bare image `src="filename"` references with `data:` URLs built
+    /// from the `.image` sections' base64/MIME metadata.
+    private static func embedImageDataURLs(_ html: String, sections: [DocumentSection]) -> String {
+        var result = html
+        for section in sections where section.kind == .image {
+            let filename = (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
+            guard let filename, !filename.isEmpty,
+                  let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
+            let mime = section.metadata["mimeType"] ?? "application/octet-stream"
+            result = result.replacingOccurrences(
+                of: "src=\"\(filename)\"",
+                with: "src=\"data:\(mime);base64,\(base64)\""
+            )
+        }
+        return result
     }
 
     private static func renderHTMLTable(_ rows: [[String]]) -> String {

@@ -36,12 +36,23 @@ struct ConverterTests {
         #expect(image?.metadata["base64"]?.isEmpty == false)
     }
 
-    @Test("DOCX hyperlink wrapping an image becomes a linked image")
+    @Test("DOCX hyperlink wrapping an image keeps the image (renderer-safe)")
     func docxLinkedImage() async throws {
         let md = try await PicoDocsEngine.convert(
             data: Fixture.data("linked-image", "docx"), filename: "linked-image.docx"
         ).markdown()
-        #expect(md.contains("[![A red dot](image1.png)](https://example.com)"))
+        #expect(md.contains("![A red dot](image1.png)"))
+        // We don't emit a nested linked image the renderers can't parse.
+        #expect(!md.contains("https://example.com"))
+    }
+
+    @Test("HTML export embeds extracted DOCX images as data URLs")
+    func docxImageHTML() async throws {
+        let html = try await PicoDocsEngine.export(
+            data: Fixture.data("image", "docx"), filename: "image.docx", to: .html
+        )
+        #expect(html.contains("<img src=\"data:image/png;base64,"))
+        #expect(!html.contains("src=\"image1.png\""))
     }
 
     @Test("XLSX converts each sheet's cells to Markdown")
