@@ -267,7 +267,7 @@ enum ReadabilityScorer {
         for child in root.getChildNodes() {
             if let element = child as? Element {
                 if element === anchor { continue }
-                if !siblingQualifies(element, threshold: threshold, scores: scores) {
+                if !keepAsArticleContent(element, threshold: threshold, scores: scores) {
                     try? element.remove()
                 }
             } else if let textNode = child as? TextNode {
@@ -293,21 +293,30 @@ enum ReadabilityScorer {
         return nil
     }
 
-    /// Whether a sibling of the top candidate looks like article content worth
-    /// keeping (mirrors Readability's sibling-merge test).
-    private static func siblingQualifies(_ sibling: Element, threshold: Double, scores: [ObjectIdentifier: Double]) -> Bool {
-        if let siblingScore = scores[ObjectIdentifier(sibling)], siblingScore >= threshold {
+    /// Tags that carry article structure/content on their own, even without a
+    /// score — so pruning around the top candidate (especially when `<body>`
+    /// wins a flat layout) keeps headings, lists, tables, quotes and figures
+    /// rather than dropping them and losing structure.
+    private static let structuralContentTags: Set<String> = [
+        "h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "dl", "blockquote",
+        "pre", "table", "figure", "figcaption", "article", "section", "main",
+        "header", "hr",
+    ]
+
+    /// Whether an element should be kept when assembling the article (the top
+    /// candidate's qualifying siblings, or — when `<body>` itself wins — body's
+    /// own children). Keeps scored candidates, article-structure tags, and any
+    /// text-bearing block (e.g. a leaf `<div>`/`<pre>`) with low link density;
+    /// drops residual navigation/boilerplate (high link density) and empties.
+    private static func keepAsArticleContent(_ element: Element, threshold: Double, scores: [ObjectIdentifier: Double]) -> Bool {
+        if let score = scores[ObjectIdentifier(element)], score >= threshold {
             return true
         }
-        guard sibling.tagName().lowercased() == "p" else { return false }
-        let siblingText = text(sibling)
-        let density = linkDensity(sibling)
-        if siblingText.count > 80, density < 0.25 { return true }
-        if siblingText.count > 0, density == 0,
-           siblingText.range(of: #"\.( |$)"#, options: .regularExpression) != nil {
+        if structuralContentTags.contains(element.tagName().lowercased()) {
             return true
         }
-        return false
+        let elementText = text(element)
+        return elementText.count >= 25 && linkDensity(element) < 0.5
     }
 
     // MARK: - Metadata
