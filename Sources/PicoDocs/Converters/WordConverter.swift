@@ -120,14 +120,15 @@ public struct WordConverter: DocumentConverter {
 
     /// Extracts the text of text boxes (shapes with text), whose content is stored
     /// in `w:txbxContent` outside the normal block flow, rendered as Markdown
-    /// blocks. The `mc:Fallback` (legacy VML) copy of a text box that also appears
-    /// in `mc:Choice` is skipped so its text isn't duplicated.
+    /// blocks. Honors markup-compatibility (`mc:AlternateContent`) semantics by
+    /// rendering only one branch per AlternateContent, so a text box isn't
+    /// duplicated across `mc:Choice`/`mc:Fallback` (or multiple choices).
     static func extractTextBoxes(from body: Element, relationships: [String: String]) throws -> [String] {
         var blocks: [String] = []
         // Iterate the Elements sequence directly (no intermediate array copy).
         guard let textBoxes = try? body.getElementsByTag("w:txbxContent") else { return blocks }
         for txbx in textBoxes {
-            if isRedundantFallbackTextBox(txbx) { continue }
+            if !shouldRenderTextBox(txbx) { continue }
             blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships))
         }
         return blocks
@@ -136,10 +137,6 @@ public struct WordConverter: DocumentConverter {
     /// The nearest ancestor element with the given (lowercased) tag name.
     private static func ancestor(of element: Element, named tag: String) -> Element? {
         element.parents().first { $0.tagName().lowercased() == tag }
-    }
-
-    private static func isInside(_ element: Element, named tag: String) -> Bool {
-        ancestor(of: element, named: tag) != nil
     }
 
     /// True when `paragraph` is inside a `w:txbxContent` that is nested *within*
@@ -156,15 +153,37 @@ public struct WordConverter: DocumentConverter {
         return false
     }
 
-    /// True when a text box's `w:txbxContent` is the `mc:Fallback` (legacy VML)
-    /// copy of a text box also present in the `mc:Choice` — i.e. a duplicate to
-    /// skip. A fallback that is the *only* copy (the Choice has no text box) is
-    /// kept, so its content isn't lost.
-    private static func isRedundantFallbackTextBox(_ txbx: Element) -> Bool {
-        guard isInside(txbx, named: "mc:fallback"),
-              let alternate = ancestor(of: txbx, named: "mc:alternatecontent") else { return false }
-        let all = (try? alternate.getElementsByTag("w:txbxContent").array()) ?? []
-        return all.contains { !isInside($0, named: "mc:fallback") }
+    /// Whether a `w:txbxContent` should be rendered, honoring markup-compatibility
+    /// (`mc:AlternateContent`) semantics: one branch is chosen per AlternateContent
+    /// — the first `mc:Choice` containing a text box, else the `mc:Fallback` — and
+    /// only text boxes inside the chosen branch render. A text box outside any
+    /// AlternateContent always renders. Every enclosing AlternateContent must
+    /// select this text box's branch, so nested cases are handled too.
+    private static func shouldRenderTextBox(_ txbx: Element) -> Bool {
+        var inner = txbx
+        while let alternate = ancestor(of: inner, named: "mc:alternatecontent") {
+            guard let branch = selectedBranch(of: alternate),
+                  txbx.parents().contains(where: { $0 === branch }) else { return false }
+            inner = alternate
+        }
+        return true
+    }
+
+    /// The single `mc:AlternateContent` branch whose text boxes are rendered: the
+    /// first `mc:Choice` containing a `w:txbxContent`, otherwise the `mc:Fallback`.
+    private static func selectedBranch(of alternate: Element) -> Element? {
+        if let choice = alternate.children().first(where: {
+            $0.tagName().lowercased() == "mc:choice" && containsTextBox($0)
+        }) {
+            return choice
+        }
+        return alternate.children().first {
+            $0.tagName().lowercased() == "mc:fallback" && containsTextBox($0)
+        }
+    }
+
+    private static func containsTextBox(_ element: Element) -> Bool {
+        !((try? element.getElementsByTag("w:txbxContent").array()) ?? []).isEmpty
     }
 
     // MARK: - Paragraphs

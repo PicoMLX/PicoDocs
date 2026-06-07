@@ -106,6 +106,16 @@ struct ConverterTests {
         #expect(md.contains("Inner cell B."))
     }
 
+    @Test("DOCX renders only one AlternateContent branch for a text box")
+    func docxTextBoxMultiChoice() async throws {
+        let md = try await PicoDocsEngine.convert(
+            data: Fixture.data("textbox-multi-choice", "docx"), filename: "textbox-multi-choice.docx"
+        ).markdown()
+        #expect(md.contains("Choice one box."))    // first choice with a text box wins
+        #expect(!md.contains("Choice two box."))    // other branches are not also emitted
+        #expect(!md.contains("Fallback box."))
+    }
+
     @Test("DOCX hyperlink wrapping an image keeps the image (renderer-safe)")
     func docxLinkedImage() async throws {
         let md = try await PicoDocsEngine.convert(
