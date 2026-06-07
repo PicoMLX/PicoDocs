@@ -41,7 +41,7 @@ public struct WordConverter: DocumentConverter {
         // Footnote/endnote text lives in separate parts; append the referenced
         // ones as Markdown footnote definitions (the body carries `[^fnN]`/
         // `[^enN]` reference markers at their positions).
-        let notes = Self.parseNotes(archive, relationships: relationships)
+        let notes = Self.parseNotes(archive)
         let definitions = Self.referencedNoteIDs(in: body).compactMap { id in
             notes[id].map { "[^\(id)]: \($0)" }
         }
@@ -289,8 +289,8 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Relationships (hyperlink targets)
 
-    static func parseRelationships(_ archive: Archive) -> [String: String] {
-        guard let data = readEntry(archive, path: "word/_rels/document.xml.rels"),
+    static func parseRelationships(_ archive: Archive, path: String = "word/_rels/document.xml.rels") -> [String: String] {
+        guard let data = readEntry(archive, path: path),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
             return [:]
@@ -309,9 +309,13 @@ public struct WordConverter: DocumentConverter {
     /// Parses footnote and endnote text (stored in separate parts) into a map
     /// keyed by reference id (`fn<id>` / `en<id>`), skipping the auto separator
     /// and continuation notes.
-    static func parseNotes(_ archive: Archive, relationships: [String: String]) -> [String: String] {
-        var notes = parseNotePart(archive, path: "word/footnotes.xml", tag: "w:footnote", prefix: "fn", relationships: relationships)
-        for (key, value) in parseNotePart(archive, path: "word/endnotes.xml", tag: "w:endnote", prefix: "en", relationships: relationships) {
+    static func parseNotes(_ archive: Archive) -> [String: String] {
+        // Footnotes/endnotes have their own relationship parts, so inline
+        // hyperlinks/images inside notes resolve against those, not the body's.
+        let footnoteRels = parseRelationships(archive, path: "word/_rels/footnotes.xml.rels")
+        var notes = parseNotePart(archive, path: "word/footnotes.xml", tag: "w:footnote", prefix: "fn", relationships: footnoteRels)
+        let endnoteRels = parseRelationships(archive, path: "word/_rels/endnotes.xml.rels")
+        for (key, value) in parseNotePart(archive, path: "word/endnotes.xml", tag: "w:endnote", prefix: "en", relationships: endnoteRels) {
             notes[key] = value
         }
         return notes
