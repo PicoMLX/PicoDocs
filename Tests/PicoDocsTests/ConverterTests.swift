@@ -77,6 +77,25 @@ struct ConverterTests {
         #expect(md.components(separatedBy: "Text box content.").count == 2)  // exactly once (Fallback deduped)
     }
 
+    @Test("DOCX text box inside a table cell is emitted once, not duplicated")
+    func docxTextBoxInTable() async throws {
+        let md = try await PicoDocsEngine.convert(
+            data: Fixture.data("textbox-table", "docx"), filename: "textbox-table.docx"
+        ).markdown()
+        #expect(md.contains("Cell text."))                                   // table cell content
+        #expect(md.contains("Table box content."))                           // text box extracted
+        #expect(md.components(separatedBy: "Table box content.").count == 2)  // exactly once
+    }
+
+    @Test("DOCX keeps a text box whose only copy is in mc:Fallback")
+    func docxTextBoxFallbackOnly() async throws {
+        let md = try await PicoDocsEngine.convert(
+            data: Fixture.data("textbox-fallback-only", "docx"), filename: "textbox-fallback-only.docx"
+        ).markdown()
+        #expect(md.contains("Intro."))
+        #expect(md.contains("Fallback only content."))   // kept (not dropped as a redundant fallback)
+    }
+
     @Test("DOCX hyperlink wrapping an image keeps the image (renderer-safe)")
     func docxLinkedImage() async throws {
         let md = try await PicoDocsEngine.convert(

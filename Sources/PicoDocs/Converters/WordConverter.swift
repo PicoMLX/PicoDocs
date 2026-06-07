@@ -127,17 +127,30 @@ public struct WordConverter: DocumentConverter {
         // Iterate the Elements sequence directly (no intermediate array copy).
         guard let textBoxes = try? body.getElementsByTag("w:txbxContent") else { return blocks }
         for txbx in textBoxes {
-            if isInsideFallback(txbx) { continue }
+            if isRedundantFallbackTextBox(txbx) { continue }
             blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships))
         }
         return blocks
     }
 
-    /// True when an element is inside an `mc:Fallback` (the alternate-content copy
-    /// that duplicates the primary `mc:Choice` representation).
-    private static func isInsideFallback(_ element: Element) -> Bool {
-        // `parents()` is a sequence of ancestor Elements; `contains` short-circuits.
-        element.parents().contains { $0.tagName().lowercased() == "mc:fallback" }
+    /// The nearest ancestor element with the given (lowercased) tag name.
+    private static func ancestor(of element: Element, named tag: String) -> Element? {
+        element.parents().first { $0.tagName().lowercased() == tag }
+    }
+
+    private static func isInside(_ element: Element, named tag: String) -> Bool {
+        ancestor(of: element, named: tag) != nil
+    }
+
+    /// True when a text box's `w:txbxContent` is the `mc:Fallback` (legacy VML)
+    /// copy of a text box also present in the `mc:Choice` — i.e. a duplicate to
+    /// skip. A fallback that is the *only* copy (the Choice has no text box) is
+    /// kept, so its content isn't lost.
+    private static func isRedundantFallbackTextBox(_ txbx: Element) -> Bool {
+        guard isInside(txbx, named: "mc:fallback"),
+              let alternate = ancestor(of: txbx, named: "mc:alternatecontent") else { return false }
+        let all = (try? alternate.getElementsByTag("w:txbxContent").array()) ?? []
+        return all.contains { !isInside($0, named: "mc:fallback") }
     }
 
     // MARK: - Paragraphs
@@ -299,8 +312,11 @@ public struct WordConverter: DocumentConverter {
             for tc in tr.children().array() where tc.tagName().lowercased() == "w:tc" {
                 var cellText = ""
                 // Gather all descendant paragraphs so paragraphs inside block
-                // content controls (w:sdt) within the cell are included too.
+                // content controls (w:sdt) within the cell are included too. Skip
+                // text-box paragraphs (w:txbxContent) — those are emitted once by
+                // extractTextBoxes, so rendering them here too would duplicate them.
                 for paragraph in (try? tc.getElementsByTag("w:p").array()) ?? [] {
+                    if isInside(paragraph, named: "w:txbxcontent") { continue }
                     let t = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
