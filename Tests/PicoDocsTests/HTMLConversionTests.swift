@@ -47,7 +47,7 @@ struct HTMLConversionTests {
     func relativeLinks() async throws {
         let md = try await PicoDocsEngine.convert(
             data: Data("<html><body><p><a href=\"/about\">About</a></p></body></html>".utf8),
-            url: URL(string: "https://example.com/index.html"),
+            url: try #require(URL(string: "https://example.com/index.html")),
             enhanceReadability: false
         ).markdown()
         #expect(md.contains("[About](https://example.com/about)"))

@@ -16,7 +16,10 @@ import Testing
 struct ContentTypeDetectorTests {
 
     private func detect(_ data: Data, filename: String? = nil, mimeType: String? = nil) -> DetectedFormat? {
-        let info = StreamInfo(filename: filename, mimeType: mimeType)
+        // Mirror the real engine path: makeStreamInfo derives fileExtension/utType
+        // from the filename/MIME, which is what ContentTypeDetector reads for its
+        // hint fallback (classify itself doesn't re-parse the filename).
+        let info = PicoDocsEngine.makeStreamInfo(filename: filename, mimeType: mimeType, url: nil, charset: nil)
         return ContentTypeDetector.classify(data, info: info).detectedFormat
     }
 
