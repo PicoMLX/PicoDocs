@@ -64,6 +64,20 @@ struct ConverterTests {
         #expect(!html.contains("src=\"image1.png\""))
     }
 
+    @Test("DOCX part-path resolution honors the owning part's base directory")
+    func docxResolvePartPath() {
+        // Body part / standard-location notes: targets are relative to `word`.
+        #expect(WordConverter.resolvePartPath("media/image1.png", relativeTo: "word")
+            == "word/media/image1.png")
+        // A notes part in a subfolder resolves `../media/...` against `word/notes`
+        // — i.e. back up to `word/media`, not the package root (the round-3 fix).
+        #expect(WordConverter.resolvePartPath("../media/image1.png", relativeTo: "word/notes")
+            == "word/media/image1.png")
+        // A package-absolute target (leading "/") ignores the base directory.
+        #expect(WordConverter.resolvePartPath("/word/media/image1.png", relativeTo: "word/notes")
+            == "word/media/image1.png")
+    }
+
     @Test("XLSX converts each sheet's cells to Markdown")
     func xlsx() async throws {
         let md = try await PicoDocsEngine.convert(data: Fixture.data("sample", "xlsx"), filename: "sample.xlsx").markdown()

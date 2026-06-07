@@ -326,7 +326,7 @@ public struct WordConverter: DocumentConverter {
             ("/footnotes", "word/footnotes.xml", "w:footnote", "fn"),
             ("/endnotes", "word/endnotes.xml", "w:endnote", "en"),
         ] {
-            let part = relationshipTarget(archive, typeSuffix: typeSuffix).map(resolvePartPath) ?? fallback
+            let part = relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
             let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part))
             for (key, value) in parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships) {
                 notes[key] = value
@@ -411,13 +411,16 @@ public struct WordConverter: DocumentConverter {
             ("/footnotes", "word/footnotes.xml", "w:footnotes"),
             ("/endnotes", "word/endnotes.xml", "w:endnotes"),
         ] {
-            let part = relationshipTarget(archive, typeSuffix: typeSuffix).map(resolvePartPath) ?? fallback
+            let part = relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
             guard let data = readEntry(archive, path: part),
                   let xml = decodeText(data),
                   let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()),
                   let root = try? doc.getElementsByTag(rootTag).first() else { continue }
             let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part))
-            sections.append(contentsOf: extractImages(from: root, relationships: relationships, archive: archive))
+            // A note part's image targets resolve relative to the note part's own
+            // folder (usually `word`, but a subfolder when the part lives in one).
+            let partDirectory = (part as NSString).deletingLastPathComponent
+            sections.append(contentsOf: extractImages(from: root, relationships: relationships, archive: archive, partDirectory: partDirectory))
         }
         return sections
     }
@@ -460,7 +463,7 @@ public struct WordConverter: DocumentConverter {
 
     /// Extracts each embedded image once as an `.image` section carrying the raw
     /// bytes (base64) and MIME type, so consumers can render or caption them.
-    static func extractImages(from body: Element, relationships: [String: String], archive: Archive) -> [DocumentSection] {
+    static func extractImages(from body: Element, relationships: [String: String], archive: Archive, partDirectory: String = "word") -> [DocumentSection] {
         let blips = (try? body.getElementsByTag("a:blip").array()) ?? []
         let vmlImages = (try? body.getElementsByTag("v:imagedata").array()) ?? []
 
@@ -471,7 +474,7 @@ public struct WordConverter: DocumentConverter {
             if relId.isEmpty { relId = (try? element.attr("r:id")) ?? "" }
             guard !relId.isEmpty, let target = relationships[relId], !target.isEmpty else { continue }
 
-            let mediaPath = resolvePartPath(target)
+            let mediaPath = resolvePartPath(target, relativeTo: partDirectory)
             guard !seen.contains(mediaPath) else { continue }
             seen.insert(mediaPath)
 
@@ -491,14 +494,21 @@ public struct WordConverter: DocumentConverter {
         return sections
     }
 
-    /// Resolves a relationship Target (relative to `word/`, or package-absolute
-    /// with a leading "/") to its path inside the archive — used for image media
-    /// and note parts. Normalizes segment-by-segment (single pass), so `.`/`..`
-    /// are collapsed without any risk of looping.
-    private static func resolvePartPath(_ target: String) -> String {
-        // A leading "/" is package-absolute; otherwise the target is relative to
-        // the part's folder (`word/`).
-        let combined = target.hasPrefix("/") ? String(target.dropFirst()) : "word/\(target)"
+    /// Resolves a relationship Target to its path inside the archive — used for
+    /// image media and note parts. A leading "/" is package-absolute; otherwise
+    /// the Target is relative to `baseDirectory`, the folder of the part whose
+    /// `.rels` it came from (e.g. `word` for `word/document.xml`, or `word/notes`
+    /// for a notes part stored in a subfolder). Normalizes segment-by-segment
+    /// (single pass), so `.`/`..` are collapsed without any risk of looping.
+    static func resolvePartPath(_ target: String, relativeTo baseDirectory: String) -> String {
+        let combined: String
+        if target.hasPrefix("/") {
+            combined = String(target.dropFirst())
+        } else if baseDirectory.isEmpty {
+            combined = target
+        } else {
+            combined = "\(baseDirectory)/\(target)"
+        }
         var stack: [String] = []
         for raw in combined.split(separator: "/", omittingEmptySubsequences: true) {
             let segment = String(raw)
