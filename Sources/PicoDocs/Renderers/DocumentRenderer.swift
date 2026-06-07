@@ -40,8 +40,10 @@ public enum DocumentRenderer {
     // MARK: - Plaintext
 
     private static func renderPlaintext(_ result: ConverterResult) -> String {
+        let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
+        let numbers = footnoteNumbers(in: bodyMarkdown, notes: notes)
         var out: [String] = []
-        for block in parseBlocks(result.markdown()) {
+        for block in parseBlocks(bodyMarkdown) {
             switch block {
             case .heading(_, let text):
                 out.append(stripInline(text))
@@ -63,34 +65,63 @@ public enum DocumentRenderer {
                 out.append(rows.map { $0.map { stripInline($0) }.joined(separator: "\t") }.joined(separator: "\n"))
             }
         }
-        return out.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = out.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        // Footnotes: replace inline `[^id]` references with `[N]`, then append the
+        // numbered definitions (parseBlocks otherwise leaks them as plain text).
+        for (id, number) in numbers {
+            text = text.replacingOccurrences(of: "[^\(id)]", with: "[\(number)]")
+        }
+        if !notes.isEmpty {
+            let defs = notes
+                .sorted { (numbers[$0.id] ?? .max) < (numbers[$1.id] ?? .max) }
+                .map { "[\(numbers[$0.id] ?? 0)] " + stripInline($0.text.replacingOccurrences(of: "\n", with: " ")) }
+                .joined(separator: "\n")
+            text += "\n\n" + defs
+        }
+        return text
     }
 
     // MARK: - HTML
 
     private static func renderHTML(_ result: ConverterResult) -> String {
-        var body: [String] = []
-        for block in parseBlocks(result.markdown()) {
+        let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
+        let numbers = footnoteNumbers(in: bodyMarkdown, notes: notes)
+        var blocks: [String] = []
+        for block in parseBlocks(bodyMarkdown) {
             switch block {
             case .heading(let level, let text):
-                body.append("<h\(level)>\(inlineHTML(text))</h\(level)>")
+                blocks.append("<h\(level)>\(inlineHTML(text))</h\(level)>")
             case .paragraph(let text):
                 let html = inlineHTML(text).replacingOccurrences(of: "\n", with: "<br>\n")
-                body.append("<p>\(html)</p>")
+                blocks.append("<p>\(html)</p>")
             case .code(let code):
-                body.append("<pre><code>\(escapeHTML(code))</code></pre>")
+                blocks.append("<pre><code>\(escapeHTML(code))</code></pre>")
             case .rule:
-                body.append("<hr>")
+                blocks.append("<hr>")
             case .blockquote(let lines):
                 let inner = lines.map { inlineHTML($0) }.joined(separator: "<br>\n")
-                body.append("<blockquote>\(inner)</blockquote>")
+                blocks.append("<blockquote>\(inner)</blockquote>")
             case .list(let ordered, let items):
                 let tag = ordered ? "ol" : "ul"
                 let lis = items.map { "<li>\(inlineHTML($0).replacingOccurrences(of: "\n", with: " "))</li>" }
-                body.append("<\(tag)>\n\(lis.joined(separator: "\n"))\n</\(tag)>")
+                blocks.append("<\(tag)>\n\(lis.joined(separator: "\n"))\n</\(tag)>")
             case .table(let rows):
-                body.append(renderHTMLTable(rows))
+                blocks.append(renderHTMLTable(rows))
             }
+        }
+        var bodyHTML = blocks.joined(separator: "\n")
+        // Footnotes: turn inline `[^id]` references into superscript links and
+        // append the definitions as an ordered list. `[^id]` carries no link or
+        // emphasis syntax, so it passes through `inlineHTML` untouched and a
+        // literal replacement on the rendered body is safe.
+        for (id, number) in numbers {
+            bodyHTML = bodyHTML.replacingOccurrences(
+                of: "[^\(id)]",
+                with: "<sup class=\"footnote-ref\"><a href=\"#fn-\(id)\" id=\"fnref-\(id)\">\(number)</a></sup>"
+            )
+        }
+        if !notes.isEmpty {
+            bodyHTML += "\n" + footnotesHTML(notes: notes, numbers: numbers)
         }
         let title = result.title.map { "<title>\(escapeHTML($0))</title>\n" } ?? ""
         var html = """
@@ -100,7 +131,7 @@ public enum DocumentRenderer {
         <meta charset="utf-8">
         \(title)</head>
         <body>
-        \(body.joined(separator: "\n"))
+        \(bodyHTML)
         </body>
         </html>
         """
@@ -138,6 +169,80 @@ public enum DocumentRenderer {
         }
         out += "</tbody>\n</table>"
         return out
+    }
+
+    // MARK: - Footnotes
+    //
+    // Footnote rendering applies to the prose-rendering formats (HTML/plaintext).
+    // The XML and CSV exports emit section Markdown structurally, so they keep the
+    // canonical `[^id]` markers verbatim rather than rendering them.
+
+    /// Splits canonical Markdown into its body (with `[^id]` reference markers left
+    /// in place) and the footnote definitions (`[^id]: text`, with indented
+    /// continuation lines folded in), in definition order.
+    private static func extractFootnotes(_ markdown: String) -> (body: String, notes: [(id: String, text: String)]) {
+        let lines = markdown.components(separatedBy: "\n")
+        var bodyLines: [String] = []
+        var notes: [(id: String, text: String)] = []
+        var i = 0
+        while i < lines.count {
+            if let (id, first) = parseFootnoteDefinition(lines[i]) {
+                var textLines = [first]
+                i += 1
+                while i < lines.count {                       // indented continuation lines
+                    if lines[i].hasPrefix("    ") { textLines.append(String(lines[i].dropFirst(4))); i += 1 }
+                    else if lines[i].hasPrefix("\t") { textLines.append(String(lines[i].dropFirst())); i += 1 }
+                    else { break }
+                }
+                notes.append((id, textLines.joined(separator: "\n")))
+            } else {
+                bodyLines.append(lines[i])
+                i += 1
+            }
+        }
+        let body = bodyLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return (body, notes)
+    }
+
+    /// Parses a CommonMark footnote definition line `[^id]: text`, returning the
+    /// id and first-line text (nil if the line isn't a definition).
+    private static func parseFootnoteDefinition(_ line: String) -> (id: String, text: String)? {
+        guard line.hasPrefix("[^"), let close = line.firstIndex(of: "]") else { return nil }
+        let idStart = line.index(line.startIndex, offsetBy: 2)
+        guard idStart < close else { return nil }
+        let id = String(line[idStart..<close])
+        let afterClose = line.index(after: close)
+        guard !id.isEmpty, afterClose < line.endIndex, line[afterClose] == ":" else { return nil }
+        var text = String(line[line.index(after: afterClose)...])
+        if text.hasPrefix(" ") { text.removeFirst() }
+        return (id, text)
+    }
+
+    /// Numbers footnotes by the order their `[^id]` reference first appears in the
+    /// body (unreferenced definitions follow, in definition order).
+    private static func footnoteNumbers(in body: String, notes: [(id: String, text: String)]) -> [String: Int] {
+        var numbers: [String: Int] = [:]
+        var next = 1
+        let referenced = notes.compactMap { note -> (id: String, pos: Int)? in
+            guard let range = body.range(of: "[^\(note.id)]") else { return nil }
+            return (note.id, body.distance(from: body.startIndex, to: range.lowerBound))
+        }.sorted { $0.pos < $1.pos }
+        for item in referenced where numbers[item.id] == nil { numbers[item.id] = next; next += 1 }
+        for note in notes where numbers[note.id] == nil { numbers[note.id] = next; next += 1 }
+        return numbers
+    }
+
+    /// The trailing `<section class="footnotes">` list, ordered by footnote number,
+    /// each item carrying a backreference to its inline marker.
+    private static func footnotesHTML(notes: [(id: String, text: String)], numbers: [String: Int]) -> String {
+        let items = notes
+            .sorted { (numbers[$0.id] ?? .max) < (numbers[$1.id] ?? .max) }
+            .map { note -> String in
+                let inner = inlineHTML(note.text.replacingOccurrences(of: "\n", with: " "))
+                return "<li id=\"fn-\(note.id)\">\(inner) <a href=\"#fnref-\(note.id)\" class=\"footnote-backref\">&#8617;</a></li>"
+            }
+            .joined(separator: "\n")
+        return "<section class=\"footnotes\">\n<hr>\n<ol>\n\(items)\n</ol>\n</section>"
     }
 
     // MARK: - XML

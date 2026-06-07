@@ -45,6 +45,29 @@ struct ConverterTests {
         #expect(md.contains("[^fn2]: This is the footnote text."))     // definition appended
     }
 
+    @Test("HTML export renders DOCX footnotes as superscript links + a notes list")
+    func docxFootnotesHTML() async throws {
+        let html = try await PicoDocsEngine.export(
+            data: Fixture.data("footnote", "docx"), filename: "footnote.docx", to: .html
+        )
+        #expect(!html.contains("[^fn2]"))                                  // no literal marker
+        #expect(html.contains("Body text<sup class=\"footnote-ref\""))     // inline superscript ref
+        #expect(html.contains(">1</a></sup>"))                             // numbered by reference order
+        #expect(html.contains("<li id=\"fn-fn2\">"))                       // definition anchor
+        #expect(html.contains("class=\"footnote-backref\""))              // backreference
+        #expect(html.contains("This is the footnote text."))
+    }
+
+    @Test("Plaintext export renders DOCX footnotes as [N] markers + definitions")
+    func docxFootnotesPlaintext() async throws {
+        let text = try await PicoDocsEngine.export(
+            data: Fixture.data("footnote", "docx"), filename: "footnote.docx", to: .plaintext
+        )
+        #expect(!text.contains("[^fn2]"))                            // no literal marker
+        #expect(text.contains("Body text[1]"))                        // reference renumbered
+        #expect(text.contains("[1] This is the footnote text."))      // definition listed
+    }
+
     @Test("DOCX hyperlink wrapping an image keeps the image (renderer-safe)")
     func docxLinkedImage() async throws {
         let md = try await PicoDocsEngine.convert(
