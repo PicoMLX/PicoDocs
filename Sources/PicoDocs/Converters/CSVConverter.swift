@@ -29,10 +29,36 @@ public struct CSVConverter: DocumentConverter {
         let rows = Self.parseCSV(text)
         let table = Self.markdownTable(rows)
         guard !table.isEmpty else { throw PicoDocsError.emptyDocument }
-        return ConverterResult(
+        // A single-line Markdown table cell is great for display/RAG but can't
+        // hold embedded newlines or leading/trailing spaces. Keep a lossless,
+        // canonical CSV serialization in metadata so CSV export round-trips those
+        // values exactly (the renderer prefers it over re-parsing the table).
+        let section = DocumentSection(
             title: info.filename,
-            sections: [DocumentSection(title: info.filename, kind: .table, markdown: table)]
+            kind: .table,
+            markdown: table,
+            metadata: ["csv": Self.serializeCSV(rows)]
         )
+        return ConverterResult(title: info.filename, sections: [section])
+    }
+
+    /// Serializes rows to canonical RFC 4180 CSV (quoting fields that contain a
+    /// comma, quote, or newline), preserving cell values exactly.
+    static func serializeCSV(_ rows: [[String]]) -> String {
+        rows.map { row in row.map(csvField).joined(separator: ",") }.joined(separator: "\n")
+    }
+
+    private static func csvField(_ value: String) -> String {
+        // Quote on delimiters/quotes/newlines, and also on leading/trailing
+        // whitespace (otherwise parsers that strip unquoted fields would drop it).
+        let hasEdgeWhitespace = value.first == " " || value.last == " "
+            || value.first == "\t" || value.last == "\t"
+        if hasEdgeWhitespace
+            || value.contains(",") || value.contains("\"")
+            || value.contains("\n") || value.contains("\r") {
+            return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        }
+        return value
     }
 
     // MARK: - CSV parsing (RFC 4180)

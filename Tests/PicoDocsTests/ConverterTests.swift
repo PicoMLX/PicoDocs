@@ -76,6 +76,15 @@ struct ConverterTests {
         #expect(roundTrip.contains("\"Bob, Jr\",7"))
     }
 
+    @Test("CSV round-trip preserves quoted whitespace and embedded newlines")
+    func csvRoundTripFidelity() async throws {
+        let csv = "Name,Note\nAlice,\"hello\nworld\"\nBob,\" 007 \""
+        let result = try await PicoDocsEngine.convert(data: Data(csv.utf8), filename: "d.csv")
+        let out = try DocumentRenderer.render(result, to: .csv)
+        #expect(out.contains("\"hello\nworld\""))   // embedded newline preserved
+        #expect(out.contains("\" 007 \""))           // quoted leading/trailing spaces preserved
+    }
+
     @Test("EPUB converts spine chapters and reads metadata")
     func epub() async throws {
         let result = try await PicoDocsEngine.convert(data: Fixture.data("sample", "epub"), filename: "sample.epub")
