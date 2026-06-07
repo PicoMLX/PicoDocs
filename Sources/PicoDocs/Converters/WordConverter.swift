@@ -129,6 +129,13 @@ public struct WordConverter: DocumentConverter {
                         // than emit syntax they can't parse.
                         out += inner
                     } else {
+                        // Mixed image+text hyperlink content is escaped as a text
+                        // label, so an embedded image in such a link renders as
+                        // literal text (its bytes are still extracted as an .image
+                        // section). Preserving image fragments inside a mixed linked
+                        // label needs a structured inline representation (a run-level
+                        // "contains image" signal) — a deliberately deferred
+                        // enhancement for this narrow icon+label case.
                         out += "[\(escapeLinkLabel(inner))](\(escapeLinkDestination(url)))"
                     }
                 } else {
