@@ -49,7 +49,9 @@ extension PicoDocument {
     ///     Markdown sections (the canonical LLM form); multi-format rendering is a
     ///     follow-up.
     ///   - recursive: If true, parses child documents first.
-    ///   - enhanceReadability: Reserved for the optional Readability cleanup pass.
+    ///   - enhanceReadability: For HTML, run the Readability extraction pass
+    ///     (reader-mode: keep the main article, drop nav/ads/boilerplate). Ignored
+    ///     by non-HTML formats. Defaults to `true`.
     public nonisolated func parse(to type: ExportFileType? = nil, recursive: Bool = true, enhanceReadability: Bool = true) async throws {
         // Parse children first. A child failure is recorded on the child and is
         // not fatal to the parent.
@@ -76,7 +78,8 @@ extension PicoDocument {
             let result = try await PicoDocsEngine.convert(
                 data: originalContent,
                 filename: self.filename,
-                url: self.originURL
+                url: self.originURL,
+                enhanceReadability: enhanceReadability
             )
             let exported = try Self.exportedContent(from: result, format: type)
             await updateParsedDocument(result, content: exported)

@@ -58,6 +58,12 @@ public struct StreamInfo: Sendable, Equatable {
     /// extension/MIME-based guesses.
     public var confidence: Double
 
+    /// Whether HTML conversion should run the Readability extraction pass
+    /// (reader-mode: keep the main article, drop nav/ads/boilerplate). Defaults
+    /// to `true`; set `false` to convert the full document body verbatim.
+    /// Ignored by non-HTML converters.
+    public var enhanceReadability: Bool
+
     public init(
         filename: String? = nil,
         fileExtension: String? = nil,
@@ -66,7 +72,8 @@ public struct StreamInfo: Sendable, Equatable {
         url: URL? = nil,
         charset: String.Encoding? = nil,
         detectedFormat: DetectedFormat? = nil,
-        confidence: Double = 0
+        confidence: Double = 0,
+        enhanceReadability: Bool = true
     ) {
         self.filename = filename
         self.fileExtension = fileExtension
@@ -76,5 +83,6 @@ public struct StreamInfo: Sendable, Equatable {
         self.charset = charset
         self.detectedFormat = detectedFormat
         self.confidence = confidence
+        self.enhanceReadability = enhanceReadability
     }
 }
