@@ -376,6 +376,15 @@ struct DocumentRendererTests {
         #expect(try DocumentRenderer.render(result, to: .html).contains("<td>a\\b|c</td>"))
     }
 
+    @Test("Table row without a closing delimiter keeps a trailing escaped pipe")
+    func tableCellTrailingEscapedPipe() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "| K | V |\n| --- | --- |\n| key | a\\|"),
+        ])
+        // The trailing `\|` is a literal pipe, not the (absent) closing delimiter.
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains("key\ta|"))
+    }
+
     @Test("Footnote references inside code spans are not rewritten (HTML)")
     func footnoteCodeSpanHTML() throws {
         let result = ConverterResult(sections: [

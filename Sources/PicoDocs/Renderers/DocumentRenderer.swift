@@ -549,7 +549,13 @@ public enum DocumentRenderer {
     private static func parseTableRow(_ line: String) -> [String] {
         var cells = line.trimmingCharacters(in: .whitespaces)
         if cells.hasPrefix("|") { cells.removeFirst() }
-        if cells.hasSuffix("|") { cells.removeLast() }
+        if cells.hasSuffix("|") {
+            // Strip the trailing delimiter only if the pipe is unescaped (an even
+            // number of backslashes precede it); otherwise it's a literal `\|` in
+            // a row that omits the closing delimiter.
+            let backslashes = cells.dropLast().reversed().prefix { $0 == "\\" }.count
+            if backslashes.isMultiple(of: 2) { cells.removeLast() }
+        }
         // Split on unescaped pipes only; a backslash escapes the next character,
         // so `\|` stays in the cell while `\\|` is a literal backslash + delimiter.
         var result: [String] = []
