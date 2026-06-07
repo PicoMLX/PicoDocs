@@ -54,14 +54,10 @@ public struct DocumentConverterRegistry: Sendable {
             .registering(SpreadsheetConverter(), priority: Priority.specific)
             .registering(EPUBConverter(), priority: Priority.specific)
             .registering(WordConverter(), priority: Priority.specific)
+            .registering(RTFConverter(), priority: Priority.specific)
         #if canImport(PDFKit)
         registry = registry.registering(PDFConverter(), priority: Priority.specific)
         #endif
-        // No RTFConverter is registered (intentional): the only prior RTF support
-        // was the legacy `NSAttributedString` path this rewrite removes (lossy,
-        // main-thread-only, macOS-biased). RTF therefore fails cleanly with
-        // `documentTypeNotSupported` rather than degrading silently; a dedicated
-        // pure-Swift RTF converter is a tracked follow-up.
         return registry.registering(PlainTextConverter(), priority: Priority.generic)
     }
 

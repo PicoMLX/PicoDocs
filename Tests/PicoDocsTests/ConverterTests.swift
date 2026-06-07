@@ -37,6 +37,99 @@ struct ConverterTests {
         #expect(result.title == "Sample EPUB")
     }
 
+    @Test("RTF converts to Markdown with paragraphs and emphasis")
+    func rtf() async throws {
+        let rtf = "{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Times New Roman;}}Hello \\b world\\b0 . This is \\i italic\\i0  text.\\par Second paragraph here.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "sample.rtf").markdown()
+        #expect(md.contains("**world**"))
+        #expect(md.contains("*italic*"))
+        #expect(md.contains("Second paragraph here."))
+        // Control tables are skipped, and no raw control words leak through.
+        #expect(!md.contains("Times New Roman"))
+        #expect(!md.contains("\\rtf"))
+    }
+
+    @Test("RTF keeps a \\uN char and skips its \\'hh fallback (no duplicate)")
+    func rtfUnicodeFallback() async throws {
+        // A U+2019 right single quote written as the control word u8217, with a
+        // hex-escape CP1252 fallback, must yield one quote -- not the quote plus
+        // the raw fallback byte.
+        let rtf = "{\\rtf1\\ansi\\uc1 It\\u8217\\'92s fine.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "q.rtf").markdown()
+        #expect(md.contains("It\u{2019}s fine."))
+        #expect(!md.contains("\u{0092}"))
+    }
+
+    @Test("RTF hex escapes decode via Windows-1252, not raw Latin-1")
+    func rtfWindows1252() async throws {
+        // 0x93/0x94 are CP1252 curly double quotes; 0x97 is an em dash. As raw
+        // Latin-1 these would be invisible C1 control characters.
+        let rtf = "{\\rtf1\\ansi \\'93quoted\\'94 and a dash\\'97here.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "q.rtf").markdown()
+        #expect(md.contains("\u{201C}quoted\u{201D}"))
+        #expect(md.contains("\u{2014}"))
+    }
+
+    @Test("RTF combines \\uN surrogate pairs into astral characters")
+    func rtfSurrogatePair() async throws {
+        // U+1F600 as a UTF-16 surrogate pair (\uc0 means no fallback bytes).
+        let rtf = "{\\rtf1\\ansi\\uc0\\u-10179\\u-8704 done.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "e.rtf").markdown()
+        #expect(md.contains("\u{1F600}"))
+        #expect(md.contains("done."))
+    }
+
+    @Test("RTF paragraph breaks inside skipped destinations don't split the body")
+    func rtfIgnoredDestinationParagraphs() async throws {
+        let rtf = "{\\rtf1\\ansi Hello{\\footnote\\par ignored}world.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "f.rtf").markdown()
+        #expect(md.contains("Helloworld."))
+    }
+
+    @Test("A mislabeled .rtf without the RTF header throws (strict failure)")
+    func rtfMislabeledThrows() async throws {
+        let notRTF = Data("this is not actually an RTF file".utf8)
+        await #expect(throws: (any Error).self) {
+            _ = try await PicoDocsEngine.convert(data: notRTF, filename: "notes.rtf")
+        }
+    }
+
+    @Test("RTF special-character control words become punctuation")
+    func rtfSpecialChars() async throws {
+        let rtf = "{\\rtf1\\ansi A\\emdash B, \\bullet item, \\ldblquote q\\rdblquote .\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "s.rtf").markdown()
+        #expect(md.contains("A\u{2014}B"))            // em dash
+        #expect(md.contains("\u{2022}"))              // bullet
+        #expect(md.contains("\u{201C}q\u{201D}"))     // curly double quotes
+    }
+
+    @Test("RTF honors a declared non-1252 code page for hex escapes")
+    func rtfCodePage1251() async throws {
+        // CP1251: 0xE0 -> U+0430, 0xE1 -> U+0431 (Cyrillic a/b).
+        let rtf = "{\\rtf1\\ansi\\ansicpg1251 \\'e0\\'e1 done.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "c.rtf").markdown()
+        #expect(md.contains("\u{0430}\u{0431}"))
+    }
+
+    @Test("RTF \\line is a hard break and \\page separates content")
+    func rtfLineAndPageBreaks() async throws {
+        let rtf = "{\\rtf1\\ansi Line one\\line Line two.\\page Next page.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "l.rtf").markdown()
+        #expect(md.contains("Line one  \nLine two."))   // hard break preserved
+        #expect(md.contains("Next page."))
+        #expect(!md.contains("Line two.Next page."))     // \page kept them separate
+    }
+
+    @Test("RTF \\binN binary payload doesn't corrupt brace parsing")
+    func rtfBinaryPayload() async throws {
+        // The byte after \bin1 is a '}' that must not close the \pict group.
+        let rtf = "{\\rtf1\\ansi Before {\\pict\\bin1 }X} After.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "b.rtf").markdown()
+        #expect(md.contains("Before"))
+        #expect(md.contains("After."))
+        #expect(!md.contains("X"))
+    }
+
     @Test("A corrupt DOCX throws instead of degrading to plain text")
     func corruptDocxIsStrict() async throws {
         // Detected as .docx by the filename hint, but the bytes aren't a zip — the
