@@ -2,10 +2,9 @@
 //  PicoDocsTests.swift
 //  PicoDocs
 //
-//  Minimal smoke tests for the converter engine. The full per-converter suite
-//  (HTML/PDF/XLSX/DOCX/EPUB + the ContentTypeDetector issue-#2 regression guard)
-//  lands with the dedicated test PR that also enables `swift test` in CI; these
-//  keep the test target valid in the meantime.
+//  Smoke tests for the engine's public surface. The per-converter and detection
+//  suites live in the sibling test files (ContentTypeDetectorTests,
+//  HTMLConversionTests, ConverterTests, DocumentRendererTests).
 //
 
 import Testing
