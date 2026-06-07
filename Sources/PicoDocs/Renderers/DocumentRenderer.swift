@@ -10,6 +10,13 @@
 //  (headings, emphasis, links/images, code spans/fences, blockquotes, lists,
 //  pipe tables, rules) rather than implementing a full CommonMark parser.
 //
+//  These renderers assume their input is the canonical Markdown the converters
+//  emit. Raw-text and CSV *inputs* are currently stored verbatim by
+//  PlainTextConverter (it doesn't Markdown-escape text or parse CSV into a
+//  table), so re-exporting those specific inputs to plaintext/CSV can drop a
+//  literal `*` or collapse columns — making those round-trips lossless is a
+//  PlainTextConverter follow-up, not a renderer change.
+//
 
 import Foundation
 
@@ -138,8 +145,21 @@ public enum DocumentRenderer {
         var rows: [String] = []
         let lines = result.markdown().components(separatedBy: "\n")
         var i = 0
+        var inCodeFence = false
         while i < lines.count {
             let line = lines[i].trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("```") {
+                inCodeFence.toggle()
+                i += 1
+                continue
+            }
+            if inCodeFence {
+                // Preserve fenced code verbatim as a single field, so a pipe-
+                // containing code line isn't split into CSV cells.
+                rows.append(csvField(lines[i]))
+                i += 1
+                continue
+            }
             if line.isEmpty { i += 1; continue }
             if line.hasPrefix("|") {
                 // Within a run of table rows, drop only the conventional separator
@@ -339,14 +359,17 @@ public enum DocumentRenderer {
 
     // MARK: - Inline rendering
 
-    // Sentinels that bracket extracted code spans; private-use scalars that won't
+    // Sentinels that bracket extracted spans; private-use scalars that won't
     // appear in document text and aren't touched by escaping or emphasis regexes.
     private static let codeOpen = "\u{E000}"
     private static let codeClose = "\u{E001}"
+    private static let linkOpen = "\u{E002}"
+    private static let linkClose = "\u{E003}"
+
+    private struct InlineLink { let label: String; let url: String; let isImage: Bool }
 
     /// Replaces inline code spans with placeholders so the link/emphasis passes
-    /// don't rewrite Markdown metacharacters inside code. Returns the rewritten
-    /// text and the captured span contents (in order).
+    /// don't rewrite Markdown metacharacters inside code.
     private static func extractCodeSpans(_ text: String) -> (text: String, spans: [String]) {
         var spans: [String] = []
         var result = ""
@@ -365,36 +388,81 @@ public enum DocumentRenderer {
         return (result, spans)
     }
 
-    /// Converts inline Markdown to HTML. Code spans are protected first; remaining
-    /// text is HTML-escaped (so links/images can't break out of attributes), then
-    /// images, links, and emphasis are applied.
+    /// Replaces links/images with placeholders before escaping/emphasis so a URL
+    /// (or alt text) containing emphasis characters isn't rewritten inside the
+    /// generated attribute. Handles CommonMark angle-bracket destinations
+    /// `(<url with spaces (and parens)>)` that WordConverter emits.
+    private static func extractLinks(_ text: String) -> (text: String, links: [InlineLink]) {
+        let pattern = "(!)?\\[([^\\]]*)\\]\\((?:<([^>]+)>|([^)]+))\\)"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return (text, []) }
+        let ns = text as NSString
+        var links: [InlineLink] = []
+        var result = ""
+        var last = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            result += ns.substring(with: NSRange(location: last, length: match.range.location - last))
+            let isImage = match.range(at: 1).location != NSNotFound
+            let label = nsSubstring(ns, match.range(at: 2))
+            let url = match.range(at: 3).location != NSNotFound ? nsSubstring(ns, match.range(at: 3)) : nsSubstring(ns, match.range(at: 4))
+            result += "\(linkOpen)\(links.count)\(linkClose)"
+            links.append(InlineLink(label: label, url: url, isImage: isImage))
+            last = match.range.location + match.range.length
+        }
+        result += ns.substring(with: NSRange(location: last, length: ns.length - last))
+        return (result, links)
+    }
+
+    private static func nsSubstring(_ ns: NSString, _ range: NSRange) -> String {
+        range.location == NSNotFound ? "" : ns.substring(with: range)
+    }
+
+    /// Converts inline Markdown to HTML. Code spans and links/images are pulled
+    /// out first (so their contents/URLs aren't touched by escaping or emphasis),
+    /// the remaining text is HTML-escaped and emphasized, then they're restored.
     private static func inlineHTML(_ text: String) -> String {
-        let (protectedText, spans) = extractCodeSpans(text)
-        var result = escapeHTML(protectedText)
-        result = result.replacingOccurrences(of: "!\\[([^\\]]*)\\]\\(([^)]+)\\)", with: "<img src=\"$2\" alt=\"$1\">", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\\[([^\\]]*)\\]\\(([^)]+)\\)", with: "<a href=\"$2\">$1</a>", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\\*\\*\\*(.+?)\\*\\*\\*", with: "<strong><em>$1</em></strong>", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\\*\\*(.+?)\\*\\*", with: "<strong>$1</strong>", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\\*(.+?)\\*", with: "<em>$1</em>", options: .regularExpression)
+        let (afterCode, spans) = extractCodeSpans(text)
+        let (afterLinks, links) = extractLinks(afterCode)
+        var result = applyEmphasisHTML(escapeHTML(afterLinks))
+        for (index, link) in links.enumerated() {
+            let tag = link.isImage
+                ? "<img src=\"\(escapeHTML(link.url))\" alt=\"\(escapeHTML(link.label))\">"
+                : "<a href=\"\(escapeHTML(link.url))\">\(applyEmphasisHTML(escapeHTML(link.label)))</a>"
+            result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: tag)
+        }
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
         }
         return result
     }
 
+    private static func applyEmphasisHTML(_ text: String) -> String {
+        var result = text
+        result = result.replacingOccurrences(of: "\\*\\*\\*(.+?)\\*\\*\\*", with: "<strong><em>$1</em></strong>", options: .regularExpression)
+        result = result.replacingOccurrences(of: "\\*\\*(.+?)\\*\\*", with: "<strong>$1</strong>", options: .regularExpression)
+        result = result.replacingOccurrences(of: "\\*(.+?)\\*", with: "<em>$1</em>", options: .regularExpression)
+        return result
+    }
+
     /// Strips inline Markdown to plain text (links/images become their label/alt;
     /// code spans keep their literal contents).
     private static func stripInline(_ text: String) -> String {
-        let (protectedText, spans) = extractCodeSpans(text)
-        var result = protectedText
-        result = result.replacingOccurrences(of: "!\\[([^\\]]*)\\]\\(([^)]+)\\)", with: "$1", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\\[([^\\]]*)\\]\\(([^)]+)\\)", with: "$1", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\\*\\*\\*(.+?)\\*\\*\\*", with: "$1", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\\*\\*(.+?)\\*\\*", with: "$1", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\\*(.+?)\\*", with: "$1", options: .regularExpression)
+        let (afterCode, spans) = extractCodeSpans(text)
+        let (afterLinks, links) = extractLinks(afterCode)
+        var result = applyEmphasisStrip(afterLinks)
+        for (index, link) in links.enumerated() {
+            result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: applyEmphasisStrip(link.label))
+        }
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: span)
         }
+        return result
+    }
+
+    private static func applyEmphasisStrip(_ text: String) -> String {
+        var result = text
+        result = result.replacingOccurrences(of: "\\*\\*\\*(.+?)\\*\\*\\*", with: "$1", options: .regularExpression)
+        result = result.replacingOccurrences(of: "\\*\\*(.+?)\\*\\*", with: "$1", options: .regularExpression)
+        result = result.replacingOccurrences(of: "\\*(.+?)\\*", with: "$1", options: .regularExpression)
         return result
     }
 

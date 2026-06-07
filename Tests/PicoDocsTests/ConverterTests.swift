@@ -264,4 +264,34 @@ struct DocumentRendererTests {
         #expect(xml.contains("<section kind=\"body\" title=\"S\">"))
         #expect(xml.contains("a &lt; b"))
     }
+
+    @Test("Emphasis characters in a link URL aren't rewritten; label emphasis is kept")
+    func htmlLinkURLEmphasis() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "[x](https://e.com/*id*) and [**bold**](https://e.com)"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("href=\"https://e.com/*id*\""))   // URL kept literal
+        #expect(!html.contains("<em>id</em>"))
+        #expect(html.contains("<a href=\"https://e.com\"><strong>bold</strong></a>"))
+    }
+
+    @Test("HTML handles angle-bracket link destinations with spaces and parens")
+    func htmlAngleBracketLink() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "[label](<https://e.com/a b(1)>)"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<a href=\"https://e.com/a b(1)\">label</a>"))
+    }
+
+    @Test("CSV preserves fenced code lines instead of splitting them")
+    func csvCodeFence() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Code:\n\n```\n| grep foo | wc -l |\n```"),
+        ])
+        let csv = try DocumentRenderer.render(result, to: .csv)
+        #expect(csv.contains("| grep foo | wc -l |"))
+        #expect(!csv.contains("grep foo,wc -l"))
+    }
 }
