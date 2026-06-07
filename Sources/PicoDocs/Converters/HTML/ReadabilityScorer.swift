@@ -114,6 +114,7 @@ enum ReadabilityScorer {
         "skyscraper", "social", "sponsor", "supplemental", "ad-break", "agegate",
         "pagination", "pager", "popup", "yom-remote", "nav", "masthead", "modal",
         "cookie", "complementary", "contentinfo", "dialog", "share",
+        "newsletter", "promo", "subscribe", "signup", "sign-up", "paywall",
     ]
 
     /// Substrings that keep a node even if it also matched `unlikely`.
@@ -224,28 +225,72 @@ enum ReadabilityScorer {
 
     // MARK: - Sibling aggregation
 
+    /// Table-structure tags whose Markdown only renders correctly from the
+    /// enclosing `<table>` (HTMLToMarkdown only has a `table` handler).
+    private static let tableSectionTags: Set<String> = [
+        "td", "th", "tr", "tbody", "thead", "tfoot", "caption", "col", "colgroup",
+    ]
+
     /// Assembles the final article subtree. Readability merges the top candidate
     /// with its qualifying siblings; to preserve reading order we keep them in
-    /// place and instead prune only the *non*-qualifying siblings from the shared
-    /// parent, returning that parent. Because nothing is moved, original DOM order
-    /// and per-node base URIs (link resolution) are preserved — the same ordered
-    /// set as Readability's "wrap siblings in a new container", without allocating
-    /// a node or relying on element-construction APIs.
+    /// place and prune the rest. Because nothing is moved, original DOM order and
+    /// per-node base URIs (link resolution) are preserved — the same ordered set
+    /// as Readability's "wrap siblings in a new container", without allocating a
+    /// node or relying on element-construction APIs.
     private static func assembleArticle(_ topCandidate: Element, topScore: Double, scores: [ObjectIdentifier: Double]) -> Element {
-        // For a body-level candidate there are no meaningful siblings to merge
-        // (its only sibling would be <head>); return it directly.
-        guard topCandidate.tagName().lowercased() != "body", let parent = topCandidate.parent() else {
-            return topCandidate
+        // A candidate inside a table renders correctly only from the <table>
+        // (otherwise the cells are concatenated instead of forming a table).
+        let candidate = enclosingTable(of: topCandidate) ?? topCandidate
+
+        // Choose the root to filter and the child to always keep (the anchor):
+        //  - a normal candidate: filter its parent's children, keep the candidate;
+        //  - a body-level candidate (flat layout where <body> itself wins): filter
+        //    <body>'s own children so promo/newsletter blocks don't leak.
+        let root: Element
+        let anchor: Element?
+        if candidate.tagName().lowercased() == "body" || candidate.parent() == nil {
+            root = candidate
+            anchor = nil
+        } else if let parent = candidate.parent() {
+            root = parent
+            anchor = candidate
+        } else {
+            return candidate
         }
+
         let threshold = max(10.0, topScore * 0.2)
 
-        for sibling in parent.children().array() {
-            if sibling === topCandidate { continue }
-            if !siblingQualifies(sibling, threshold: threshold, scores: scores) {
-                try? sibling.remove()
+        // Prune at the node level: drop non-qualifying element children and loose
+        // non-blank text nodes (HTMLToMarkdown renders text nodes directly, so a
+        // bare "Advertisement" string between blocks would otherwise leak). The
+        // anchor and qualifying element siblings stay in their original order.
+        for child in root.getChildNodes() {
+            if let element = child as? Element {
+                if element === anchor { continue }
+                if !siblingQualifies(element, threshold: threshold, scores: scores) {
+                    try? element.remove()
+                }
+            } else if let textNode = child as? TextNode {
+                if !textNode.getWholeText().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    try? textNode.remove()
+                }
             }
         }
-        return parent
+        return root
+    }
+
+    /// Returns the `<table>` enclosing a table-structure element (or the element
+    /// itself if it is a `<table>`); `nil` for non-table elements.
+    private static func enclosingTable(of element: Element) -> Element? {
+        let tag = element.tagName().lowercased()
+        if tag == "table" { return element }
+        guard tableSectionTags.contains(tag) else { return nil }
+        var current = element.parent()
+        while let node = current {
+            if node.tagName().lowercased() == "table" { return node }
+            current = node.parent()
+        }
+        return nil
     }
 
     /// Whether a sibling of the top candidate looks like article content worth
