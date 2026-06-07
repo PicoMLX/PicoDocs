@@ -36,6 +36,14 @@ struct ConverterTests {
         #expect(image?.metadata["base64"]?.isEmpty == false)
     }
 
+    @Test("DOCX hyperlink wrapping an image becomes a linked image")
+    func docxLinkedImage() async throws {
+        let md = try await PicoDocsEngine.convert(
+            data: Fixture.data("linked-image", "docx"), filename: "linked-image.docx"
+        ).markdown()
+        #expect(md.contains("[![A red dot](image1.png)](https://example.com)"))
+    }
+
     @Test("XLSX converts each sheet's cells to Markdown")
     func xlsx() async throws {
         let md = try await PicoDocsEngine.convert(data: Fixture.data("sample", "xlsx"), filename: "sample.xlsx").markdown()

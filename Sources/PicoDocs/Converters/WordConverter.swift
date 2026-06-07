@@ -122,7 +122,11 @@ public struct WordConverter: DocumentConverter {
                 let inner = renderInline(child, relationships: relationships)
                 let relId = (try? child.attr("r:id")) ?? ""
                 if let url = relationships[relId], !url.isEmpty, !inner.isEmpty {
-                    out += "[\(escapeLinkLabel(inner))](\(escapeLinkDestination(url)))"
+                    // A hyperlink wrapping an image becomes a linked image
+                    // ([![alt](src)](url)); don't escape the nested image's
+                    // brackets. Plain text labels are still escaped.
+                    let label = inner.contains("![") ? inner : escapeLinkLabel(inner)
+                    out += "[\(label)](\(escapeLinkDestination(url)))"
                 } else {
                     out += inner
                 }
@@ -271,6 +275,12 @@ public struct WordConverter: DocumentConverter {
 
     /// Inline Markdown image reference for a `w:drawing`/`w:pict`, using the
     /// drawing's alt text (`descr`/`name`) and the embedded media's filename.
+    ///
+    /// The reference is emitted from the relationship target even if the media
+    /// bytes are later found unreadable (`extractImages` then omits the bytes):
+    /// a document whose text parses shouldn't fail — or lose the image's alt
+    /// text — over one missing media part. Deliberate graceful degradation, not
+    /// strict failure.
     static func imageMarkdown(in drawing: Element, relationships: [String: String]) -> String {
         guard let target = imageTarget(in: drawing, relationships: relationships) else { return "" }
         let filename = (target as NSString).lastPathComponent
