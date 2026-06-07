@@ -166,11 +166,132 @@ struct DocumentRendererTests {
         #expect(rendered.contains("second"))
     }
 
-    @Test("Unimplemented formats throw rather than leak Markdown")
-    func unsupportedFormatThrows() {
-        let result = ConverterResult(sections: [DocumentSection(kind: .body, markdown: "x")])
-        #expect(throws: PicoDocsError.self) {
-            _ = try DocumentRenderer.render(result, to: .html)
-        }
+    @Test("HTML rendering converts headings, emphasis, links, and tables")
+    func html() throws {
+        let result = ConverterResult(title: "Doc", sections: [
+            DocumentSection(kind: .body, markdown: "# Title\n\nHello **world** and a [link](https://example.com).\n\n| A | B |\n| --- | --- |\n| 1 | 2 |"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<h1>Title</h1>"))
+        #expect(html.contains("<strong>world</strong>"))
+        #expect(html.contains("<a href=\"https://example.com\">link</a>"))
+        #expect(html.contains("<th>A</th>"))
+        #expect(html.contains("<td>1</td>"))
+    }
+
+    @Test("HTML rendering escapes special characters including quotes")
+    func htmlEscaping() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "1 < 2 & 3 > 0 with \"quotes\" and 'single'"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("1 &lt; 2 &amp; 3 &gt; 0 with &quot;quotes&quot; and &#39;single&#39;"))
+    }
+
+    @Test("HTML rendering escapes quotes in link URLs (no attribute breakout)")
+    func htmlLinkURLEscaping() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "[x](https://e.com/a\" onmouseover=\"alert(1))"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(!html.contains("a\" onmouseover=\"alert"))   // the raw quote cannot close href
+        #expect(html.contains("&quot;"))
+    }
+
+    @Test("HTML rendering handles combined and nested emphasis")
+    func htmlEmphasis() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "***both*** and **bold *inner* bold**"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<strong><em>both</em></strong>"))
+        #expect(html.contains("<strong>bold <em>inner</em> bold</strong>"))
+    }
+
+    @Test("Code spans keep Markdown metacharacters literal")
+    func htmlCodeSpan() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Use `*value*` literally."),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<code>*value*</code>"))
+        #expect(!html.contains("<em>value</em>"))
+    }
+
+    @Test("CSV keeps all-dash data rows after the header separator")
+    func csvAllDashDataRow() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .sheet, markdown: "| A | B |\n| --- | --- |\n| - | - |\n| 1 | 2 |"),
+        ])
+        let csv = try DocumentRenderer.render(result, to: .csv)
+        #expect(csv.contains("A,B"))
+        #expect(csv.contains("-,-"))      // the all-dash DATA row is preserved
+        #expect(csv.contains("1,2"))
+    }
+
+    @Test("Plaintext rendering strips Markdown syntax")
+    func plaintext() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "# Heading\n\nHello **world** with a [link](https://example.com)."),
+        ])
+        let text = try DocumentRenderer.render(result, to: .plaintext)
+        #expect(text.contains("Heading"))
+        #expect(text.contains("Hello world with a link."))
+        #expect(!text.contains("**"))
+        #expect(!text.contains("#"))
+        #expect(!text.contains("]("))
+    }
+
+    @Test("CSV rendering turns Markdown tables into CSV rows")
+    func csv() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .sheet, markdown: "| Name | Score |\n| --- | --- |\n| Alice | 42 |\n| Bob, Jr | 7 |"),
+        ])
+        let csv = try DocumentRenderer.render(result, to: .csv)
+        #expect(csv.contains("Name,Score"))
+        #expect(csv.contains("Alice,42"))
+        #expect(csv.contains("\"Bob, Jr\",7"))   // a field with a comma is quoted
+    }
+
+    @Test("XML rendering wraps sections with escaped content")
+    func xml() throws {
+        let result = ConverterResult(title: "T & U", sections: [
+            DocumentSection(title: "S", kind: .body, markdown: "a < b"),
+        ])
+        let xml = try DocumentRenderer.render(result, to: .xml)
+        #expect(xml.contains("<?xml version=\"1.0\""))
+        #expect(xml.contains("title=\"T &amp; U\""))
+        #expect(xml.contains("<section kind=\"body\" title=\"S\">"))
+        #expect(xml.contains("a &lt; b"))
+    }
+
+    @Test("Emphasis characters in a link URL aren't rewritten; label emphasis is kept")
+    func htmlLinkURLEmphasis() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "[x](https://e.com/*id*) and [**bold**](https://e.com)"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("href=\"https://e.com/*id*\""))   // URL kept literal
+        #expect(!html.contains("<em>id</em>"))
+        #expect(html.contains("<a href=\"https://e.com\"><strong>bold</strong></a>"))
+    }
+
+    @Test("HTML handles angle-bracket link destinations with spaces and parens")
+    func htmlAngleBracketLink() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "[label](<https://e.com/a b(1)>)"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<a href=\"https://e.com/a b(1)\">label</a>"))
+    }
+
+    @Test("CSV preserves fenced code lines instead of splitting them")
+    func csvCodeFence() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Code:\n\n```\n| grep foo | wc -l |\n```"),
+        ])
+        let csv = try DocumentRenderer.render(result, to: .csv)
+        #expect(csv.contains("| grep foo | wc -l |"))
+        #expect(!csv.contains("grep foo,wc -l"))
     }
 }
