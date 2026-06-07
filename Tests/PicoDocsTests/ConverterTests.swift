@@ -66,6 +66,17 @@ struct ConverterTests {
         #expect(text.contains("[1] This is the footnote text."))      // definition listed
     }
 
+    @Test("DOCX extracts text box content once (deduping the mc:Fallback copy)")
+    func docxTextBox() async throws {
+        let md = try await PicoDocsEngine.convert(
+            data: Fixture.data("textbox", "docx"), filename: "textbox.docx"
+        ).markdown()
+        #expect(md.contains("Body before."))
+        #expect(md.contains("Body after."))
+        #expect(md.contains("Text box content."))                           // text box extracted
+        #expect(md.components(separatedBy: "Text box content.").count == 2)  // exactly once (Fallback deduped)
+    }
+
     @Test("DOCX hyperlink wrapping an image keeps the image (renderer-safe)")
     func docxLinkedImage() async throws {
         let md = try await PicoDocsEngine.convert(

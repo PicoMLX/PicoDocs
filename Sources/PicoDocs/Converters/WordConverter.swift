@@ -35,7 +35,10 @@ public struct WordConverter: DocumentConverter {
             throw PicoDocsError.emptyDocument
         }
 
-        let blocks = try Self.renderBlocks(in: body, relationships: relationships)
+        var blocks = try Self.renderBlocks(in: body, relationships: relationships)
+        // Text boxes (shapes with text) store their content in `w:txbxContent`
+        // outside the normal block flow; extract it and append as body blocks.
+        blocks += try Self.extractTextBoxes(from: body, relationships: relationships)
         var markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Footnote/endnote text lives in separate parts; append the referenced
@@ -113,6 +116,25 @@ public struct WordConverter: DocumentConverter {
             }
         }
         return blocks
+    }
+
+    /// Extracts the text of text boxes (shapes with text), whose content is stored
+    /// in `w:txbxContent` outside the normal block flow, rendered as Markdown
+    /// blocks. The `mc:Fallback` (legacy VML) copy of a text box that also appears
+    /// in `mc:Choice` is skipped so its text isn't duplicated.
+    static func extractTextBoxes(from body: Element, relationships: [String: String]) throws -> [String] {
+        var blocks: [String] = []
+        for txbx in (try? body.getElementsByTag("w:txbxContent").array()) ?? [] {
+            if isInsideFallback(txbx) { continue }
+            blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships))
+        }
+        return blocks
+    }
+
+    /// True when an element is inside an `mc:Fallback` (the alternate-content copy
+    /// that duplicates the primary `mc:Choice` representation).
+    private static func isInsideFallback(_ element: Element) -> Bool {
+        element.parents().array().contains { $0.tagName().lowercased() == "mc:fallback" }
     }
 
     // MARK: - Paragraphs
@@ -223,8 +245,9 @@ public struct WordConverter: DocumentConverter {
             case "w:endnotereference":
                 if let id = try? node.attr("w:id"), !id.isEmpty { textBuffer += "[^en\(id)]" }
             default:
-                // NOTE: text-box content (w:txbxContent) isn't extracted yet —
-                // a later enhancement.
+                // Text-box content (w:txbxContent) is intentionally NOT rendered
+                // here — it's extracted once by extractTextBoxes (a separate pass),
+                // so rendering it inline too would double-count nested text boxes.
                 continue
             }
         }
