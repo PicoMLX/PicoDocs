@@ -4,8 +4,9 @@
 //
 //  Generic fallback converter. Decodes the input as text and emits it as a
 //  single Markdown body section. Registered at generic priority so it only runs
-//  after more specific converters decline. (Structure-aware CSV/JSON/XML
-//  converters arrive in later phases; for now they fall through to here.)
+//  after more specific converters decline. (CSV has its own structure-aware
+//  CSVConverter; a structured JSON/XML converter may follow — for now those fall
+//  through to here as text.)
 //
 
 import Foundation
@@ -16,7 +17,7 @@ public struct PlainTextConverter: DocumentConverter {
 
     public func accepts(_ info: StreamInfo) -> Bool {
         switch info.detectedFormat {
-        case .plainText, .csv, .json, .xml:
+        case .plainText, .json, .xml:
             return true
         default:
             // Only accept formats positively identified as text. In particular

@@ -160,12 +160,27 @@ public enum DocumentRenderer {
 
     // MARK: - CSV
 
-    /// Emits CSV from the document's Markdown: pipe-table rows become CSV rows,
-    /// and any other non-blank line becomes a single-field row, so spreadsheet
-    /// exports are clean and prose isn't silently dropped.
+    /// Emits CSV from the document. A section that carries a lossless CSV
+    /// serialization in `metadata["csv"]` (e.g. `CSVConverter`, whose Markdown
+    /// table can't hold embedded newlines/whitespace) is emitted verbatim;
+    /// otherwise pipe-table rows become CSV rows and any other non-blank line
+    /// becomes a single-field row, so prose isn't silently dropped.
     private static func renderCSV(_ result: ConverterResult) -> String {
+        var parts: [String] = []
+        for section in result.sections where section.kind != .image {
+            if let rawCSV = section.metadata["csv"], !rawCSV.isEmpty {
+                parts.append(rawCSV)
+            } else {
+                let rows = csvRows(fromMarkdown: section.markdown)
+                if !rows.isEmpty { parts.append(rows.joined(separator: "\n")) }
+            }
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    private static func csvRows(fromMarkdown markdown: String) -> [String] {
         var rows: [String] = []
-        let lines = result.markdown().components(separatedBy: "\n")
+        let lines = markdown.components(separatedBy: "\n")
         var i = 0
         var inCodeFence = false
         while i < lines.count {
@@ -200,7 +215,7 @@ public enum DocumentRenderer {
                 i += 1
             }
         }
-        return rows.joined(separator: "\n")
+        return rows
     }
 
     // MARK: - Markdown block parsing
