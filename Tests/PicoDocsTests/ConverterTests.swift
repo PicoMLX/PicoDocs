@@ -51,10 +51,8 @@ struct ConverterTests {
             data: Fixture.data("footnote", "docx"), filename: "footnote.docx", to: .html
         )
         #expect(!html.contains("[^fn2]"))                                  // no literal marker
-        #expect(html.contains("Body text<sup class=\"footnote-ref\""))     // inline superscript ref
-        #expect(html.contains(">1</a></sup>"))                             // numbered by reference order
+        #expect(html.contains("Body text<sup class=\"footnote-ref\"><a href=\"#fn-fn2\">1</a></sup>"))
         #expect(html.contains("<li id=\"fn-fn2\">"))                       // definition anchor
-        #expect(html.contains("class=\"footnote-backref\""))              // backreference
         #expect(html.contains("This is the footnote text."))
     }
 
@@ -304,6 +302,60 @@ struct DocumentRendererTests {
         let html = try DocumentRenderer.render(result, to: .html)
         #expect(!html.contains("a\" onmouseover=\"alert"))   // the raw quote cannot close href
         #expect(html.contains("&quot;"))
+    }
+
+    @Test("Footnote references inside code spans are not rewritten (HTML)")
+    func footnoteCodeSpanHTML() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^fn1] and code `[^fn1]` here.\n\n[^fn1]: note"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<code>[^fn1]</code>"))                          // code span kept literal
+        #expect(html.contains("Body<sup class=\"footnote-ref\"><a href=\"#fn-fn1\">1</a></sup>"))
+        #expect(html.components(separatedBy: "<sup class=\"footnote-ref\">").count == 2)   // only the real ref
+    }
+
+    @Test("Footnote references inside code spans are not rewritten (plaintext)")
+    func footnoteCodeSpanPlaintext() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^fn1] code `[^fn1]`.\n\n[^fn1]: note"),
+        ])
+        let text = try DocumentRenderer.render(result, to: .plaintext)
+        #expect(text.contains("Body[1] code [^fn1]."))   // real ref -> [1]; code span literal
+        #expect(text.contains("[1] note"))
+    }
+
+    @Test("Footnote definitions inside code fences stay as code")
+    func footnoteDefinitionInFence() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Intro[^fn1]\n\n```\n[^fn1]: not a real note\n```\n\n[^fn1]: real note"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<pre><code>[^fn1]: not a real note</code></pre>"))   // fenced def preserved
+        #expect(html.contains("<li id=\"fn-fn1\">real note</li>"))                   // real def extracted
+        #expect(html.contains("Intro<sup class=\"footnote-ref\">"))
+    }
+
+    @Test("Footnote ids are HTML-escaped in attributes (no breakout)")
+    func footnoteIdEscapedHTML() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Ref[^a\"x]more\n\n[^a\"x]: note text"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("href=\"#fn-a&quot;x\""))     // quote escaped in the ref link
+        #expect(html.contains("<li id=\"fn-a&quot;x\">"))   // and in the definition anchor
+        #expect(!html.contains("#fn-a\"x"))                 // no raw-quote attribute breakout
+    }
+
+    @Test("Repeated footnote references produce no duplicate element ids")
+    func footnoteRepeatedReferenceHTML() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "First[^fn1] then again[^fn1].\n\n[^fn1]: note"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(!html.contains("id=\"fnref-"))                                            // references carry no id
+        #expect(html.components(separatedBy: "<sup class=\"footnote-ref\">").count == 3)   // both refs rendered
+        #expect(html.contains("<li id=\"fn-fn1\">note</li>"))
     }
 
     @Test("HTML rendering handles combined and nested emphasis")

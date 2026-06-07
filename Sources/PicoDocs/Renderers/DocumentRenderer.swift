@@ -43,34 +43,33 @@ public enum DocumentRenderer {
         let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
         let numbers = footnoteNumbers(in: bodyMarkdown, notes: notes)
         var out: [String] = []
+        // Inline `[^id]` references become `[N]` inside `stripInline` (code spans
+        // protected; code blocks keep literal markers).
         for block in parseBlocks(bodyMarkdown) {
             switch block {
             case .heading(_, let text):
-                out.append(stripInline(text))
+                out.append(stripInline(text, footnoteNumbers: numbers))
             case .paragraph(let text):
-                out.append(stripInline(text))
+                out.append(stripInline(text, footnoteNumbers: numbers))
             case .code(let code):
                 out.append(code)
             case .rule:
                 out.append("---")
             case .blockquote(let lines):
-                out.append(lines.map { stripInline($0) }.joined(separator: "\n"))
+                out.append(lines.map { stripInline($0, footnoteNumbers: numbers) }.joined(separator: "\n"))
             case .list(let ordered, let items):
                 let rendered = items.enumerated().map { index, item in
                     let marker = ordered ? "\(index + 1). " : "- "
-                    return marker + stripInline(item).replacingOccurrences(of: "\n", with: " ")
+                    return marker + stripInline(item, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: " ")
                 }
                 out.append(rendered.joined(separator: "\n"))
             case .table(let rows):
-                out.append(rows.map { $0.map { stripInline($0) }.joined(separator: "\t") }.joined(separator: "\n"))
+                out.append(rows.map { $0.map { stripInline($0, footnoteNumbers: numbers) }.joined(separator: "\t") }.joined(separator: "\n"))
             }
         }
         var text = out.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        // Footnotes: replace inline `[^id]` references with `[N]`, then append the
-        // numbered definitions (parseBlocks otherwise leaks them as plain text).
-        for (id, number) in numbers {
-            text = text.replacingOccurrences(of: "[^\(id)]", with: "[\(number)]")
-        }
+        // Append the numbered definitions (parseBlocks would otherwise leak them
+        // as plain text); the inline `[^id]` references were already numbered above.
         if !notes.isEmpty {
             let defs = notes
                 .sorted { (numbers[$0.id] ?? .max) < (numbers[$1.id] ?? .max) }
@@ -87,39 +86,32 @@ public enum DocumentRenderer {
         let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
         let numbers = footnoteNumbers(in: bodyMarkdown, notes: notes)
         var blocks: [String] = []
+        // Inline `[^id]` references are turned into superscript links inside
+        // `inlineHTML` (so code spans are protected and code blocks, which never
+        // reach `inlineHTML`, keep literal markers).
         for block in parseBlocks(bodyMarkdown) {
             switch block {
             case .heading(let level, let text):
-                blocks.append("<h\(level)>\(inlineHTML(text))</h\(level)>")
+                blocks.append("<h\(level)>\(inlineHTML(text, footnoteNumbers: numbers))</h\(level)>")
             case .paragraph(let text):
-                let html = inlineHTML(text).replacingOccurrences(of: "\n", with: "<br>\n")
+                let html = inlineHTML(text, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: "<br>\n")
                 blocks.append("<p>\(html)</p>")
             case .code(let code):
                 blocks.append("<pre><code>\(escapeHTML(code))</code></pre>")
             case .rule:
                 blocks.append("<hr>")
             case .blockquote(let lines):
-                let inner = lines.map { inlineHTML($0) }.joined(separator: "<br>\n")
+                let inner = lines.map { inlineHTML($0, footnoteNumbers: numbers) }.joined(separator: "<br>\n")
                 blocks.append("<blockquote>\(inner)</blockquote>")
             case .list(let ordered, let items):
                 let tag = ordered ? "ol" : "ul"
-                let lis = items.map { "<li>\(inlineHTML($0).replacingOccurrences(of: "\n", with: " "))</li>" }
+                let lis = items.map { "<li>\(inlineHTML($0, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: " "))</li>" }
                 blocks.append("<\(tag)>\n\(lis.joined(separator: "\n"))\n</\(tag)>")
             case .table(let rows):
-                blocks.append(renderHTMLTable(rows))
+                blocks.append(renderHTMLTable(rows, footnoteNumbers: numbers))
             }
         }
         var bodyHTML = blocks.joined(separator: "\n")
-        // Footnotes: turn inline `[^id]` references into superscript links and
-        // append the definitions as an ordered list. `[^id]` carries no link or
-        // emphasis syntax, so it passes through `inlineHTML` untouched and a
-        // literal replacement on the rendered body is safe.
-        for (id, number) in numbers {
-            bodyHTML = bodyHTML.replacingOccurrences(
-                of: "[^\(id)]",
-                with: "<sup class=\"footnote-ref\"><a href=\"#fn-\(id)\" id=\"fnref-\(id)\">\(number)</a></sup>"
-            )
-        }
         if !notes.isEmpty {
             bodyHTML += "\n" + footnotesHTML(notes: notes, numbers: numbers)
         }
@@ -159,13 +151,13 @@ public enum DocumentRenderer {
         return result
     }
 
-    private static func renderHTMLTable(_ rows: [[String]]) -> String {
+    private static func renderHTMLTable(_ rows: [[String]], footnoteNumbers: [String: Int] = [:]) -> String {
         guard let header = rows.first else { return "" }
         var out = "<table>\n<thead>\n<tr>"
-        out += header.map { "<th>\(inlineHTML($0))</th>" }.joined()
+        out += header.map { "<th>\(inlineHTML($0, footnoteNumbers: footnoteNumbers))</th>" }.joined()
         out += "</tr>\n</thead>\n<tbody>\n"
         for row in rows.dropFirst() {
-            out += "<tr>" + row.map { "<td>\(inlineHTML($0))</td>" }.joined() + "</tr>\n"
+            out += "<tr>" + row.map { "<td>\(inlineHTML($0, footnoteNumbers: footnoteNumbers))</td>" }.joined() + "</tr>\n"
         }
         out += "</tbody>\n</table>"
         return out
@@ -185,8 +177,17 @@ public enum DocumentRenderer {
         var bodyLines: [String] = []
         var notes: [(id: String, text: String)] = []
         var i = 0
+        var inFence = false
         while i < lines.count {
-            if let (id, first) = parseFootnoteDefinition(lines[i]) {
+            // A `[^id]: text` line inside a fenced code block is literal code, not
+            // a definition — track the fence so it stays in the body.
+            if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                inFence.toggle()
+                bodyLines.append(lines[i])
+                i += 1
+                continue
+            }
+            if !inFence, let (id, first) = parseFootnoteDefinition(lines[i]) {
                 var textLines = [first]
                 i += 1
                 while i < lines.count {                       // indented continuation lines
@@ -238,8 +239,12 @@ public enum DocumentRenderer {
         let items = notes
             .sorted { (numbers[$0.id] ?? .max) < (numbers[$1.id] ?? .max) }
             .map { note -> String in
+                // The id comes from document text, so escape it for attribute
+                // context. No backreference link: inline references intentionally
+                // omit a per-occurrence `id`, so there is no unique anchor to
+                // return to (this keeps anchor ids unique under repeated refs).
                 let inner = inlineHTML(note.text.replacingOccurrences(of: "\n", with: " "))
-                return "<li id=\"fn-\(note.id)\">\(inner) <a href=\"#fnref-\(note.id)\" class=\"footnote-backref\">&#8617;</a></li>"
+                return "<li id=\"fn-\(escapeHTML(note.id))\">\(inner)</li>"
             }
             .joined(separator: "\n")
         return "<section class=\"footnotes\">\n<hr>\n<ol>\n\(items)\n</ol>\n</section>"
@@ -561,10 +566,22 @@ public enum DocumentRenderer {
     /// Converts inline Markdown to HTML. Code spans and links/images are pulled
     /// out first (so their contents/URLs aren't touched by escaping or emphasis),
     /// the remaining text is HTML-escaped and emphasized, then they're restored.
-    private static func inlineHTML(_ text: String) -> String {
+    private static func inlineHTML(_ text: String, footnoteNumbers: [String: Int] = [:]) -> String {
         let (afterCode, spans) = extractCodeSpans(text)
         let (afterLinks, links) = extractLinks(afterCode)
         var result = applyEmphasisHTML(escapeHTML(afterLinks))
+        // Footnote references: `[^id]` -> a superscript link. Done here, where code
+        // spans are already placeholders, so markers inside code are not touched
+        // (code blocks never reach inlineHTML). The id is HTML-escaped for attribute
+        // safety and references carry no `id`, so repeated references don't produce
+        // duplicate element ids. The escaped id also matches the escaped body text.
+        for (id, number) in footnoteNumbers {
+            let escapedId = escapeHTML(id)
+            result = result.replacingOccurrences(
+                of: "[^\(escapedId)]",
+                with: "<sup class=\"footnote-ref\"><a href=\"#fn-\(escapedId)\">\(number)</a></sup>"
+            )
+        }
         for (index, link) in links.enumerated() {
             let tag = link.isImage
                 ? "<img src=\"\(escapeHTML(link.url))\" alt=\"\(escapeHTML(link.label))\">"
@@ -587,10 +604,15 @@ public enum DocumentRenderer {
 
     /// Strips inline Markdown to plain text (links/images become their label/alt;
     /// code spans keep their literal contents).
-    private static func stripInline(_ text: String) -> String {
+    private static func stripInline(_ text: String, footnoteNumbers: [String: Int] = [:]) -> String {
         let (afterCode, spans) = extractCodeSpans(text)
         let (afterLinks, links) = extractLinks(afterCode)
         var result = applyEmphasisStrip(afterLinks)
+        // Footnote references become `[N]` here (code spans already extracted, so
+        // markers inside code are preserved; code blocks never reach stripInline).
+        for (id, number) in footnoteNumbers {
+            result = result.replacingOccurrences(of: "[^\(id)]", with: "[\(number)]")
+        }
         for (index, link) in links.enumerated() {
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: applyEmphasisStrip(link.label))
         }
