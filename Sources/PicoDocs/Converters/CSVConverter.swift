@@ -42,46 +42,51 @@ public struct CSVConverter: DocumentConverter {
         var row: [String] = []
         var field = ""
         var inQuotes = false
-        let characters = Array(text)
-        var i = 0
+
+        // Iterate the unicode-scalar view (delimiters are ASCII) rather than
+        // materializing a `[Character]`, to avoid a full copy of large inputs.
+        let scalars = text.unicodeScalars
+        var index = scalars.startIndex
 
         func endField() { row.append(field); field = "" }
         func endRow() { endField(); rows.append(row); row = [] }
 
-        while i < characters.count {
-            let character = characters[i]
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
             if inQuotes {
-                if character == "\"" {
-                    if i + 1 < characters.count, characters[i + 1] == "\"" {
-                        field.append("\"")   // escaped quote ("")
-                        i += 2
+                if scalar == "\"" {
+                    let next = scalars.index(after: index)
+                    if next < scalars.endIndex, scalars[next] == "\"" {
+                        field.unicodeScalars.append("\"")   // escaped quote ("")
+                        index = scalars.index(after: next)
                     } else {
                         inQuotes = false
-                        i += 1
+                        index = next
                     }
                 } else {
-                    field.append(character)
-                    i += 1
+                    field.unicodeScalars.append(scalar)
+                    index = scalars.index(after: index)
                 }
                 continue
             }
-            switch character {
+            switch scalar {
             case "\"":
                 inQuotes = true
-                i += 1
+                index = scalars.index(after: index)
             case ",":
                 endField()
-                i += 1
+                index = scalars.index(after: index)
             case "\r":
-                if i + 1 < characters.count, characters[i + 1] == "\n" { i += 1 }   // CRLF
                 endRow()
-                i += 1
+                let next = scalars.index(after: index)
+                index = (next < scalars.endIndex && scalars[next] == "\n")   // CRLF
+                    ? scalars.index(after: next) : next
             case "\n":
                 endRow()
-                i += 1
+                index = scalars.index(after: index)
             default:
-                field.append(character)
-                i += 1
+                field.unicodeScalars.append(scalar)
+                index = scalars.index(after: index)
             }
         }
         // Flush the final field/row, ignoring a trailing newline's empty row.
