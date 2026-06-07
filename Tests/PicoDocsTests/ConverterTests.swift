@@ -66,6 +66,56 @@ struct ConverterTests {
         #expect(text.contains("[1] This is the footnote text."))      // definition listed
     }
 
+    @Test("DOCX extracts text box content once (deduping the mc:Fallback copy)")
+    func docxTextBox() async throws {
+        let md = try await PicoDocsEngine.convert(
+            data: Fixture.data("textbox", "docx"), filename: "textbox.docx"
+        ).markdown()
+        #expect(md.contains("Body before."))
+        #expect(md.contains("Body after."))
+        #expect(md.contains("Text box content."))                           // text box extracted
+        #expect(md.components(separatedBy: "Text box content.").count == 2)  // exactly once (Fallback deduped)
+    }
+
+    @Test("DOCX text box inside a table cell is emitted once, not duplicated")
+    func docxTextBoxInTable() async throws {
+        let md = try await PicoDocsEngine.convert(
+            data: Fixture.data("textbox-table", "docx"), filename: "textbox-table.docx"
+        ).markdown()
+        #expect(md.contains("Cell text."))                                   // table cell content
+        #expect(md.contains("Table box content."))                           // text box extracted
+        #expect(md.components(separatedBy: "Table box content.").count == 2)  // exactly once
+    }
+
+    @Test("DOCX keeps a text box whose only copy is in mc:Fallback")
+    func docxTextBoxFallbackOnly() async throws {
+        let md = try await PicoDocsEngine.convert(
+            data: Fixture.data("textbox-fallback-only", "docx"), filename: "textbox-fallback-only.docx"
+        ).markdown()
+        #expect(md.contains("Intro."))
+        #expect(md.contains("Fallback only content."))   // kept (not dropped as a redundant fallback)
+    }
+
+    @Test("DOCX renders a table that is inside a text box")
+    func docxTextBoxWithTable() async throws {
+        let md = try await PicoDocsEngine.convert(
+            data: Fixture.data("textbox-with-table", "docx"), filename: "textbox-with-table.docx"
+        ).markdown()
+        #expect(md.contains("Before box."))
+        #expect(md.contains("Inner cell A."))   // table inside the text box still renders its cells
+        #expect(md.contains("Inner cell B."))
+    }
+
+    @Test("DOCX renders only one AlternateContent branch for a text box")
+    func docxTextBoxMultiChoice() async throws {
+        let md = try await PicoDocsEngine.convert(
+            data: Fixture.data("textbox-multi-choice", "docx"), filename: "textbox-multi-choice.docx"
+        ).markdown()
+        #expect(md.contains("Choice one box."))    // first choice with a text box wins
+        #expect(!md.contains("Choice two box."))    // other branches are not also emitted
+        #expect(!md.contains("Fallback box."))
+    }
+
     @Test("DOCX hyperlink wrapping an image keeps the image (renderer-safe)")
     func docxLinkedImage() async throws {
         let md = try await PicoDocsEngine.convert(

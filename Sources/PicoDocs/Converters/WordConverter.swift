@@ -35,7 +35,10 @@ public struct WordConverter: DocumentConverter {
             throw PicoDocsError.emptyDocument
         }
 
-        let blocks = try Self.renderBlocks(in: body, relationships: relationships)
+        var blocks = try Self.renderBlocks(in: body, relationships: relationships)
+        // Text boxes (shapes with text) store their content in `w:txbxContent`
+        // outside the normal block flow; extract it and append as body blocks.
+        blocks += try Self.extractTextBoxes(from: body, relationships: relationships)
         var markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Footnote/endnote text lives in separate parts; append the referenced
@@ -113,6 +116,74 @@ public struct WordConverter: DocumentConverter {
             }
         }
         return blocks
+    }
+
+    /// Extracts the text of text boxes (shapes with text), whose content is stored
+    /// in `w:txbxContent` outside the normal block flow, rendered as Markdown
+    /// blocks. Honors markup-compatibility (`mc:AlternateContent`) semantics by
+    /// rendering only one branch per AlternateContent, so a text box isn't
+    /// duplicated across `mc:Choice`/`mc:Fallback` (or multiple choices).
+    static func extractTextBoxes(from body: Element, relationships: [String: String]) throws -> [String] {
+        var blocks: [String] = []
+        // Iterate the Elements sequence directly (no intermediate array copy).
+        guard let textBoxes = try? body.getElementsByTag("w:txbxContent") else { return blocks }
+        for txbx in textBoxes {
+            if !shouldRenderTextBox(txbx) { continue }
+            blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships))
+        }
+        return blocks
+    }
+
+    /// The nearest ancestor element with the given (lowercased) tag name.
+    private static func ancestor(of element: Element, named tag: String) -> Element? {
+        element.parents().first { $0.tagName().lowercased() == tag }
+    }
+
+    /// True when `paragraph` is inside a `w:txbxContent` that is nested *within*
+    /// `boundary` (a table cell) — i.e. a text box inside the cell, whose content
+    /// is emitted separately by extractTextBoxes. Walking up from the paragraph,
+    /// a `w:txbxContent` found before reaching `boundary` is such a nested text
+    /// box; reaching `boundary` first means any text box is an ancestor of the
+    /// cell (a table inside a text box), so the cell's own paragraphs still render.
+    private static func isInsideTextBox(_ paragraph: Element, before boundary: Element) -> Bool {
+        for ancestor in paragraph.parents() {
+            if ancestor === boundary { return false }
+            if ancestor.tagName().lowercased() == "w:txbxcontent" { return true }
+        }
+        return false
+    }
+
+    /// Whether a `w:txbxContent` should be rendered, honoring markup-compatibility
+    /// (`mc:AlternateContent`) semantics: one branch is chosen per AlternateContent
+    /// — the first `mc:Choice` containing a text box, else the `mc:Fallback` — and
+    /// only text boxes inside the chosen branch render. A text box outside any
+    /// AlternateContent always renders. Every enclosing AlternateContent must
+    /// select this text box's branch, so nested cases are handled too.
+    private static func shouldRenderTextBox(_ txbx: Element) -> Bool {
+        var inner = txbx
+        while let alternate = ancestor(of: inner, named: "mc:alternatecontent") {
+            guard let branch = selectedBranch(of: alternate),
+                  txbx.parents().contains(where: { $0 === branch }) else { return false }
+            inner = alternate
+        }
+        return true
+    }
+
+    /// The single `mc:AlternateContent` branch whose text boxes are rendered: the
+    /// first `mc:Choice` containing a `w:txbxContent`, otherwise the `mc:Fallback`.
+    private static func selectedBranch(of alternate: Element) -> Element? {
+        if let choice = alternate.children().first(where: {
+            $0.tagName().lowercased() == "mc:choice" && containsTextBox($0)
+        }) {
+            return choice
+        }
+        return alternate.children().first {
+            $0.tagName().lowercased() == "mc:fallback" && containsTextBox($0)
+        }
+    }
+
+    private static func containsTextBox(_ element: Element) -> Bool {
+        !((try? element.getElementsByTag("w:txbxContent").array()) ?? []).isEmpty
     }
 
     // MARK: - Paragraphs
@@ -223,8 +294,9 @@ public struct WordConverter: DocumentConverter {
             case "w:endnotereference":
                 if let id = try? node.attr("w:id"), !id.isEmpty { textBuffer += "[^en\(id)]" }
             default:
-                // NOTE: text-box content (w:txbxContent) isn't extracted yet —
-                // a later enhancement.
+                // Text-box content (w:txbxContent) is intentionally NOT rendered
+                // here — it's extracted once by extractTextBoxes (a separate pass),
+                // so rendering it inline too would double-count nested text boxes.
                 continue
             }
         }
@@ -273,8 +345,13 @@ public struct WordConverter: DocumentConverter {
             for tc in tr.children().array() where tc.tagName().lowercased() == "w:tc" {
                 var cellText = ""
                 // Gather all descendant paragraphs so paragraphs inside block
-                // content controls (w:sdt) within the cell are included too.
+                // content controls (w:sdt) within the cell are included too. Skip
+                // paragraphs belonging to a text box nested in this cell — those are
+                // emitted once by extractTextBoxes, so rendering them here too would
+                // duplicate them. (A table inside a text box is not skipped, so its
+                // own cells still render — see isInsideTextBox.)
                 for paragraph in (try? tc.getElementsByTag("w:p").array()) ?? [] {
+                    if isInsideTextBox(paragraph, before: tc) { continue }
                     let t = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
