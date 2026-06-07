@@ -49,9 +49,17 @@ public struct WordConverter: DocumentConverter {
             markdown += (markdown.isEmpty ? "" : "\n\n") + definitions.joined(separator: "\n")
         }
 
-        // Extract embedded images as separate .image sections (bytes preserved
-        // for downstream OCR/captioning); the body Markdown references them inline.
-        let imageSections = Self.extractImages(from: body, relationships: relationships, archive: archive)
+        // Extract embedded images (body + notes) as separate .image sections
+        // (bytes preserved for downstream OCR/captioning, and for HTML data-URL
+        // embedding); the Markdown references them inline.
+        var imageSections = Self.extractImages(from: body, relationships: relationships, archive: archive)
+        imageSections += Self.extractNoteImages(archive)
+        // De-duplicate an image referenced from both the body and a note.
+        var seenImagePaths = Set<String>()
+        imageSections = imageSections.filter { section in
+            guard let path = section.sourcePath else { return true }
+            return seenImagePaths.insert(path).inserted
+        }
 
         var sections: [DocumentSection] = []
         if !markdown.isEmpty {
@@ -392,6 +400,26 @@ public struct WordConverter: DocumentConverter {
         collect(tag: "w:footnoteReference", prefix: "fn")
         collect(tag: "w:endnoteReference", prefix: "en")
         return ids
+    }
+
+    /// Extracts embedded images from the footnote/endnote parts as `.image`
+    /// sections, using each part's own relationships — so an image inside a note
+    /// is preserved/embeddable like a body image (notes reference it inline).
+    static func extractNoteImages(_ archive: Archive) -> [DocumentSection] {
+        var sections: [DocumentSection] = []
+        for (typeSuffix, fallback, rootTag) in [
+            ("/footnotes", "word/footnotes.xml", "w:footnotes"),
+            ("/endnotes", "word/endnotes.xml", "w:endnotes"),
+        ] {
+            let part = relationshipTarget(archive, typeSuffix: typeSuffix).map(resolvePartPath) ?? fallback
+            guard let data = readEntry(archive, path: part),
+                  let xml = decodeText(data),
+                  let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()),
+                  let root = try? doc.getElementsByTag(rootTag).first() else { continue }
+            let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part))
+            sections.append(contentsOf: extractImages(from: root, relationships: relationships, archive: archive))
+        }
+        return sections
     }
 
     // MARK: - Images
