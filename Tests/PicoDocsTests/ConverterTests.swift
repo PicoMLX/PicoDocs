@@ -49,6 +49,43 @@ struct ConverterTests {
         #expect(!md.contains("\\rtf"))
     }
 
+    @Test("RTF keeps a \\uN char and skips its \\'hh fallback (no duplicate)")
+    func rtfUnicodeFallback() async throws {
+        // A U+2019 right single quote written as the control word u8217, with a
+        // hex-escape CP1252 fallback, must yield one quote -- not the quote plus
+        // the raw fallback byte.
+        let rtf = "{\\rtf1\\ansi\\uc1 It\\u8217\\'92s fine.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "q.rtf").markdown()
+        #expect(md.contains("It\u{2019}s fine."))
+        #expect(!md.contains("\u{0092}"))
+    }
+
+    @Test("RTF hex escapes decode via Windows-1252, not raw Latin-1")
+    func rtfWindows1252() async throws {
+        // 0x93/0x94 are CP1252 curly double quotes; 0x97 is an em dash. As raw
+        // Latin-1 these would be invisible C1 control characters.
+        let rtf = "{\\rtf1\\ansi \\'93quoted\\'94 and a dash\\'97here.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "q.rtf").markdown()
+        #expect(md.contains("\u{201C}quoted\u{201D}"))
+        #expect(md.contains("\u{2014}"))
+    }
+
+    @Test("RTF combines \\uN surrogate pairs into astral characters")
+    func rtfSurrogatePair() async throws {
+        // U+1F600 as a UTF-16 surrogate pair (\uc0 means no fallback bytes).
+        let rtf = "{\\rtf1\\ansi\\uc0\\u-10179\\u-8704 done.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "e.rtf").markdown()
+        #expect(md.contains("\u{1F600}"))
+        #expect(md.contains("done."))
+    }
+
+    @Test("RTF paragraph breaks inside skipped destinations don't split the body")
+    func rtfIgnoredDestinationParagraphs() async throws {
+        let rtf = "{\\rtf1\\ansi Hello{\\footnote\\par ignored}world.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "f.rtf").markdown()
+        #expect(md.contains("Helloworld."))
+    }
+
     @Test("A corrupt DOCX throws instead of degrading to plain text")
     func corruptDocxIsStrict() async throws {
         // Detected as .docx by the filename hint, but the bytes aren't a zip — the

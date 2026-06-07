@@ -37,7 +37,7 @@ public struct RTFConverter: DocumentConverter {
     // MARK: - Parser
 
     private struct Run { var text: String; var bold: Bool; var italic: Bool }
-    private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool }
+    private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool; var ucSkip: Int }
 
     /// Destination control words whose group contents are not body text.
     private static let ignoredDestinations: Set<String> = [
@@ -58,6 +58,7 @@ public struct RTFConverter: DocumentConverter {
         var ignore = false
         var ucSkip = 1
         var stack: [GroupState] = []
+        var pendingHighSurrogate: Int?
 
         var runs: [Run] = []
         var paragraphs: [String] = []
@@ -83,12 +84,12 @@ public struct RTFConverter: DocumentConverter {
             let c = chars[i]
             switch c {
             case "{":
-                stack.append(GroupState(bold: bold, italic: italic, ignore: ignore))
+                stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip))
                 i += 1
 
             case "}":
                 if let saved = stack.popLast() {
-                    bold = saved.bold; italic = saved.italic; ignore = saved.ignore
+                    bold = saved.bold; italic = saved.italic; ignore = saved.ignore; ucSkip = saved.ucSkip
                 }
                 i += 1
 
@@ -109,7 +110,7 @@ public struct RTFConverter: DocumentConverter {
 
                     switch word {
                     case "par", "row", "sect":
-                        flushParagraph()
+                        if !ignore { flushParagraph() }   // a \par inside a skipped destination isn't a body break
                     case "line":
                         appendText("\n")
                     case "tab", "cell":
@@ -124,16 +125,53 @@ public struct RTFConverter: DocumentConverter {
                         if let param { ucSkip = max(0, param) }
                     case "u":
                         if let param {
+                            // \uN values are UTF-16 code units; combine surrogate
+                            // pairs so astral characters (e.g. emoji) survive.
                             let value = param < 0 ? param + 65_536 : param
-                            if value >= 0, let scalar = Unicode.Scalar(UInt32(value)) {
-                                appendText(String(Character(scalar)))
+                            if value >= 0xD800, value <= 0xDBFF {
+                                pendingHighSurrogate = value
+                            } else if value >= 0xDC00, value <= 0xDFFF {
+                                if let high = pendingHighSurrogate {
+                                    let combined = 0x10000 + (high - 0xD800) * 0x400 + (value - 0xDC00)
+                                    if let scalar = Unicode.Scalar(UInt32(combined)) {
+                                        appendText(String(Character(scalar)))
+                                    }
+                                    pendingHighSurrogate = nil
+                                }
+                                // a lone low surrogate is dropped
+                            } else {
+                                pendingHighSurrogate = nil
+                                if value >= 0, let scalar = Unicode.Scalar(UInt32(value)) {
+                                    appendText(String(Character(scalar)))
+                                }
                             }
                         }
-                        // Skip the \ucN fallback characters that follow a \uN.
+                        // Skip the \ucN fallback that follows a \uN. Each fallback
+                        // is one "unit", which may be a literal char, a \'hh hex
+                        // escape, a control word, or a control symbol — skip whole
+                        // units so an escaped fallback (e.g. a \'92 hex escape)
+                        // isn't re-parsed and duplicated into the output.
                         var skipped = 0
-                        while i < n, skipped < ucSkip,
-                              chars[i] != "\\", chars[i] != "{", chars[i] != "}" {
-                            i += 1; skipped += 1
+                        while i < n, skipped < ucSkip {
+                            let fallback = chars[i]
+                            if fallback == "{" || fallback == "}" {
+                                break
+                            } else if fallback == "\\" {
+                                if i + 1 < n, chars[i + 1] == "'" {
+                                    i += min(4, n - i)            // \ ' h h
+                                } else if i + 1 < n, chars[i + 1].isLetter {
+                                    i += 1
+                                    while i < n, chars[i].isLetter { i += 1 }
+                                    if i < n, chars[i] == "-" { i += 1 }
+                                    while i < n, chars[i].isNumber { i += 1 }
+                                    if i < n, chars[i] == " " { i += 1 }
+                                } else {
+                                    i += 2                         // control symbol
+                                }
+                            } else {
+                                i += 1
+                            }
+                            skipped += 1
                         }
                     default:
                         if Self.ignoredDestinations.contains(word) { ignore = true }
@@ -149,13 +187,12 @@ public struct RTFConverter: DocumentConverter {
                     case "-": break                            // optional hyphen
                     case "*": ignore = true                    // ignorable destination
                     case "'":
-                        if i + 1 < n,
-                           let byte = UInt32(String([chars[i], chars[i + 1]]), radix: 16),
-                           let scalar = Unicode.Scalar(byte) {
-                            appendText(String(Character(scalar)))
+                        if i + 1 < n, let byte = UInt8(String([chars[i], chars[i + 1]]), radix: 16) {
+                            appendText(Self.decodeANSIByte(byte))
                             i += 2
                         }
-                    case "\n", "\r": flushParagraph()          // escaped newline = \par
+                    case "\n", "\r":
+                        if !ignore { flushParagraph() }        // escaped newline = \par
                     default: break
                     }
                 }
@@ -170,6 +207,17 @@ public struct RTFConverter: DocumentConverter {
         }
         flushParagraph()
         return paragraphs.joined(separator: "\n\n")
+    }
+
+    /// Decodes a single `\'hh` byte using the Windows-1252 (ANSI) code page — the
+    /// near-universal default for `\ansi` RTF — so bytes 0x80–0x9F become smart
+    /// quotes/dashes rather than C1 control characters. Falls back to Latin-1 for
+    /// the few CP1252-undefined bytes.
+    private static func decodeANSIByte(_ byte: UInt8) -> String {
+        if let decoded = String(bytes: [byte], encoding: .windowsCP1252), !decoded.isEmpty {
+            return decoded
+        }
+        return Unicode.Scalar(UInt32(byte)).map { String(Character($0)) } ?? ""
     }
 
     /// Renders one formatting run, keeping emphasis markers hugging the text (so
