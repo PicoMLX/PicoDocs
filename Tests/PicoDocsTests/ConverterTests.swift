@@ -85,6 +85,13 @@ struct ConverterTests {
         #expect(out.contains("\" 007 \""))           // quoted leading/trailing spaces preserved
     }
 
+    @Test("CSV parser keeps a final quoted empty record")
+    func csvFinalEmptyRecord() {
+        let rows = CSVConverter.parseCSV("value\n\"\"")
+        #expect(rows.count == 2)
+        #expect(rows.last == [""])
+    }
+
     @Test("EPUB converts spine chapters and reads metadata")
     func epub() async throws {
         let result = try await PicoDocsEngine.convert(data: Fixture.data("sample", "epub"), filename: "sample.epub")

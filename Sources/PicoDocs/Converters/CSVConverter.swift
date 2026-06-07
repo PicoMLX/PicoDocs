@@ -68,6 +68,10 @@ public struct CSVConverter: DocumentConverter {
         var row: [String] = []
         var field = ""
         var inQuotes = false
+        // Whether the current record has begun a field (content, a quote, or a
+        // comma). Distinguishes a real final empty field (e.g. a closing `""`)
+        // from "nothing after the last newline", which must not be emitted.
+        var fieldStarted = false
 
         // Iterate the unicode-scalar view (delimiters are ASCII) rather than
         // materializing a `[Character]`, to avoid a full copy of large inputs.
@@ -75,11 +79,12 @@ public struct CSVConverter: DocumentConverter {
         var index = scalars.startIndex
 
         func endField() { row.append(field); field = "" }
-        func endRow() { endField(); rows.append(row); row = [] }
+        func endRow() { endField(); rows.append(row); row = []; fieldStarted = false }
 
         while index < scalars.endIndex {
             let scalar = scalars[index]
             if inQuotes {
+                fieldStarted = true
                 if scalar == "\"" {
                     let next = scalars.index(after: index)
                     if next < scalars.endIndex, scalars[next] == "\"" {
@@ -98,8 +103,10 @@ public struct CSVConverter: DocumentConverter {
             switch scalar {
             case "\"":
                 inQuotes = true
+                fieldStarted = true
                 index = scalars.index(after: index)
             case ",":
+                fieldStarted = true
                 endField()
                 index = scalars.index(after: index)
             case "\r":
@@ -111,12 +118,14 @@ public struct CSVConverter: DocumentConverter {
                 endRow()
                 index = scalars.index(after: index)
             default:
+                fieldStarted = true
                 field.unicodeScalars.append(scalar)
                 index = scalars.index(after: index)
             }
         }
-        // Flush the final field/row, ignoring a trailing newline's empty row.
-        if !field.isEmpty || !row.isEmpty {
+        // Flush the final record, but skip a phantom row from a trailing newline
+        // (nothing started since the last row end).
+        if fieldStarted || !field.isEmpty || !row.isEmpty {
             endRow()
         }
         return rows
