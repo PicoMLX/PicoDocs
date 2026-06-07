@@ -41,9 +41,20 @@ public struct WordConverter: DocumentConverter {
         // Footnote/endnote text lives in separate parts; append the referenced
         // ones as Markdown footnote definitions (the body carries `[^fnN]`/
         // `[^enN]` reference markers at their positions).
+        //
+        // NOTE: these are CommonMark footnote markers in the canonical Markdown.
+        // The non-Markdown renderers (DocumentRenderer HTML/plaintext) don't
+        // render `[^id]` footnotes yet, so those exports show the literal markers
+        // — a deliberately deferred renderer follow-up; Markdown export, the
+        // canonical product, is correct.
         let notes = Self.parseNotes(archive)
         let definitions = Self.referencedNoteIDs(in: body).compactMap { id in
-            notes[id].map { "[^\(id)]: \($0)" }
+            notes[id].map { text in
+                // Indent continuation lines (from a manual w:br inside the note) so
+                // a multi-line note stays one CommonMark footnote definition rather
+                // than splitting into a separate top-level paragraph.
+                "[^\(id)]: \(text.replacingOccurrences(of: "\n", with: "\n    "))"
+            }
         }
         if !definitions.isEmpty {
             markdown += (markdown.isEmpty ? "" : "\n\n") + definitions.joined(separator: "\n")
@@ -54,7 +65,13 @@ public struct WordConverter: DocumentConverter {
         // embedding); the Markdown references them inline.
         var imageSections = Self.extractImages(from: body, relationships: relationships, archive: archive)
         imageSections += Self.extractNoteImages(archive)
-        // De-duplicate an image referenced from both the body and a note.
+        // De-duplicate an image referenced from both the body and a note (by
+        // archive path). NOTE: image identity downstream (the inline `src` and the
+        // renderer's data-URL embedding) is keyed by basename, so two *different*
+        // images that share a basename would collide — only possible when a note
+        // part lives in its own subfolder with its own media. Unique/path-aware
+        // image names are a deferred cross-cutting follow-up; standard DOCX layouts
+        // (all media under `word/media/` with unique names) are unaffected.
         var seenImagePaths = Set<String>()
         imageSections = imageSections.filter { section in
             guard let path = section.sourcePath else { return true }
