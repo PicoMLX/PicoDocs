@@ -179,11 +179,54 @@ struct DocumentRendererTests {
         #expect(html.contains("<td>1</td>"))
     }
 
-    @Test("HTML rendering escapes special characters")
+    @Test("HTML rendering escapes special characters including quotes")
     func htmlEscaping() throws {
-        let result = ConverterResult(sections: [DocumentSection(kind: .body, markdown: "1 < 2 & 3 > 0")])
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "1 < 2 & 3 > 0 with \"quotes\" and 'single'"),
+        ])
         let html = try DocumentRenderer.render(result, to: .html)
-        #expect(html.contains("1 &lt; 2 &amp; 3 &gt; 0"))
+        #expect(html.contains("1 &lt; 2 &amp; 3 &gt; 0 with &quot;quotes&quot; and &#39;single&#39;"))
+    }
+
+    @Test("HTML rendering escapes quotes in link URLs (no attribute breakout)")
+    func htmlLinkURLEscaping() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "[x](https://e.com/a\" onmouseover=\"alert(1))"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(!html.contains("a\" onmouseover=\"alert"))   // the raw quote cannot close href
+        #expect(html.contains("&quot;"))
+    }
+
+    @Test("HTML rendering handles combined and nested emphasis")
+    func htmlEmphasis() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "***both*** and **bold *inner* bold**"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<strong><em>both</em></strong>"))
+        #expect(html.contains("<strong>bold <em>inner</em> bold</strong>"))
+    }
+
+    @Test("Code spans keep Markdown metacharacters literal")
+    func htmlCodeSpan() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Use `*value*` literally."),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<code>*value*</code>"))
+        #expect(!html.contains("<em>value</em>"))
+    }
+
+    @Test("CSV keeps all-dash data rows after the header separator")
+    func csvAllDashDataRow() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .sheet, markdown: "| A | B |\n| --- | --- |\n| - | - |\n| 1 | 2 |"),
+        ])
+        let csv = try DocumentRenderer.render(result, to: .csv)
+        #expect(csv.contains("A,B"))
+        #expect(csv.contains("-,-"))      // the all-dash DATA row is preserved
+        #expect(csv.contains("1,2"))
     }
 
     @Test("Plaintext rendering strips Markdown syntax")

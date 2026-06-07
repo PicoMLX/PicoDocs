@@ -43,7 +43,7 @@ public enum DocumentRenderer {
             case .code(let code):
                 out.append(code)
             case .rule:
-                out.append("")
+                out.append("---")
             case .blockquote(let lines):
                 out.append(lines.map { stripInline($0) }.joined(separator: "\n"))
             case .list(let ordered, let items):
@@ -136,15 +136,26 @@ public enum DocumentRenderer {
     /// exports are clean and prose isn't silently dropped.
     private static func renderCSV(_ result: ConverterResult) -> String {
         var rows: [String] = []
-        for rawLine in result.markdown().components(separatedBy: "\n") {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            if line.isEmpty { continue }
+        let lines = result.markdown().components(separatedBy: "\n")
+        var i = 0
+        while i < lines.count {
+            let line = lines[i].trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { i += 1; continue }
             if line.hasPrefix("|") {
-                let cells = parseTableRow(rawLine).map { unescapePipes($0) }
-                if isTableSeparatorRow(cells) { continue }
-                rows.append(cells.map { csvField($0) }.joined(separator: ","))
+                // Within a run of table rows, drop only the conventional separator
+                // (second row), so all-dash data rows elsewhere are preserved.
+                var rowIndex = 0
+                while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
+                    let cells = parseTableRow(lines[i]).map { unescapePipes($0) }
+                    if !(rowIndex == 1 && isTableSeparatorRow(cells)) {
+                        rows.append(cells.map { csvField($0) }.joined(separator: ","))
+                    }
+                    rowIndex += 1
+                    i += 1
+                }
             } else {
                 rows.append(csvField(stripInline(line)))
+                i += 1
             }
         }
         return rows.joined(separator: "\n")
@@ -196,9 +207,14 @@ public enum DocumentRenderer {
 
             if trimmed.hasPrefix("|") {
                 var rows: [[String]] = []
+                var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
                     let cells = parseTableRow(lines[i]).map { unescapePipes($0) }
-                    if !isTableSeparatorRow(cells) { rows.append(cells) }
+                    // The header/body separator is conventionally the second row;
+                    // only drop an all-dash row there, so real data rows that
+                    // happen to be all dashes elsewhere are kept.
+                    if !(rowIndex == 1 && isTableSeparatorRow(cells)) { rows.append(cells) }
+                    rowIndex += 1
                     i += 1
                 }
                 if !rows.isEmpty { blocks.append(.table(rows)) }
@@ -323,25 +339,62 @@ public enum DocumentRenderer {
 
     // MARK: - Inline rendering
 
-    /// Converts inline Markdown to HTML on an HTML-escaped string.
+    // Sentinels that bracket extracted code spans; private-use scalars that won't
+    // appear in document text and aren't touched by escaping or emphasis regexes.
+    private static let codeOpen = "\u{E000}"
+    private static let codeClose = "\u{E001}"
+
+    /// Replaces inline code spans with placeholders so the link/emphasis passes
+    /// don't rewrite Markdown metacharacters inside code. Returns the rewritten
+    /// text and the captured span contents (in order).
+    private static func extractCodeSpans(_ text: String) -> (text: String, spans: [String]) {
+        var spans: [String] = []
+        var result = ""
+        var index = text.startIndex
+        while index < text.endIndex {
+            if text[index] == "`",
+               let close = text[text.index(after: index)...].firstIndex(of: "`") {
+                spans.append(String(text[text.index(after: index)..<close]))
+                result += "\(codeOpen)\(spans.count - 1)\(codeClose)"
+                index = text.index(after: close)
+            } else {
+                result.append(text[index])
+                index = text.index(after: index)
+            }
+        }
+        return (result, spans)
+    }
+
+    /// Converts inline Markdown to HTML. Code spans are protected first; remaining
+    /// text is HTML-escaped (so links/images can't break out of attributes), then
+    /// images, links, and emphasis are applied.
     private static func inlineHTML(_ text: String) -> String {
-        var result = escapeHTML(text)
-        result = result.replacingOccurrences(of: "`([^`]+)`", with: "<code>$1</code>", options: .regularExpression)
+        let (protectedText, spans) = extractCodeSpans(text)
+        var result = escapeHTML(protectedText)
         result = result.replacingOccurrences(of: "!\\[([^\\]]*)\\]\\(([^)]+)\\)", with: "<img src=\"$2\" alt=\"$1\">", options: .regularExpression)
         result = result.replacingOccurrences(of: "\\[([^\\]]*)\\]\\(([^)]+)\\)", with: "<a href=\"$2\">$1</a>", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\\*\\*([^*]+)\\*\\*", with: "<strong>$1</strong>", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\\*([^*]+)\\*", with: "<em>$1</em>", options: .regularExpression)
+        result = result.replacingOccurrences(of: "\\*\\*\\*(.+?)\\*\\*\\*", with: "<strong><em>$1</em></strong>", options: .regularExpression)
+        result = result.replacingOccurrences(of: "\\*\\*(.+?)\\*\\*", with: "<strong>$1</strong>", options: .regularExpression)
+        result = result.replacingOccurrences(of: "\\*(.+?)\\*", with: "<em>$1</em>", options: .regularExpression)
+        for (index, span) in spans.enumerated() {
+            result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
+        }
         return result
     }
 
-    /// Strips inline Markdown to plain text (links/images become their label/alt).
+    /// Strips inline Markdown to plain text (links/images become their label/alt;
+    /// code spans keep their literal contents).
     private static func stripInline(_ text: String) -> String {
-        var result = text
+        let (protectedText, spans) = extractCodeSpans(text)
+        var result = protectedText
         result = result.replacingOccurrences(of: "!\\[([^\\]]*)\\]\\(([^)]+)\\)", with: "$1", options: .regularExpression)
         result = result.replacingOccurrences(of: "\\[([^\\]]*)\\]\\(([^)]+)\\)", with: "$1", options: .regularExpression)
-        result = result.replacingOccurrences(of: "`([^`]+)`", with: "$1", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\\*\\*([^*]+)\\*\\*", with: "$1", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\\*([^*]+)\\*", with: "$1", options: .regularExpression)
+        result = result.replacingOccurrences(of: "\\*\\*\\*(.+?)\\*\\*\\*", with: "$1", options: .regularExpression)
+        result = result.replacingOccurrences(of: "\\*\\*(.+?)\\*\\*", with: "$1", options: .regularExpression)
+        result = result.replacingOccurrences(of: "\\*(.+?)\\*", with: "$1", options: .regularExpression)
+        for (index, span) in spans.enumerated() {
+            result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: span)
+        }
         return result
     }
 
@@ -351,14 +404,17 @@ public enum DocumentRenderer {
         text.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
     }
 
     private static func escapeXML(_ text: String) -> String {
         escapeHTML(text)
     }
 
+    // `escapeHTML` already escapes the double quote, so attribute values are safe.
     private static func escapeXMLAttribute(_ text: String) -> String {
-        escapeHTML(text).replacingOccurrences(of: "\"", with: "&quot;")
+        escapeHTML(text)
     }
 
     /// Quotes a CSV field per RFC 4180 when it contains a comma, quote, or newline.
