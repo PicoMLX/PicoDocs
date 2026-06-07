@@ -45,6 +45,27 @@ struct ConverterTests {
         #expect(md.contains("[^fn2]: This is the footnote text."))     // definition appended
     }
 
+    @Test("HTML export renders DOCX footnotes as superscript links + a notes list")
+    func docxFootnotesHTML() async throws {
+        let html = try await PicoDocsEngine.export(
+            data: Fixture.data("footnote", "docx"), filename: "footnote.docx", to: .html
+        )
+        #expect(!html.contains("[^fn2]"))                                  // no literal marker
+        #expect(html.contains("Body text<sup class=\"footnote-ref\"><a href=\"#fn-fn2\">1</a></sup>"))
+        #expect(html.contains("<li id=\"fn-fn2\">"))                       // definition anchor
+        #expect(html.contains("This is the footnote text."))
+    }
+
+    @Test("Plaintext export renders DOCX footnotes as [N] markers + definitions")
+    func docxFootnotesPlaintext() async throws {
+        let text = try await PicoDocsEngine.export(
+            data: Fixture.data("footnote", "docx"), filename: "footnote.docx", to: .plaintext
+        )
+        #expect(!text.contains("[^fn2]"))                            // no literal marker
+        #expect(text.contains("Body text[1]"))                        // reference renumbered
+        #expect(text.contains("[1] This is the footnote text."))      // definition listed
+    }
+
     @Test("DOCX hyperlink wrapping an image keeps the image (renderer-safe)")
     func docxLinkedImage() async throws {
         let md = try await PicoDocsEngine.convert(
@@ -281,6 +302,138 @@ struct DocumentRendererTests {
         let html = try DocumentRenderer.render(result, to: .html)
         #expect(!html.contains("a\" onmouseover=\"alert"))   // the raw quote cannot close href
         #expect(html.contains("&quot;"))
+    }
+
+    @Test("Footnote references inside code spans are not rewritten (HTML)")
+    func footnoteCodeSpanHTML() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^fn1] and code `[^fn1]` here.\n\n[^fn1]: note"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<code>[^fn1]</code>"))                          // code span kept literal
+        #expect(html.contains("Body<sup class=\"footnote-ref\"><a href=\"#fn-fn1\">1</a></sup>"))
+        #expect(html.components(separatedBy: "<sup class=\"footnote-ref\">").count == 2)   // only the real ref
+    }
+
+    @Test("Footnote references inside code spans are not rewritten (plaintext)")
+    func footnoteCodeSpanPlaintext() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^fn1] code `[^fn1]`.\n\n[^fn1]: note"),
+        ])
+        let text = try DocumentRenderer.render(result, to: .plaintext)
+        #expect(text.contains("Body[1] code [^fn1]."))   // real ref -> [1]; code span literal
+        #expect(text.contains("[1] note"))
+    }
+
+    @Test("Footnote definitions inside code fences stay as code")
+    func footnoteDefinitionInFence() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Intro[^fn1]\n\n```\n[^fn1]: not a real note\n```\n\n[^fn1]: real note"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<pre><code>[^fn1]: not a real note</code></pre>"))   // fenced def preserved
+        #expect(html.contains("<li id=\"fn-fn1\">real note</li>"))                   // real def extracted
+        #expect(html.contains("Intro<sup class=\"footnote-ref\">"))
+    }
+
+    @Test("Footnote ids are HTML-escaped in attributes (no breakout)")
+    func footnoteIdEscapedHTML() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Ref[^a\"x]more\n\n[^a\"x]: note text"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("href=\"#fn-a&quot;x\""))     // quote escaped in the ref link
+        #expect(html.contains("<li id=\"fn-a&quot;x\">"))   // and in the definition anchor
+        #expect(!html.contains("#fn-a\"x"))                 // no raw-quote attribute breakout
+    }
+
+    @Test("Repeated footnote references produce no duplicate element ids")
+    func footnoteRepeatedReferenceHTML() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "First[^fn1] then again[^fn1].\n\n[^fn1]: note"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(!html.contains("id=\"fnref-"))                                            // references carry no id
+        #expect(html.components(separatedBy: "<sup class=\"footnote-ref\">").count == 3)   // both refs rendered
+        #expect(html.contains("<li id=\"fn-fn1\">note</li>"))
+    }
+
+    @Test("Footnote numbering ignores code markers and drops unreferenced notes")
+    func footnoteNumberingIgnoresCode() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Intro `[^a]` then[^b].\n\n[^a]: Note A\n[^b]: Note B"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("then<sup class=\"footnote-ref\"><a href=\"#fn-b\">1</a></sup>"))  // b is 1 (code `[^a]` ignored)
+        #expect(html.contains("<code>[^a]</code>"))            // code marker preserved
+        #expect(html.contains("<li id=\"fn-b\">Note B</li>"))   // b rendered
+        #expect(!html.contains("Note A"))                       // a referenced only in code -> dropped
+    }
+
+    @Test("Footnote references inside note bodies are rendered")
+    func footnoteNestedReferenceHTML() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^a]\n\n[^a]: see [^b]\n[^b]: other"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("Body<sup class=\"footnote-ref\"><a href=\"#fn-a\">1</a></sup>"))
+        #expect(html.contains("<li id=\"fn-a\">see <sup class=\"footnote-ref\"><a href=\"#fn-b\">2</a></sup></li>"))
+        #expect(html.contains("<li id=\"fn-b\">other</li>"))
+    }
+
+    @Test("A footnote token consumed by a link is not orphaned")
+    func footnoteConsumedByLink() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "[see[^fn1](https://e.com)\n\n[^fn1]: note"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<a href=\"https://e.com\">see[^fn1</a>"))   // link wins; label stays literal
+        #expect(!html.contains("<section class=\"footnotes\">"))            // no orphaned note section
+    }
+
+    @Test("A footnote label defined twice renders only once")
+    func footnoteDuplicateDefinition() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^a]\n\n[^a]: first\n[^a]: second"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.components(separatedBy: "<li id=\"fn-a\">").count == 2)   // exactly one definition
+        #expect(html.contains("<li id=\"fn-a\">first</li>"))                    // first definition wins
+        #expect(!html.contains("second"))
+    }
+
+    @Test("Footnote definitions indented up to three spaces are recognized")
+    func footnoteIndentedDefinition() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^a]\n\n   [^a]: note"),   // 3-space indent
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("Body<sup class=\"footnote-ref\"><a href=\"#fn-a\">1</a></sup>"))
+        #expect(html.contains("<li id=\"fn-a\">note</li>"))
+        #expect(!html.contains("[^a]: note"))   // extracted, not left literal in the body
+    }
+
+    @Test("Body footnote references keep document order ahead of nested ones")
+    func footnoteNestedNumberingOrder() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^a] then[^b]\n\n[^a]: see [^c]\n[^b]: b\n[^c]: c"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        // Body refs are 1 then 2 (not 1 then 3); the note-only ref [^c] is 3.
+        #expect(html.contains("Body<sup class=\"footnote-ref\"><a href=\"#fn-a\">1</a></sup> then<sup class=\"footnote-ref\"><a href=\"#fn-b\">2</a></sup>"))
+        #expect(html.contains("<li id=\"fn-a\">see <sup class=\"footnote-ref\"><a href=\"#fn-c\">3</a></sup></li>"))
+        #expect(html.contains("<li id=\"fn-b\">b</li>"))
+        #expect(html.contains("<li id=\"fn-c\">c</li>"))
+    }
+
+    @Test("Multi-paragraph footnotes keep blank-line continuations out of the body")
+    func footnoteMultiParagraph() throws {
+        let result = ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: "Body[^a]\n\n[^a]: first\n\n    second"),
+        ])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("second</li>"))     // continuation captured inside the note
+        #expect(!html.contains("<p>second</p>"))   // not leaked as a body paragraph
     }
 
     @Test("HTML rendering handles combined and nested emphasis")
