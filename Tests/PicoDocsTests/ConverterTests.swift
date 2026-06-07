@@ -37,6 +37,18 @@ struct ConverterTests {
         #expect(result.title == "Sample EPUB")
     }
 
+    @Test("RTF converts to Markdown with paragraphs and emphasis")
+    func rtf() async throws {
+        let rtf = "{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Times New Roman;}}Hello \\b world\\b0 . This is \\i italic\\i0  text.\\par Second paragraph here.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "sample.rtf").markdown()
+        #expect(md.contains("**world**"))
+        #expect(md.contains("*italic*"))
+        #expect(md.contains("Second paragraph here."))
+        // Control tables are skipped, and no raw control words leak through.
+        #expect(!md.contains("Times New Roman"))
+        #expect(!md.contains("\\rtf"))
+    }
+
     @Test("A corrupt DOCX throws instead of degrading to plain text")
     func corruptDocxIsStrict() async throws {
         // Detected as .docx by the filename hint, but the bytes aren't a zip — the
