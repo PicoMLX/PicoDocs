@@ -81,16 +81,23 @@ Pipeline: **fetch** (`Fetchers/`) → **detect** (`Detection/ContentTypeDetector
 
 4. **Iterate until the review loop closes** (see "Definition of done"). After each
    push, the reviewers run again. If no review of the current head SHA appears
-   within ~10 minutes, re-trigger it (`@codex review`); after a second nudge with
-   no response, tell the maintainer.
+   within ~10 minutes, re-trigger it (`@codex review`); if it's still silent ~20
+   minutes after that nudge, record on the PR that Codex did not run after a manual
+   trigger, keep the PR unmerged, and tell the maintainer. **Never report Codex as
+   passing when it did not run.**
 
-5. **Record a disposition for every finding** and reply on the thread so the flow
-   is followable. Use one of:
+5. **Record a disposition for every finding** on its own review thread — work from
+   the thread list and their resolved state, not a flat comment dump — so the flow
+   is followable. Resolve a thread only once it's truly fixed, obsolete, or declined
+   with a rationale. Use one of:
    - `FIXED <sha>` — addressed in that commit.
    - `ALREADY-FIXED in <sha>` — a review that lagged behind a newer push.
-   - `WON'T-FIX (reason)` — intentional; also leave a brief code comment so the
-     decision is visible in-source on the next round.
+   - `WON'T-FIX (reason)` — intentional; explain the trade-off in the thread. Add a
+     code comment only if the reasoning helps a future maintainer — never just to
+     silence a reviewer.
    - `DEFERRED to #N` — tracked in a follow-up PR or issue.
+   - `PRE-EXISTING / UNRELATED` — outside this PR's scope; reply with evidence and
+     suggest a follow-up if it matters. Don't silently widen scope to fix it.
    Judge each finding against the actual code and CI before acting — reviewers are
    sometimes wrong, duplicated, or already addressed by a later commit.
 
@@ -101,17 +108,21 @@ Pipeline: **fetch** (`Fetchers/`) → **detect** (`Detection/ContentTypeDetector
 
 - CI is green.
 - Codex has reviewed this exact SHA and has **no open actionable findings** — i.e.
-  it reacted 👍. (A "Codex Review" comment *existing* is not approval.)
+  it reacted 👍 (a "Codex Review" comment *existing* is not approval) — **or** Codex
+  was manually re-triggered and explicitly documented on the PR as unavailable.
 - Every review thread is replied-to / resolved.
 - Gemini has no open findings. (Gemini Code Assist is being retired in 2026 — don't
   hard-block on it if it stops responding.)
+- The PR body ends with a current **Ready for human merge** block (see below).
 
 ### Merging is the maintainer's job
 
 `main` is protected: a PR merges only with **green CI and a human merge.** **Agents
-never merge and never approve PRs, and never enable auto-merge.** When a PR reaches
-"done", post a short "ready for your merge" summary (what changed, review rounds,
-any deferrals) and move on to the next phase.
+never merge, approve, close, or reopen PRs, dismiss reviews, or enable auto-merge —
+those are the maintainer's calls.** End every PR body with a **Ready for human merge**
+block: status, validation run, review state (Codex / Gemini), dependencies / merge
+order, and the exact human action needed. When a PR reaches "done", make sure that
+block is current and move on to the next phase — don't idle waiting for the merge.
 
 ---
 
@@ -126,9 +137,10 @@ any deferrals) and move on to the next phase.
 - **PRs are small and frequently stacked.** Code may reference callers or wiring
   that arrive in a later PR. If the description says the change is additive / "wired
   in #M" / "stacked on #N", **don't flag the not-yet-wired code as dead or unused.**
-- **Respect recorded dispositions.** Once the author marks a point `WON'T-FIX` or
-  `DEFERRED to #N` (or a nearby code comment documents an intentional decision),
-  **don't re-raise it** on later pushes unless the surrounding code changed.
+- **Respect recorded dispositions.** Once the author marks a point `WON'T-FIX`,
+  `DEFERRED to #N`, or `PRE-EXISTING / UNRELATED` (or a nearby code comment documents
+  an intentional decision), **don't re-raise it** on later pushes unless the
+  surrounding code changed.
 - **Anchor to the reviewed commit.** Re-review the latest pushed SHA and don't
   repeat findings already fixed in a newer commit.
 - **Signal done with a 👍 reaction** when you have no remaining actionable findings —
