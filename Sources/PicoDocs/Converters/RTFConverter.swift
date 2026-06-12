@@ -105,7 +105,11 @@ public struct RTFConverter: DocumentConverter {
             let c = chars[i]
             // Consecutive `\'hh` escapes form one (possibly multibyte) character;
             // flush the buffer before any other token so byte order is preserved.
-            if !pendingBytes.isEmpty, !(c == "\\" && i + 1 < n && chars[i + 1] == "'") {
+            // Raw newlines are non-content (RTF line-wrapping) and can fall *inside*
+            // a DBCS character (\'82\r\n\'a0), so they must not flush the buffer.
+            if !pendingBytes.isEmpty,
+               !(c == "\\" && i + 1 < n && chars[i + 1] == "'"),
+               c != "\r", c != "\n" {
                 flushBytes()
             }
             switch c {

@@ -276,6 +276,17 @@ struct ConverterTests {
         #expect(md.contains("done."))
     }
 
+    @Test("RTF DBCS character split across a raw line-wrap newline stays intact")
+    func rtfDBCSAcrossNewline() async throws {
+        // RTF wraps long lines with raw CRLFs; a double-byte char can land across
+        // one (日 = 0x93 0xFA emitted as \'93 <CRLF> \'fa). The raw newline must
+        // not flush the byte buffer mid-character.
+        let rtf = "{\\rtf1\\ansi\\ansicpg932 \\'93\r\n\\'fa done.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "jp.rtf").markdown()
+        #expect(md.contains("\u{65E5}"))   // 日
+        #expect(md.contains("done."))
+    }
+
     @Test("RTF combines \\uN surrogate pairs into astral characters")
     func rtfSurrogatePair() async throws {
         // U+1F600 as a UTF-16 surrogate pair (\uc0 means no fallback bytes).
