@@ -265,6 +265,17 @@ struct ConverterTests {
         #expect(md.contains("\u{2014}"))
     }
 
+    @Test("RTF reassembles multibyte DBCS \\'hh escapes (Shift-JIS) into characters")
+    func rtfDBCSShiftJIS() async throws {
+        // \ansicpg932 = Shift-JIS, a double-byte code page. Each CJK character is
+        // two consecutive \'hh escapes: あ = 0x82 0xA0, 日 = 0x93 0xFA,
+        // 本 = 0x96 0x7B. Decoded one byte at a time these would be mojibake.
+        let rtf = "{\\rtf1\\ansi\\ansicpg932 \\'82\\'a0\\'93\\'fa\\'96\\'7b done.\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "jp.rtf").markdown()
+        #expect(md.contains("\u{3042}\u{65E5}\u{672C}"))   // あ日本
+        #expect(md.contains("done."))
+    }
+
     @Test("RTF combines \\uN surrogate pairs into astral characters")
     func rtfSurrogatePair() async throws {
         // U+1F600 as a UTF-16 surrogate pair (\uc0 means no fallback bytes).

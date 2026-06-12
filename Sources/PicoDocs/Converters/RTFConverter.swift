@@ -65,8 +65,12 @@ public struct RTFConverter: DocumentConverter {
         var ignore = false
         var ucSkip = 1
         var ansiEncoding: String.Encoding = .windowsCP1252
+        var isDBCS = false
         var stack: [GroupState] = []
         var pendingHighSurrogate: Int?
+        // Bytes from consecutive `\'hh` escapes, buffered so a multibyte (DBCS)
+        // character split across escapes is decoded as one unit (see flushBytes).
+        var pendingBytes: [UInt8] = []
 
         var runs: [Run] = []
         var paragraphs: [String] = []
@@ -81,6 +85,15 @@ public struct RTFConverter: DocumentConverter {
             }
         }
 
+        // Decode any buffered `\'hh` bytes as a group (so a multibyte DBCS
+        // character spanning consecutive escapes survives) and append the result.
+        func flushBytes() {
+            guard !pendingBytes.isEmpty else { return }
+            let decoded = Self.decodeBytes(pendingBytes, encoding: ansiEncoding)
+            pendingBytes.removeAll(keepingCapacity: true)
+            appendText(decoded)
+        }
+
         func flushParagraph() {
             let rendered = runs.map { renderRun($0) }.joined()
             runs.removeAll(keepingCapacity: true)
@@ -90,6 +103,11 @@ public struct RTFConverter: DocumentConverter {
 
         while i < n {
             let c = chars[i]
+            // Consecutive `\'hh` escapes form one (possibly multibyte) character;
+            // flush the buffer before any other token so byte order is preserved.
+            if !pendingBytes.isEmpty, !(c == "\\" && i + 1 < n && chars[i + 1] == "'") {
+                flushBytes()
+            }
             switch c {
             case "{":
                 stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip))
@@ -132,7 +150,10 @@ public struct RTFConverter: DocumentConverter {
                     case "rdblquote": appendText("\u{201D}")
                     case "emspace", "enspace", "qmspace": appendText(" ")
                     case "ansicpg":
-                        if let param, let encoding = Self.encoding(forCodepage: param) { ansiEncoding = encoding }
+                        if let param, let encoding = Self.encoding(forCodepage: param) {
+                            ansiEncoding = encoding
+                            isDBCS = Self.dbcsCodepages.contains(param)
+                        }
                     case "bin":
                         // \binN: the next N bytes are raw binary (often inside an
                         // ignored \pict/\object) and may contain { } or \ — skip
@@ -211,7 +232,14 @@ public struct RTFConverter: DocumentConverter {
                     case "*": ignore = true                    // ignorable destination
                     case "'":
                         if i + 1 < n, let byte = UInt8(String([chars[i], chars[i + 1]]), radix: 16) {
-                            appendText(Self.decodeByte(byte, encoding: ansiEncoding))
+                            // DBCS code pages: buffer the byte (a lead byte alone is
+                            // undecodable) and let flushBytes decode whole characters.
+                            // Single-byte code pages decode each byte on its own.
+                            if isDBCS {
+                                if !ignore { pendingBytes.append(byte) }
+                            } else {
+                                appendText(Self.decodeByte(byte, encoding: ansiEncoding))
+                            }
                             i += 2
                         }
                     case "\n", "\r":
@@ -228,8 +256,26 @@ public struct RTFConverter: DocumentConverter {
                 i += 1
             }
         }
+        flushBytes()
         flushParagraph()
         return paragraphs.joined(separator: "\n\n")
+    }
+
+    /// Windows code pages that are double-byte (DBCS): one character may span two
+    /// consecutive `\'hh` escapes, so their bytes are buffered and group-decoded
+    /// (`decodeBytes`) rather than decoded one byte at a time. 932 Shift-JIS, 936
+    /// GBK, 949 UHC, 950 Big5, 1361 Johab.
+    private static let dbcsCodepages: Set<Int> = [932, 936, 949, 950, 1361]
+
+    /// Decodes a run of buffered `\'hh` bytes as a single unit using the declared
+    /// code page — required for DBCS code pages, where a lead byte is undecodable
+    /// on its own. Falls back to byte-by-byte decoding for an invalid or partial
+    /// multibyte sequence so nothing is lost.
+    private static func decodeBytes(_ bytes: [UInt8], encoding: String.Encoding) -> String {
+        if let decoded = String(bytes: bytes, encoding: encoding), !decoded.isEmpty {
+            return decoded
+        }
+        return bytes.map { decodeByte($0, encoding: encoding) }.joined()
     }
 
     /// Decodes a single `\'hh` byte using the document's declared code page
@@ -237,10 +283,10 @@ public struct RTFConverter: DocumentConverter {
     /// become the right punctuation/letters rather than C1 control characters.
     /// Falls back to Windows-1252, then Latin-1, for undecodable bytes.
     ///
-    /// Each `\'hh` is decoded on its own. Multibyte ANSI code pages (e.g. 932
-    /// Shift-JIS) that split one character across consecutive `\'hh` escapes are
-    /// not reassembled here — a deliberately deferred legacy niche, since modern
-    /// RTF emits non-ASCII (including CJK) as `\uN`, which is handled in full.
+    /// Used for single-byte code pages; DBCS code pages declared via `\ansicpg`
+    /// (Shift-JIS, GBK, Big5, …) are reassembled across escapes by `decodeBytes`.
+    /// A document that switches code page per font via `\fcharsN` alone (without
+    /// `\ansicpg`) is still a deferred niche — the font table isn't tracked.
     private static func decodeByte(_ byte: UInt8, encoding: String.Encoding) -> String {
         if let decoded = String(bytes: [byte], encoding: encoding), !decoded.isEmpty {
             return decoded
