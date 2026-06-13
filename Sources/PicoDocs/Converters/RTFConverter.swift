@@ -56,7 +56,11 @@ public struct RTFConverter: DocumentConverter {
     ]
 
     static func markdown(fromRTF rtf: String) -> String {
-        let chars = Array(rtf)
+        // Normalize CRLF line wraps to a single LF first: Swift treats "\r\n" as
+        // one grapheme cluster, so it would match neither the per-character "\r"
+        // nor "\n" handling below — it would leak into the output as content and
+        // could fall *inside* a buffered DBCS sequence, splitting the character.
+        let chars = Array(rtf.replacingOccurrences(of: "\r\n", with: "\n"))
         let n = chars.count
         var i = 0
 
