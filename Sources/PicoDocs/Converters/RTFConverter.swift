@@ -56,6 +56,10 @@ public struct RTFConverter: DocumentConverter {
     ]
 
     static func markdown(fromRTF rtf: String) -> String {
+        // NOTE: Swift clusters "\r\n" into a single Character, so the newline
+        // handling below matches it as one grapheme (alongside lone "\r"/"\n")
+        // rather than normalizing the string — which keeps `\bin` byte-offset
+        // skipping (which indexes this array) untouched.
         let chars = Array(rtf)
         let n = chars.count
         var i = 0
@@ -65,8 +69,12 @@ public struct RTFConverter: DocumentConverter {
         var ignore = false
         var ucSkip = 1
         var ansiEncoding: String.Encoding = .windowsCP1252
+        var isDBCS = false
         var stack: [GroupState] = []
         var pendingHighSurrogate: Int?
+        // Bytes from consecutive `\'hh` escapes, buffered so a multibyte (DBCS)
+        // character split across escapes is decoded as one unit (see flushBytes).
+        var pendingBytes: [UInt8] = []
 
         var runs: [Run] = []
         var paragraphs: [String] = []
@@ -81,6 +89,15 @@ public struct RTFConverter: DocumentConverter {
             }
         }
 
+        // Decode any buffered `\'hh` bytes as a group (so a multibyte DBCS
+        // character spanning consecutive escapes survives) and append the result.
+        func flushBytes() {
+            guard !pendingBytes.isEmpty else { return }
+            let decoded = Self.decodeBytes(pendingBytes, encoding: ansiEncoding)
+            pendingBytes.removeAll(keepingCapacity: true)
+            appendText(decoded)
+        }
+
         func flushParagraph() {
             let rendered = runs.map { renderRun($0) }.joined()
             runs.removeAll(keepingCapacity: true)
@@ -90,6 +107,16 @@ public struct RTFConverter: DocumentConverter {
 
         while i < n {
             let c = chars[i]
+            // Consecutive `\'hh` escapes form one (possibly multibyte) character;
+            // flush the buffer before any other token so byte order is preserved.
+            // Raw newlines are non-content (RTF line-wrapping) and can fall *inside*
+            // a DBCS character (\'82\r\n\'a0), so they must not flush the buffer.
+            // "\r\n" is matched explicitly because Swift treats it as one Character.
+            if !pendingBytes.isEmpty,
+               !(c == "\\" && i + 1 < n && chars[i + 1] == "'"),
+               c != "\r", c != "\n", c != "\r\n" {
+                flushBytes()
+            }
             switch c {
             case "{":
                 stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip))
@@ -132,7 +159,10 @@ public struct RTFConverter: DocumentConverter {
                     case "rdblquote": appendText("\u{201D}")
                     case "emspace", "enspace", "qmspace": appendText(" ")
                     case "ansicpg":
-                        if let param, let encoding = Self.encoding(forCodepage: param) { ansiEncoding = encoding }
+                        if let param, let encoding = Self.encoding(forCodepage: param) {
+                            ansiEncoding = encoding
+                            isDBCS = Self.dbcsCodepages.contains(param)
+                        }
                     case "bin":
                         // \binN: the next N bytes are raw binary (often inside an
                         // ignored \pict/\object) and may contain { } or \ — skip
@@ -211,25 +241,70 @@ public struct RTFConverter: DocumentConverter {
                     case "*": ignore = true                    // ignorable destination
                     case "'":
                         if i + 1 < n, let byte = UInt8(String([chars[i], chars[i + 1]]), radix: 16) {
-                            appendText(Self.decodeByte(byte, encoding: ansiEncoding))
+                            // DBCS code pages: buffer the byte (a lead byte alone is
+                            // undecodable) and let flushBytes decode whole characters.
+                            // Single-byte code pages decode each byte on its own.
+                            if isDBCS {
+                                if !ignore { pendingBytes.append(byte) }
+                            } else {
+                                appendText(Self.decodeByte(byte, encoding: ansiEncoding))
+                            }
                             i += 2
                         }
-                    case "\n", "\r":
+                    case "\n", "\r", "\r\n":
                         if !ignore { flushParagraph() }        // escaped newline = \par
                     default: break
                     }
                 }
 
-            case "\r", "\n":
-                i += 1                                          // raw newlines aren't content
+            case "\r", "\n", "\r\n":
+                i += 1                                          // raw newlines aren't content (CRLF is one grapheme)
 
             default:
                 appendText(String(c))
                 i += 1
             }
         }
+        flushBytes()
         flushParagraph()
         return paragraphs.joined(separator: "\n\n")
+    }
+
+    /// Windows code pages that are double-byte (DBCS): one character may span two
+    /// consecutive `\'hh` escapes, so their bytes are buffered and group-decoded
+    /// (`decodeBytes`) rather than decoded one byte at a time. 932 Shift-JIS, 936
+    /// GBK, 949 UHC, 950 Big5, 1361 Johab.
+    private static let dbcsCodepages: Set<Int> = [932, 936, 949, 950, 1361]
+
+    /// Decodes a run of buffered `\'hh` bytes using the declared code page —
+    /// required for DBCS code pages, where a lead byte is undecodable on its own.
+    ///
+    /// If the whole run decodes, return it. Otherwise walk it greedily, taking the
+    /// longest valid unit at each step (a two-byte lead+trail pair, else a single
+    /// byte), so a malformed or partial byte only affects itself and not the valid
+    /// characters around it — one bad byte can't corrupt a whole run of CJK. The
+    /// offending byte still falls back to Windows-1252/Latin-1 so nothing is lost.
+    private static func decodeBytes(_ bytes: [UInt8], encoding: String.Encoding) -> String {
+        if let decoded = String(bytes: bytes, encoding: encoding), !decoded.isEmpty {
+            return decoded
+        }
+        var result = ""
+        var idx = 0
+        let count = bytes.count
+        while idx < count {
+            if idx + 1 < count,
+               let pair = String(bytes: bytes[idx...(idx + 1)], encoding: encoding), !pair.isEmpty {
+                result += pair
+                idx += 2
+            } else if let single = String(bytes: bytes[idx...idx], encoding: encoding), !single.isEmpty {
+                result += single
+                idx += 1
+            } else {
+                result += decodeByte(bytes[idx], encoding: encoding)
+                idx += 1
+            }
+        }
+        return result
     }
 
     /// Decodes a single `\'hh` byte using the document's declared code page
@@ -237,10 +312,10 @@ public struct RTFConverter: DocumentConverter {
     /// become the right punctuation/letters rather than C1 control characters.
     /// Falls back to Windows-1252, then Latin-1, for undecodable bytes.
     ///
-    /// Each `\'hh` is decoded on its own. Multibyte ANSI code pages (e.g. 932
-    /// Shift-JIS) that split one character across consecutive `\'hh` escapes are
-    /// not reassembled here — a deliberately deferred legacy niche, since modern
-    /// RTF emits non-ASCII (including CJK) as `\uN`, which is handled in full.
+    /// Used for single-byte code pages; DBCS code pages declared via `\ansicpg`
+    /// (Shift-JIS, GBK, Big5, …) are reassembled across escapes by `decodeBytes`.
+    /// A document that switches code page per font via `\fcharsN` alone (without
+    /// `\ansicpg`) is still a deferred niche — the font table isn't tracked.
     private static func decodeByte(_ byte: UInt8, encoding: String.Encoding) -> String {
         if let decoded = String(bytes: [byte], encoding: encoding), !decoded.isEmpty {
             return decoded

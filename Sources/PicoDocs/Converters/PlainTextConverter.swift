@@ -40,6 +40,11 @@ public struct PlainTextConverter: DocumentConverter {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PicoDocsError.emptyDocument
         }
+        // NOTE: the decoded text is stored verbatim as the Markdown body, so any
+        // Markdown metacharacters it contains (`*`, `#`, `|`, …) are interpreted
+        // by the renderers on non-Markdown export. Markdown-escaping this is
+        // deliberately deferred (see DocumentRenderer's header) — the likely fix
+        // is adopting swift-markdown for real CommonMark handling.
         let section = DocumentSection(title: info.filename, kind: .body, markdown: text)
         return ConverterResult(title: info.filename, sections: [section])
     }

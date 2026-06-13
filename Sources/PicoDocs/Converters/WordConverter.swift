@@ -69,9 +69,12 @@ public struct WordConverter: DocumentConverter {
         // archive path). NOTE: image identity downstream (the inline `src` and the
         // renderer's data-URL embedding) is keyed by basename, so two *different*
         // images that share a basename would collide — only possible when a note
-        // part lives in its own subfolder with its own media. Unique/path-aware
-        // image names are a deferred cross-cutting follow-up; standard DOCX layouts
-        // (all media under `word/media/` with unique names) are unaffected.
+        // part lives in its own subfolder with its own media. The renderer detects
+        // that collision and leaves the ref unresolved rather than embedding the
+        // wrong image (see DocumentRenderer.embedImageDataURLs); giving each image
+        // a clean, unique/path-aware name so both still render is a deferred
+        // cross-cutting follow-up. Standard DOCX layouts (all media under
+        // `word/media/` with unique names) are unaffected.
         var seenImagePaths = Set<String>()
         imageSections = imageSections.filter { section in
             guard let path = section.sourcePath else { return true }
