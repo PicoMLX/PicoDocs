@@ -56,11 +56,11 @@ public struct RTFConverter: DocumentConverter {
     ]
 
     static func markdown(fromRTF rtf: String) -> String {
-        // Normalize CRLF line wraps to a single LF first: Swift treats "\r\n" as
-        // one grapheme cluster, so it would match neither the per-character "\r"
-        // nor "\n" handling below — it would leak into the output as content and
-        // could fall *inside* a buffered DBCS sequence, splitting the character.
-        let chars = Array(rtf.replacingOccurrences(of: "\r\n", with: "\n"))
+        // NOTE: Swift clusters "\r\n" into a single Character, so the newline
+        // handling below matches it as one grapheme (alongside lone "\r"/"\n")
+        // rather than normalizing the string — which keeps `\bin` byte-offset
+        // skipping (which indexes this array) untouched.
+        let chars = Array(rtf)
         let n = chars.count
         var i = 0
 
@@ -111,9 +111,10 @@ public struct RTFConverter: DocumentConverter {
             // flush the buffer before any other token so byte order is preserved.
             // Raw newlines are non-content (RTF line-wrapping) and can fall *inside*
             // a DBCS character (\'82\r\n\'a0), so they must not flush the buffer.
+            // "\r\n" is matched explicitly because Swift treats it as one Character.
             if !pendingBytes.isEmpty,
                !(c == "\\" && i + 1 < n && chars[i + 1] == "'"),
-               c != "\r", c != "\n" {
+               c != "\r", c != "\n", c != "\r\n" {
                 flushBytes()
             }
             switch c {
@@ -250,14 +251,14 @@ public struct RTFConverter: DocumentConverter {
                             }
                             i += 2
                         }
-                    case "\n", "\r":
+                    case "\n", "\r", "\r\n":
                         if !ignore { flushParagraph() }        // escaped newline = \par
                     default: break
                     }
                 }
 
-            case "\r", "\n":
-                i += 1                                          // raw newlines aren't content
+            case "\r", "\n", "\r\n":
+                i += 1                                          // raw newlines aren't content (CRLF is one grapheme)
 
             default:
                 appendText(String(c))
@@ -275,15 +276,35 @@ public struct RTFConverter: DocumentConverter {
     /// GBK, 949 UHC, 950 Big5, 1361 Johab.
     private static let dbcsCodepages: Set<Int> = [932, 936, 949, 950, 1361]
 
-    /// Decodes a run of buffered `\'hh` bytes as a single unit using the declared
-    /// code page — required for DBCS code pages, where a lead byte is undecodable
-    /// on its own. Falls back to byte-by-byte decoding for an invalid or partial
-    /// multibyte sequence so nothing is lost.
+    /// Decodes a run of buffered `\'hh` bytes using the declared code page —
+    /// required for DBCS code pages, where a lead byte is undecodable on its own.
+    ///
+    /// If the whole run decodes, return it. Otherwise walk it greedily, taking the
+    /// longest valid unit at each step (a two-byte lead+trail pair, else a single
+    /// byte), so a malformed or partial byte only affects itself and not the valid
+    /// characters around it — one bad byte can't corrupt a whole run of CJK. The
+    /// offending byte still falls back to Windows-1252/Latin-1 so nothing is lost.
     private static func decodeBytes(_ bytes: [UInt8], encoding: String.Encoding) -> String {
         if let decoded = String(bytes: bytes, encoding: encoding), !decoded.isEmpty {
             return decoded
         }
-        return bytes.map { decodeByte($0, encoding: encoding) }.joined()
+        var result = ""
+        var idx = 0
+        let count = bytes.count
+        while idx < count {
+            if idx + 1 < count,
+               let pair = String(bytes: bytes[idx...(idx + 1)], encoding: encoding), !pair.isEmpty {
+                result += pair
+                idx += 2
+            } else if let single = String(bytes: bytes[idx...idx], encoding: encoding), !single.isEmpty {
+                result += single
+                idx += 1
+            } else {
+                result += decodeByte(bytes[idx], encoding: encoding)
+                idx += 1
+            }
+        }
+        return result
     }
 
     /// Decodes a single `\'hh` byte using the document's declared code page

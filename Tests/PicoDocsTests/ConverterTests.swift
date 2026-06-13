@@ -287,6 +287,17 @@ struct ConverterTests {
         #expect(md.contains("done."))
     }
 
+    @Test("RTF DBCS run keeps valid characters before a malformed trailing byte")
+    func rtfDBCSPartialTail() async throws {
+        // あ (0x82 0xA0) followed by a dangling lead byte 0x82: the whole run fails
+        // to decode, but the valid leading character must survive (the bad byte
+        // alone falls back) rather than corrupting the entire run.
+        let rtf = "{\\rtf1\\ansi\\ansicpg932 \\'82\\'a0\\'82 X\\par}"
+        let md = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "jp.rtf").markdown()
+        #expect(md.contains("\u{3042}"))   // あ preserved
+        #expect(md.contains("X"))
+    }
+
     @Test("RTF combines \\uN surrogate pairs into astral characters")
     func rtfSurrogatePair() async throws {
         // U+1F600 as a UTF-16 surrogate pair (\uc0 means no fallback bytes).
