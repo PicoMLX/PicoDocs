@@ -11,11 +11,13 @@
 //  pipe tables, rules) rather than implementing a full CommonMark parser.
 //
 //  These renderers assume their input is the canonical Markdown the converters
-//  emit. Raw-text and CSV *inputs* are currently stored verbatim by
-//  PlainTextConverter (it doesn't Markdown-escape text or parse CSV into a
-//  table), so re-exporting those specific inputs to plaintext/CSV can drop a
-//  literal `*` or collapse columns — making those round-trips lossless is a
-//  PlainTextConverter follow-up, not a renderer change.
+//  emit. Raw-text *inputs* are currently stored verbatim by PlainTextConverter
+//  (it doesn't Markdown-escape text), so re-exporting that specific input to
+//  plaintext can drop a literal `*` and the like. Fixing this well needs either
+//  CommonMark backslash-escape support in this hand-rolled parser (risky) or a
+//  verbatim-fence in PlainTextConverter (regresses prose); both are deliberately
+//  deferred. The cleaner long-term fix is likely to replace this Markdown subset
+//  parser with swift-markdown (a real CommonMark parser/renderer) — revisit then.
 //
 
 import Foundation
@@ -137,11 +139,27 @@ public enum DocumentRenderer {
 
     /// Replaces bare image `src="filename"` references with `data:` URLs built
     /// from the `.image` sections' base64/MIME metadata.
+    ///
+    /// The body refers to images by basename, so two *distinct* images that share
+    /// a basename (only possible with non-standard layouts — e.g. a DOCX note part
+    /// carrying its own media folder) are indistinguishable in the body HTML.
+    /// Embedding either would silently show the wrong image, so such references are
+    /// left unresolved (an honest broken ref) rather than confidently wrong. Giving
+    /// every image a clean, unique/path-aware name would need generation-time
+    /// threading through the converters — a deferred follow-up; standard documents
+    /// (unique media names) embed exactly as before.
     private static func embedImageDataURLs(_ html: String, sections: [DocumentSection]) -> String {
+        let imageSections = sections.filter { $0.kind == .image }
+        // Count basenames among *embeddable* sections; a basename shared by two of
+        // them is ambiguous and skipped below.
+        var basenameCounts: [String: Int] = [:]
+        for section in imageSections where !(section.metadata["base64"] ?? "").isEmpty {
+            guard let filename = imageRefName(for: section) else { continue }
+            basenameCounts[filename, default: 0] += 1
+        }
         var result = html
-        for section in sections where section.kind == .image {
-            let filename = (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
-            guard let filename, !filename.isEmpty,
+        for section in imageSections {
+            guard let filename = imageRefName(for: section), basenameCounts[filename] == 1,
                   let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
             let mime = section.metadata["mimeType"] ?? "application/octet-stream"
             result = result.replacingOccurrences(
@@ -150,6 +168,14 @@ public enum DocumentRenderer {
             )
         }
         return result
+    }
+
+    /// The basename a `.image` section is referenced by in the body Markdown:
+    /// its source path's last component, falling back to its title.
+    private static func imageRefName(for section: DocumentSection) -> String? {
+        let filename = (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
+        guard let filename, !filename.isEmpty else { return nil }
+        return filename
     }
 
     private static func renderHTMLTable(_ rows: [[String]], footnoteNumbers: [String: Int] = [:]) -> String {
