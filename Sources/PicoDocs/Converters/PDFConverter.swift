@@ -55,10 +55,29 @@ public struct PDFConverter: DocumentConverter {
 
             // No selectable text on this page — likely scanned or exported as an
             // image. Fall back to on-device OCR when enabled and available.
+            //
+            // Render + recognize run off the cooperative pool (both are
+            // synchronous and CPU-heavy). `PDFPage` isn't `Sendable`, so it's
+            // transferred into the single off-pool closure via `UnsafeSendableBox`
+            // — safe because nothing else touches it meanwhile.
+            //
+            // A Vision recognition *error* propagates (fails the conversion)
+            // rather than being swallowed: that matches the registry's
+            // fail-loudly contract and avoids reporting a genuine OCR failure as a
+            // misleading `emptyDocument`. A legitimate "no legible text" result is
+            // an empty string, not an error, so it correctly skips the page. A
+            // page that can't be rasterized at all also skips (render → nil → "").
             #if canImport(Vision)
             if info.enableOCR {
-                let ocrText = Self.recognizeText(on: page)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let boxedPage = UnsafeSendableBox(page)
+                let ocrText = try await VisionOCRService.runOffCooperativePool { () -> String in
+                    guard let image = Self.renderImage(of: boxedPage.value, dpi: Self.ocrRenderDPI) else {
+                        return ""
+                    }
+                    return try VisionOCRService()
+                        .recognizeText(in: image)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
                 if !ocrText.isEmpty {
                     sections.append(DocumentSection(
                         kind: .body,
@@ -86,13 +105,6 @@ public struct PDFConverter: DocumentConverter {
     }
 
     #if canImport(Vision)
-    /// Rasterizes a page with no selectable text and OCRs it. Returns "" when the
-    /// page can't be rendered or holds no legible text.
-    private static func recognizeText(on page: PDFPage) -> String {
-        guard let image = renderImage(of: page, dpi: ocrRenderDPI) else { return "" }
-        return (try? VisionOCRService().recognizeText(in: image)) ?? ""
-    }
-
     /// Render resolution for OCR. 300 DPI is a common scan resolution and gives
     /// Vision ample detail; `renderImage` additionally caps the pixel dimensions
     /// so an unusually large page can't allocate an unbounded bitmap.
