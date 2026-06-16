@@ -70,7 +70,7 @@ public struct PDFConverter: DocumentConverter {
             #if canImport(Vision)
             if info.enableOCR {
                 let boxedPage = UnsafeSendableBox(page)
-                let ocrText = try await VisionOCRService.runOffCooperativePool { () -> String in
+                let ocrText = try await VisionOCRService.runOffCooperativePool { () throws -> String in
                     guard let image = Self.renderImage(of: boxedPage.value, dpi: Self.ocrRenderDPI) else {
                         return ""
                     }
@@ -112,9 +112,12 @@ public struct PDFConverter: DocumentConverter {
     private static let maxOCRPixelsPerSide: CGFloat = 4000
 
     /// Renders `page` to an opaque RGB bitmap at `dpi`, capped to
-    /// `maxOCRPixelsPerSide` on the longer side.
+    /// `maxOCRPixelsPerSide` on the longer side. Uses the crop box (the visible
+    /// page) rather than the media box, so trim/bleed or redacted margins outside
+    /// the visible area aren't OCR'd into the text. `bounds(for:)` falls back to
+    /// the media box when no crop box is set.
     private static func renderImage(of page: PDFPage, dpi: CGFloat) -> CGImage? {
-        let box = page.bounds(for: .mediaBox)
+        let box = page.bounds(for: .cropBox)
         guard box.width > 0, box.height > 0 else { return nil }
 
         let scale = min(dpi / 72.0, maxOCRPixelsPerSide / max(box.width, box.height))
@@ -138,7 +141,7 @@ public struct PDFConverter: DocumentConverter {
         context.fill(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
         context.scaleBy(x: scale, y: scale)
         context.translateBy(x: -box.minX, y: -box.minY)
-        page.draw(with: .mediaBox, to: context)
+        page.draw(with: .cropBox, to: context)
         return context.makeImage()
     }
     #endif

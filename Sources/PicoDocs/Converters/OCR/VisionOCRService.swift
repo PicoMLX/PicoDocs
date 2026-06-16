@@ -49,6 +49,14 @@ struct VisionOCRService: Sendable {
         // (a≈b, b≈c, but a≉c) and so isn't the strict weak ordering `sorted(by:)`
         // requires — violating it is undefined behavior and can trap. Bucketing
         // sorts by the tuple (row, x), which is a proper ordering.
+        //
+        // Note: this yields single-column reading order. Multi-column layouts
+        // (newspaper / academic two-column pages) interleave columns row-by-row.
+        // True column segmentation needs document layout analysis that Vision's
+        // `VNRecognizeTextRequest` doesn't provide at our deployment floor (the
+        // layout-aware `RecognizeDocumentsRequest` is iOS 26+), so it's
+        // intentionally out of scope here rather than handled with a fragile
+        // gap-detection heuristic that could misorder ordinary single-column text.
         let rowHeight = Self.rowHeight
         return observations
             .sorted { lhs, rhs in

@@ -77,13 +77,17 @@ extension PicoDocument {
                 }
                 throw PicoDocsError.emptyDocument
             }
-            // Forward the document's resolved type as a hint. `fetch()` may have
-            // learned it solely from the HTTP `Content-Type` (e.g. an image URL
-            // with no path extension); rebuilding StreamInfo from filename/URL
-            // alone would drop that, so such inputs could miss `.image`
-            // classification and never reach the OCR converter. Passed as a MIME
-            // hint — magic-byte detection still wins for formats that have it.
-            let mimeHint = await self.utType.preferredMIMEType
+            // Forward the document's resolved type as a MIME hint so a type
+            // learned only from a fetched `Content-Type` (e.g. an extension-less
+            // image URL) still reaches the right converter. Skip generic
+            // catch-alls, though: a `.data` (e.g. from an
+            // `application/octet-stream` response) would, via makeStreamInfo's
+            // MIME-over-extension precedence, mask an informative filename
+            // extension like `photo.png` and suppress classification. Magic-byte
+            // detection still wins for formats that have it.
+            let utType = await self.utType
+            let genericTypes: Set<UTType> = [.data, .content, .item, .folder, .directory]
+            let mimeHint = genericTypes.contains(utType) ? nil : utType.preferredMIMEType
             let result = try await PicoDocsEngine.convert(
                 data: originalContent,
                 filename: self.filename,
