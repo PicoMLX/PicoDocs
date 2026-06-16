@@ -59,6 +59,11 @@ public struct DocumentConverterRegistry: Sendable {
         #if canImport(PDFKit)
         registry = registry.registering(PDFConverter(), priority: Priority.specific)
         #endif
+        #if canImport(Vision)
+        // Makes the detector's `.image` classification convertible via on-device
+        // OCR. Apple-platform only, so it's gated like the PDF converter.
+        registry = registry.registering(ImageOCRConverter(), priority: Priority.specific)
+        #endif
         return registry.registering(PlainTextConverter(), priority: Priority.generic)
     }
 

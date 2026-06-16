@@ -64,6 +64,13 @@ public struct StreamInfo: Sendable, Equatable {
     /// Ignored by non-HTML converters.
     public var enhanceReadability: Bool
 
+    /// Whether converters may run on-device OCR (Apple Vision) to recover text
+    /// the source doesn't expose as selectable text: image-only / scanned PDF
+    /// pages, and standalone images. Defaults to `true`; set `false` to skip OCR
+    /// (faster — image inputs then surface as unsupported). No-op where Vision is
+    /// unavailable.
+    public var enableOCR: Bool
+
     public init(
         filename: String? = nil,
         fileExtension: String? = nil,
@@ -73,7 +80,8 @@ public struct StreamInfo: Sendable, Equatable {
         charset: String.Encoding? = nil,
         detectedFormat: DetectedFormat? = nil,
         confidence: Double = 0,
-        enhanceReadability: Bool = true
+        enhanceReadability: Bool = true,
+        enableOCR: Bool = true
     ) {
         self.filename = filename
         self.fileExtension = fileExtension
@@ -84,5 +92,6 @@ public struct StreamInfo: Sendable, Equatable {
         self.detectedFormat = detectedFormat
         self.confidence = confidence
         self.enhanceReadability = enhanceReadability
+        self.enableOCR = enableOCR
     }
 }
