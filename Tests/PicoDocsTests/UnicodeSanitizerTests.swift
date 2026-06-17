@@ -17,6 +17,8 @@ struct UnicodeSanitizerTests {
     func removesInvisibles() {
         #expect(UnicodeSanitizer.sanitize("a\u{200B}b") == "ab")            // ZWSP
         #expect(UnicodeSanitizer.sanitize("a\u{2060}b") == "ab")            // word joiner
+        #expect(UnicodeSanitizer.sanitize("a\u{2062}b") == "ab")            // invisible times
+        #expect(UnicodeSanitizer.sanitize("a\u{2064}b") == "ab")            // invisible plus
         #expect(UnicodeSanitizer.sanitize("\u{FEFF}text") == "text")        // BOM / ZWNBSP
         #expect(UnicodeSanitizer.sanitize("soft\u{00AD}hyphen") == "softhyphen")
     }
@@ -50,6 +52,7 @@ struct UnicodeSanitizerTests {
         #expect(UnicodeSanitizer.sanitize("a\u{2029}b") == "a b")   // paragraph separator → space
         #expect(UnicodeSanitizer.sanitize("a\u{0085}b") == "a b")   // NEL → space
         #expect(UnicodeSanitizer.sanitize("a\u{000C}b") == "a b")   // form feed → space
+        #expect(UnicodeSanitizer.sanitize("a\u{000B}b") == "a b")   // vertical tab → space
     }
 
     @Test("Drops control characters but keeps tab and newline")

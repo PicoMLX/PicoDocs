@@ -63,19 +63,21 @@ public enum UnicodeSanitizer {
             // Keep tab and (standalone) newline.
             case 0x09, 0x0A:
                 scalars.append(scalar)
-            // Vertical separators converters DON'T already flatten — NEL, form
-            // feed (page break), and line/paragraph separators — fold to a space.
-            // Not a newline: this pass runs after Markdown is built, so a stray
-            // newline would split table rows etc.; a space keeps the word boundary.
-            case 0x0C, 0x85, 0x2028, 0x2029:
+            // Vertical separators converters DON'T already flatten — vertical tab,
+            // form feed (page break), NEL, and line/paragraph separators — fold to
+            // a space. Not a newline: this pass runs after Markdown is built, so a
+            // stray newline would split table rows etc.; a space keeps the boundary.
+            case 0x0B, 0x0C, 0x85, 0x2028, 0x2029:
                 scalars.append(" ")
             // Other C0 controls, DEL, and C1 controls → drop.
             case 0x00...0x1F, 0x7F...0x9F:
                 break
-            // Zero-width space, word joiner, soft hyphen, BOM → drop. ZWNJ (U+200C)
-            // and ZWJ (U+200D) are intentionally kept: they shape Persian/Indic
-            // text and compose emoji (e.g. 👨‍👩‍👧‍👦), i.e. they're visible content.
-            case 0x00AD, 0x200B, 0x2060, 0xFEFF:
+            // Zero-width space, soft hyphen, BOM, word joiner + invisible math
+            // operators (U+2060–2064: word joiner, function application, invisible
+            // times/separator/plus) → drop. ZWNJ (U+200C) and ZWJ (U+200D) are
+            // intentionally kept: they shape Persian/Indic text and compose emoji
+            // (e.g. 👨‍👩‍👧‍👦), i.e. they're visible content.
+            case 0x00AD, 0x200B, 0x2060...0x2064, 0xFEFF:
                 break
             // Bidirectional formatting controls (incl. U+061C Arabic Letter Mark).
             case 0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069:
