@@ -76,10 +76,16 @@ struct ProtobufReader {
         while pos < end {
             let byte = bytes[pos]
             pos += 1
+            // Reject overflow before shifting: at the 10th byte (shift 63) only the
+            // low bit fits a 64-bit value; a longer varint is malformed.
+            if shift == 63 {
+                if byte & 0x7E != 0 { return nil }
+            } else if shift >= 64 {
+                return nil
+            }
             result |= UInt64(byte & 0x7F) << shift
             if byte & 0x80 == 0 { return result }
             shift += 7
-            if shift >= 64 { return nil }
         }
         return nil
     }

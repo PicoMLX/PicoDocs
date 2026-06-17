@@ -38,7 +38,12 @@ enum IWAArchive {
         let payload: [UInt8]
     }
 
-    /// Parses every object in a decompressed IWA stream.
+    /// Parses every object in a decompressed IWA stream. Best-effort: on a
+    /// truncated/garbled envelope it returns the objects parsed so far rather than
+    /// throwing, so partially-recoverable files still yield text. Strict
+    /// envelope-truncation detection (failing on any malformation) is deferred to
+    /// the real-file-validation follow-up, to avoid mis-rejecting valid documents
+    /// whose envelope quirks aren't yet covered by tests.
     static func objects(in stream: [UInt8]) -> [Object] {
         var objects: [Object] = []
         var cursor = StreamCursor(stream)
@@ -148,10 +153,16 @@ private struct StreamCursor {
         while pos < bytes.count {
             let byte = bytes[pos]
             pos += 1
+            // Reject overflow before shifting: at the 10th byte (shift 63) only the
+            // low bit fits a 64-bit value; a longer varint is malformed.
+            if shift == 63 {
+                if byte & 0x7E != 0 { return nil }
+            } else if shift >= 64 {
+                return nil
+            }
             result |= UInt64(byte & 0x7F) << shift
             if byte & 0x80 == 0 { return result }
             shift += 7
-            if shift >= 64 { return nil }
         }
         return nil
     }

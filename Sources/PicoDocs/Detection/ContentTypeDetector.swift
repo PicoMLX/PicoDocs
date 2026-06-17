@@ -218,9 +218,16 @@ public enum ContentTypeDetector {
     /// Numbers/Keynote will get their own `DetectedFormat` cases when supported.
     static func iworkFormatFromHints(_ info: StreamInfo) -> DetectedFormat? {
         if let ut = info.utType, ut.conforms(to: .pages) { return .pages }
-        switch info.fileExtension?.lowercased() {
-        case "pages": return .pages
-        default: return nil
+        if info.fileExtension?.lowercased() == "pages" { return .pages }
+        // Extensionless web downloads: route by the Pages MIME type (current and
+        // legacy), since the URL may carry no `.pages` suffix.
+        let baseMIME = info.mimeType?.split(separator: ";").first
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+        switch baseMIME {
+        case "application/vnd.apple.pages", "application/x-iwork-pages-sffpages":
+            return .pages
+        default:
+            return nil
         }
     }
 

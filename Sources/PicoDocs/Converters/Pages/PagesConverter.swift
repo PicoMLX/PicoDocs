@@ -39,7 +39,7 @@ public struct PagesConverter: DocumentConverter {
 
         // Gather the IWA component streams. Two common on-disk layouts: loose
         // `Index/*.iwa` entries, or a nested `Index.zip` containing them.
-        let components = iwaComponents(in: archive)
+        let components = try iwaComponents(in: archive)
         guard !components.isEmpty else {
             // Likely a legacy iWork '09 package (index.xml[.gz]) or an unexpected
             // layout — not supported yet.
@@ -89,22 +89,28 @@ public struct PagesConverter: DocumentConverter {
     }
 
     /// Reads the `.iwa` component streams from loose `Index/*.iwa` entries, or —
-    /// failing that — from a nested `Index.zip`.
-    private func iwaComponents(in archive: Archive) -> [Component] {
+    /// failing that — from a nested `Index.zip`. A present-but-unreadable main
+    /// story (`Document.iwa`) is treated as corruption; auxiliary entries that
+    /// fail to extract are skipped leniently.
+    private func iwaComponents(in archive: Archive) throws -> [Component] {
         var components: [Component] = []
         for entry in archive where entry.type == .file && entry.path.hasSuffix(".iwa") {
-            if let data = Self.readEntry(archive, path: entry.path) {
-                components.append(Component(name: entry.path, bytes: [UInt8](data)))
+            guard let data = Self.readEntry(archive, path: entry.path) else {
+                if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
+                continue
             }
+            components.append(Component(name: entry.path, bytes: [UInt8](data)))
         }
         if !components.isEmpty { return components }
 
         if let indexZip = Self.readEntry(archive, path: "Index.zip"),
            let inner = Archive(data: indexZip, accessMode: .read) {
             for entry in inner where entry.type == .file && entry.path.hasSuffix(".iwa") {
-                if let data = Self.readEntry(inner, path: entry.path) {
-                    components.append(Component(name: entry.path, bytes: [UInt8](data)))
+                guard let data = Self.readEntry(inner, path: entry.path) else {
+                    if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
+                    continue
                 }
+                components.append(Component(name: entry.path, bytes: [UInt8](data)))
             }
         }
         return components

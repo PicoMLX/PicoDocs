@@ -38,11 +38,11 @@ enum Snappy {
             let length = Int(data[i + 1]) | (Int(data[i + 2]) << 8) | (Int(data[i + 3]) << 16)
             i += 4
             guard i + length <= n else { throw SnappyError.malformed }
-            // Type 0x00 is a compressed block; iWork only ever emits this. Skip
-            // any other frame type's bytes defensively rather than failing.
-            if type == 0x00 {
-                output.append(contentsOf: try decompressBlock(Array(data[i ..< i + length])))
-            }
+            // iWork only ever emits compressed (0x00) chunks. Treat any other
+            // frame type as corruption rather than silently skipping it (which
+            // could drop body text); callers decide whether that's fatal.
+            guard type == 0x00 else { throw SnappyError.malformed }
+            output.append(contentsOf: try decompressBlock(Array(data[i ..< i + length])))
             i += length
         }
         return output
@@ -117,13 +117,19 @@ enum Snappy {
         while pos < input.count {
             let byte = input[pos]
             pos += 1
+            // Reject overflow before shifting: at the 10th byte (shift 63) only
+            // the low bit fits a 64-bit value; beyond that the varint is too long.
+            if shift == 63 {
+                if byte & 0x7E != 0 { throw SnappyError.malformed }
+            } else if shift >= 64 {
+                throw SnappyError.malformed
+            }
             result |= UInt64(byte & 0x7F) << shift
             if byte & 0x80 == 0 {
                 guard result <= UInt64(Int.max) else { throw SnappyError.malformed }
                 return Int(result)
             }
             shift += 7
-            if shift >= 64 { break }
         }
         throw SnappyError.malformed
     }

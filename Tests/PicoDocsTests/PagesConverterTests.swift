@@ -77,6 +77,16 @@ struct PagesConverterTests {
         #expect(resolved.detectedFormat == .pages)
     }
 
+    @Test("Detector routes a Pages MIME type without a .pages extension")
+    func detectionRoutesByMIME() {
+        let pages = Self.makePagesFile(paragraphs: ["Hi"])
+        let info = PicoDocsEngine.makeStreamInfo(
+            filename: "download", mimeType: "application/vnd.apple.pages", url: nil, charset: nil
+        )
+        let resolved = ContentTypeDetector.classify(pages, info: info)
+        #expect(resolved.detectedFormat == .pages)
+    }
+
     @Test("PagesConverter reports unsupported for a non-iWork zip")
     func nonIWorkZipUnsupported() async {
         // A .pages-named zip with no IWA streams should fail cleanly, not crash.
