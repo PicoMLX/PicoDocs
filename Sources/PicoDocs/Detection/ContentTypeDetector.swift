@@ -217,7 +217,7 @@ public enum ContentTypeDetector {
     /// Resolves iWork formats from hints. Only Pages has a converter today;
     /// Numbers/Keynote will get their own `DetectedFormat` cases when supported.
     static func iworkFormatFromHints(_ info: StreamInfo) -> DetectedFormat? {
-        if let ut = info.utType, ut.conforms(to: .pages) { return .pages }
+        if let ut = info.utType, ut.conforms(to: .pages) || ut.conforms(to: .pagesSingleFile) { return .pages }
         if info.fileExtension?.lowercased() == "pages" { return .pages }
         // Extensionless web downloads: route by the Pages MIME type (current and
         // legacy), since the URL may carry no `.pages` suffix.

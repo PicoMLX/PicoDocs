@@ -168,7 +168,9 @@ private struct StreamCursor {
     }
 
     mutating func take(_ count: Int) -> [UInt8]? {
-        guard count >= 0, pos + count <= bytes.count else { return nil }
+        // `count <= bytes.count - pos` rather than `pos + count <= count` so a
+        // hostile length near Int.max can't overflow the addition.
+        guard count >= 0, count <= bytes.count - pos else { return nil }
         let slice = Array(bytes[pos ..< pos + count])
         pos += count
         return slice

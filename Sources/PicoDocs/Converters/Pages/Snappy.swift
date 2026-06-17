@@ -37,7 +37,7 @@ enum Snappy {
             let type = data[i]
             let length = Int(data[i + 1]) | (Int(data[i + 2]) << 8) | (Int(data[i + 3]) << 16)
             i += 4
-            guard i + length <= n else { throw SnappyError.malformed }
+            guard length <= n - i else { throw SnappyError.malformed }
             // iWork only ever emits compressed (0x00) chunks. Treat any other
             // frame type as corruption rather than silently skipping it (which
             // could drop body text); callers decide whether that's fatal.
@@ -75,7 +75,7 @@ enum Snappy {
                     pos += extra
                 }
                 length += 1
-                guard pos + length <= n else { throw SnappyError.malformed }
+                guard length <= n - pos else { throw SnappyError.malformed }
                 output.append(contentsOf: input[pos ..< pos + length])
                 pos += length
             case 0x01:

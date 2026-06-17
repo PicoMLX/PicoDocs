@@ -46,26 +46,28 @@ public struct PagesConverter: DocumentConverter {
             throw PicoDocsError.documentTypeNotSupported
         }
 
-        // The main story lives in Document.iwa; prefer it to avoid pulling in
-        // stylesheet/template text, falling back to other components if absent.
+        // The main story lives in Document.iwa and is authoritative: if present it
+        // must decompress cleanly (corruption → fail), and its text — even if
+        // empty — determines the result, so we never scavenge stylesheet/header
+        // text from auxiliary components and pass it off as the body. Only when
+        // Document.iwa is absent do we fall back to a best-effort scan.
         var bodyText = ""
-        for component in orderedForText(components) {
+        if let main = components.first(where: { $0.name.hasSuffix("Document.iwa") }) {
             try Task.checkCancellation()
-            let isMainStory = component.name.hasSuffix("Document.iwa")
-            let stream: [UInt8]
             do {
-                stream = try Snappy.decompressIWA(component.bytes)
+                bodyText = IWAArchive.text(in: try Snappy.decompressIWA(main.bytes))
             } catch {
-                // A corrupt main story is real corruption — fail rather than
-                // silently fall back to auxiliary components and report partial or
-                // non-body text as a successful conversion.
-                if isMainStory { throw PicoDocsError.fileCorrupted }
-                continue
+                throw PicoDocsError.fileCorrupted
             }
-            let extracted = IWAArchive.text(in: stream)
-            if !extracted.isEmpty {
-                bodyText = extracted
-                break
+        } else {
+            for component in components.sorted(by: { $0.name < $1.name }) {
+                try Task.checkCancellation()
+                guard let stream = try? Snappy.decompressIWA(component.bytes) else { continue }
+                let extracted = IWAArchive.text(in: stream)
+                if !extracted.isEmpty {
+                    bodyText = extracted
+                    break
+                }
             }
         }
 
@@ -103,8 +105,14 @@ public struct PagesConverter: DocumentConverter {
         }
         if !components.isEmpty { return components }
 
-        if let indexZip = Self.readEntry(archive, path: "Index.zip"),
-           let inner = Archive(data: indexZip, accessMode: .read) {
+        // Nested layout: the IWA streams live inside Index.zip. If that container
+        // is present but can't be read/opened, the file is corrupt — not an
+        // unsupported layout — so surface that distinctly.
+        if archive["Index.zip"] != nil {
+            guard let indexZip = Self.readEntry(archive, path: "Index.zip"),
+                  let inner = Archive(data: indexZip, accessMode: .read) else {
+                throw PicoDocsError.fileCorrupted
+            }
             for entry in inner where entry.type == .file && entry.path.hasSuffix(".iwa") {
                 guard let data = Self.readEntry(inner, path: entry.path) else {
                     if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
@@ -114,16 +122,6 @@ public struct PagesConverter: DocumentConverter {
             }
         }
         return components
-    }
-
-    /// Puts `Document.iwa` first (the main text story); stable order otherwise.
-    private func orderedForText(_ components: [Component]) -> [Component] {
-        components.sorted { lhs, rhs in
-            let l = lhs.name.hasSuffix("Document.iwa")
-            let r = rhs.name.hasSuffix("Document.iwa")
-            if l != r { return l }
-            return lhs.name < rhs.name
-        }
     }
 
     // MARK: - Text normalization

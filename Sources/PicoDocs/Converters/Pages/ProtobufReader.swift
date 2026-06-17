@@ -57,7 +57,9 @@ struct ProtobufReader {
             // malformed/hostile input).
             guard let len = readVarint(), len <= UInt64(Int.max) else { return nil }
             let length = Int(len)
-            guard pos + length <= end else { return nil }
+            // Compare against remaining bytes, not `pos + length`, which can
+            // overflow/trap for a hostile length near Int.max.
+            guard length <= end - pos else { return nil }
             let sub = Array(bytes[pos ..< pos + length])
             pos += length
             return Field(number: number, value: .length(sub))
