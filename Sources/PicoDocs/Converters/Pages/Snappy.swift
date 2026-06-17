@@ -101,6 +101,10 @@ enum Snappy {
                 try appendCopy(&output, offset: offset, length: length)
             }
         }
+        // A well-formed Snappy block decodes to exactly its preamble length; a
+        // mismatch means the block was truncated/corrupt — reject it rather than
+        // emit partial text as a successful decode.
+        guard output.count == expectedLength else { throw SnappyError.malformed }
         return output
     }
 

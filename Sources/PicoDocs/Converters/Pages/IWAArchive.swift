@@ -21,8 +21,14 @@ import Foundation
 
 enum IWAArchive {
 
-    /// The TSWP text storage message type. Its field 3 is `repeated string text` —
-    /// the document's paragraph text runs. Shared across Pages/Numbers/Keynote.
+    /// The TSWP text storage message type (`TSWP.StorageArchive`). Its field 3 is
+    /// `repeated string text` — the document's paragraph text runs. Shared across
+    /// Pages/Numbers/Keynote.
+    ///
+    /// Only the well-established id 2001 is matched. Other ids occasionally cited
+    /// for text storage (e.g. 2005) are deliberately not included until confirmed
+    /// against a real Pages file / the type registry — a wrong id would surface
+    /// non-text payloads as garbage. Revisit with the real-file fixture follow-up.
     static let textStorageType: UInt64 = 2001
     static let textRunsField = 3
 

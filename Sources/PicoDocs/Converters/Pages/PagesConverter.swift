@@ -8,10 +8,13 @@
 //  `Index/*.iwa` (or a nested `Index.zip`); each `.iwa` is a Snappy-framed
 //  protobuf object stream whose TSWP text storages carry the body text.
 //
-//  Scope (v1): extracts the document's plain text (paragraphs). Rich structure —
-//  headings, styling, tables, footnotes, inline images — and the legacy iWork
-//  '09 XML format are planned follow-ups; this converter raises a clear,
-//  actionable error for inputs it can't yet read rather than emitting nothing.
+//  Scope (v1): extracts the document's plain text (paragraphs) from the flat,
+//  single-file `.pages` ZIP — the common transport form (downloads, mail, Files
+//  exports). Rich structure (headings, styling, tables, footnotes, inline
+//  images), the legacy iWork '09 XML format, and ingesting a `.pages` *package
+//  directory* (an on-disk bundle, which the FileFetcher currently treats as a
+//  folder) are planned follow-ups; this converter raises a clear, actionable
+//  error for inputs it can't yet read rather than emitting nothing.
 //
 //  Format references: obriensp/iWorkFileFormat, the SheetJS IWA notes, and
 //  Cocoanetics/SwiftText (MIT) — the in-module decode approach here is informed
@@ -48,7 +51,17 @@ public struct PagesConverter: DocumentConverter {
         var bodyText = ""
         for component in orderedForText(components) {
             try Task.checkCancellation()
-            guard let stream = try? Snappy.decompressIWA(component.bytes) else { continue }
+            let isMainStory = component.name.hasSuffix("Document.iwa")
+            let stream: [UInt8]
+            do {
+                stream = try Snappy.decompressIWA(component.bytes)
+            } catch {
+                // A corrupt main story is real corruption — fail rather than
+                // silently fall back to auxiliary components and report partial or
+                // non-body text as a successful conversion.
+                if isMainStory { throw PicoDocsError.fileCorrupted }
+                continue
+            }
             let extracted = IWAArchive.text(in: stream)
             if !extracted.isEmpty {
                 bodyText = extracted

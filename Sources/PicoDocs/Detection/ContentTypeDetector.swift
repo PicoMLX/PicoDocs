@@ -81,6 +81,9 @@ public enum ContentTypeDetector {
         // 3. Document formats identified by hint but lacking magic bytes (corrupt
         //    or mislabeled). Honor the hint so they reach the right converter (or
         //    report unsupported) instead of being mis-read as text.
+        if let iwork = iworkFormatFromHints(info) {
+            return (iwork, 0.4)
+        }
         if let docHint = documentFormatFromHints(info) {
             return (docHint, 0.4)
         }
