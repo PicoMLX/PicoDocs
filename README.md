@@ -12,6 +12,7 @@ PicoDocs supports and processes a variety of document formats:
 - **File Types**: PDF, ePub, DOCX, XLSX, HTML, Markdown, and more.
 - **Export Options**: Convert documents to HTML, Markdown, and JSON formats for LLM compatibility, with embedded and referenced images.
 - **Content Cleanup**: Utilizes Readability to clean HTML content, enhancing focus on the main content similar to Safari's Reader View.
+- **OCR**: On-device text recognition (Apple Vision) for standalone images and scanned / image-only PDF pages — no model bundle or cloud service. Enabled by default; toggle with `enableOCR`.
 - **Multiple Sources**: Reads local files and iCloud files.
 
 ## How It Works
@@ -29,7 +30,7 @@ There are two main steps: fetching and parsing.
 
 ## Supported File Types
 
-- PDF
+- PDF (with on-device OCR fallback for scanned / image-only pages)
 - ePub
 - DOCX
 - HTML/XHTML
@@ -38,6 +39,7 @@ There are two main steps: fetching and parsing.
 - RTF
 - MD
 - Webloc
+- Images (PNG, JPEG, HEIC, …) via OCR
 
 ## Installation
 

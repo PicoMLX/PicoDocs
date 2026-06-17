@@ -52,13 +52,15 @@ extension PicoDocument {
     ///   - enhanceReadability: For HTML, run the Readability extraction pass
     ///     (reader-mode: keep the main article, drop nav/ads/boilerplate). Ignored
     ///     by non-HTML formats. Defaults to `true`.
-    public nonisolated func parse(to type: ExportFileType? = nil, recursive: Bool = true, enhanceReadability: Bool = true) async throws {
+    ///   - enableOCR: Allow on-device OCR (Apple Vision) for image-only / scanned
+    ///     PDF pages and standalone images. Defaults to `true`.
+    public nonisolated func parse(to type: ExportFileType? = nil, recursive: Bool = true, enhanceReadability: Bool = true, enableOCR: Bool = true) async throws {
         // Parse children first. A child failure is recorded on the child and is
         // not fatal to the parent.
         if let children = await self.children, recursive {
             for child in children {
                 do {
-                    try await child.parse(to: type, recursive: recursive, enhanceReadability: enhanceReadability)
+                    try await child.parse(to: type, recursive: recursive, enhanceReadability: enhanceReadability, enableOCR: enableOCR)
                 } catch {
                     await child.setError(error)
                 }
@@ -75,11 +77,24 @@ extension PicoDocument {
                 }
                 throw PicoDocsError.emptyDocument
             }
+            // Forward the document's resolved type as a MIME hint so a type
+            // learned only from a fetched `Content-Type` (e.g. an extension-less
+            // image URL) still reaches the right converter. Skip generic
+            // catch-alls, though: a `.data` (e.g. from an
+            // `application/octet-stream` response) would, via makeStreamInfo's
+            // MIME-over-extension precedence, mask an informative filename
+            // extension like `photo.png` and suppress classification. Magic-byte
+            // detection still wins for formats that have it.
+            let utType = await self.utType
+            let genericTypes: Set<UTType> = [.data, .content, .item, .folder, .directory]
+            let mimeHint = genericTypes.contains(utType) ? nil : utType.preferredMIMEType
             let result = try await PicoDocsEngine.convert(
                 data: originalContent,
                 filename: self.filename,
+                mimeType: mimeHint,
                 url: self.originURL,
-                enhanceReadability: enhanceReadability
+                enhanceReadability: enhanceReadability,
+                enableOCR: enableOCR
             )
             let exported = try Self.exportedContent(from: result, format: type)
             await updateParsedDocument(result, content: exported)

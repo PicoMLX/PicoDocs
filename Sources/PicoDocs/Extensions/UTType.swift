@@ -26,17 +26,29 @@ public extension UTType {
     static let webloc = UTType(importedAs: "com.apple.web-internet-location")
 
     /// Array of all supported documents
-    static let supportedDocumentTypes = [
-        .folder, .directory,
-        .webloc,
-        .doc, .docx, .xlsx,
-        .epub,
-        .pdf, .rtf, .rtfd, .text, .flatRTFD, .plainText, .utf8PlainText, xml,
-        .spreadsheet, .commaSeparatedText,
-        .internetLocation, .internetShortcut, .url, .urlBookmarkData, .html, .xhtml,
-        .sourceCode, .json, .objectiveCSource, .phpScript, .perlScript, .shellScript, .script, .javaScript, .pythonScript, .assemblyLanguageSource,
-        .emailMessage, .spreadsheet,
-    ]
+    static let supportedDocumentTypes: [UTType] = {
+        var types: [UTType] = [
+            .folder, .directory,
+            .webloc,
+            .doc, .docx, .xlsx,
+            .epub,
+            .pdf, .rtf, .rtfd, .text, .flatRTFD, .plainText, .utf8PlainText, .xml,
+            .spreadsheet, .commaSeparatedText,
+            .internetLocation, .internetShortcut, .url, .urlBookmarkData, .html, .xhtml,
+            .sourceCode, .json, .objectiveCSource, .phpScript, .perlScript, .shellScript, .script, .javaScript, .pythonScript, .assemblyLanguageSource,
+            .emailMessage, .spreadsheet,
+        ]
+        #if canImport(Vision)
+        // Standalone images are convertible via on-device OCR (ImageOCRConverter),
+        // which is registered only where Vision exists — so claim image support
+        // under the same gate. `.image` is abstract; `isSupported` matches by
+        // conformance, so concrete PNG/JPEG/HEIC/TIFF/… all qualify. Without this,
+        // the `PicoDocument(url:)` path marks image files unsupported even though
+        // the engine can now OCR them.
+        types.append(.image)
+        #endif
+        return types
+    }()
 
 
     /// Returns true if type is listed in `supportedDocumentTypes`
