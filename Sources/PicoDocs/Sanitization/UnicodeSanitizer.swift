@@ -9,11 +9,15 @@
 //  `StreamInfo.sanitizeUnicode`.
 //
 //  Deliberately non-lossy for *visible* content: it does NOT touch smart quotes,
-//  dashes, ellipses, accents, or other legitimate typography. It only:
-//    - removes invisible / control characters (zero-width, bidi, soft hyphen,
-//      BOM, C0/C1 controls, the U+FFFD replacement char),
-//    - folds Unicode space variants to a plain space and line/paragraph
-//      separators (and CR/CRLF/NEL) to a newline,
+//  dashes, ellipses, accents, ZWJ/ZWNJ joiners (which shape scripts and compose
+//  emoji), or other legitimate typography. It only:
+//    - removes invisible / control characters (zero-width space, word joiner,
+//      soft hyphen, BOM, bidi controls, other C0/C1 controls, the U+FFFD
+//      replacement char),
+//    - normalizes line endings (CR / CRLF / LF) to a single newline, and folds
+//      the other vertical separators (NEL, form feed, line/paragraph separators)
+//      and Unicode space variants to a plain space — never injecting a newline
+//      into already-built Markdown,
 //    - applies canonical composition (NFC, *not* the lossy NFKC, so ligatures
 //      and full-width forms are preserved).
 //
@@ -52,24 +56,26 @@ public enum UnicodeSanitizer {
             // Keep tab and (standalone) newline.
             case 0x09, 0x0A:
                 scalars.append(scalar)
-            // NEL (next line) → newline.
-            case 0x85:
-                scalars.append("\n")
+            // Vertical separators converters DON'T already flatten — NEL, form
+            // feed (page break), and line/paragraph separators — fold to a space.
+            // Not a newline: this pass runs after Markdown is built, so a stray
+            // newline would split table rows etc.; a space keeps the word boundary.
+            case 0x0C, 0x85, 0x2028, 0x2029:
+                scalars.append(" ")
             // Other C0 controls, DEL, and C1 controls → drop.
             case 0x00...0x1F, 0x7F...0x9F:
                 break
-            // Zero-width / invisible formatting, soft hyphen, word joiner, BOM.
-            case 0x00AD, 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF:
+            // Zero-width space, word joiner, soft hyphen, BOM → drop. ZWNJ (U+200C)
+            // and ZWJ (U+200D) are intentionally kept: they shape Persian/Indic
+            // text and compose emoji (e.g. 👨‍👩‍👧‍👦), i.e. they're visible content.
+            case 0x00AD, 0x200B, 0x2060, 0xFEFF:
                 break
-            // Bidirectional formatting controls.
-            case 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069:
+            // Bidirectional formatting controls (incl. U+061C Arabic Letter Mark).
+            case 0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069:
                 break
             // Unicode space variants → ASCII space.
             case 0x00A0, 0x1680, 0x2000...0x200A, 0x202F, 0x205F, 0x3000:
                 scalars.append(" ")
-            // Line / paragraph separators → newline.
-            case 0x2028, 0x2029:
-                scalars.append("\n")
             // Replacement character (a failed decode) → drop.
             case 0xFFFD:
                 break
@@ -82,10 +88,10 @@ public enum UnicodeSanitizer {
         return String(String.UnicodeScalarView(scalars)).precomposedStringWithCanonicalMapping
     }
 
-    /// Cleans the text-bearing fields of a `ConverterResult` — section `markdown`
-    /// and titles, plus the document title/author. Binary / provenance fields are
-    /// left untouched: section `metadata` (may carry base64 image bytes),
-    /// `sourcePath`, `sheetName`, and `cover`.
+    /// Cleans the text-bearing fields of a `ConverterResult` — section `markdown`,
+    /// titles, and (for non-image sections) `metadata` values — plus the document
+    /// title/author. Image byte-carrier sections' `metadata` is left untouched (it
+    /// holds base64 image data); `sourcePath`, `sheetName`, and `cover` are too.
     static func sanitize(_ result: ConverterResult) -> ConverterResult {
         var sanitized = result
         sanitized.title = result.title.map { sanitize($0) }
@@ -94,6 +100,13 @@ public enum UnicodeSanitizer {
             var copy = section
             copy.markdown = sanitize(section.markdown)
             copy.title = section.title.map { sanitize($0) }
+            // Sanitize text-bearing metadata too — e.g. CSVConverter keeps the
+            // lossless body in metadata["csv"], which the CSV renderer prefers over
+            // the Markdown table. Skip image byte-carrier sections, whose metadata
+            // holds base64 image data that must not be altered.
+            if section.kind != .image {
+                copy.metadata = section.metadata.mapValues { sanitize($0) }
+            }
             return copy
         }
         return sanitized

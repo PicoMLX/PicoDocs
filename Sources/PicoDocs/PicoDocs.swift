@@ -46,7 +46,17 @@ public enum PicoDocsEngine {
         let result = try await registry.convert(data, info: resolved)
         // Central post-process: clean the extracted text once, so every converter
         // and every caller (convert / export / PicoDocument.parse) benefits.
-        return resolved.sanitizeUnicode ? UnicodeSanitizer.sanitize(result) : result
+        guard resolved.sanitizeUnicode else { return result }
+        let sanitized = UnicodeSanitizer.sanitize(result)
+        // Converters reject empty input before this pass, but sanitizing can empty
+        // a result that held only removable characters — re-check so we don't
+        // surface a blank, "successful" document. (Image-bearing results are never
+        // considered empty: their byte carriers live in `.image` sections.)
+        if sanitized.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !sanitized.sections.contains(where: { $0.kind == .image }) {
+            throw PicoDocsError.emptyDocument
+        }
+        return sanitized
     }
 
     /// Convert and render to a specific `ExportFileType` (defaults to Markdown).

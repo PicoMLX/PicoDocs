@@ -13,20 +13,26 @@ import Testing
 @Suite("Unicode sanitization")
 struct UnicodeSanitizerTests {
 
-    @Test("Removes zero-width and invisible formatting characters")
+    @Test("Removes truly-invisible formatting characters")
     func removesInvisibles() {
         #expect(UnicodeSanitizer.sanitize("a\u{200B}b") == "ab")            // ZWSP
-        #expect(UnicodeSanitizer.sanitize("a\u{200C}b") == "ab")            // ZWNJ
-        #expect(UnicodeSanitizer.sanitize("a\u{200D}b") == "ab")            // ZWJ
         #expect(UnicodeSanitizer.sanitize("a\u{2060}b") == "ab")            // word joiner
         #expect(UnicodeSanitizer.sanitize("\u{FEFF}text") == "text")        // BOM / ZWNBSP
         #expect(UnicodeSanitizer.sanitize("soft\u{00AD}hyphen") == "softhyphen")
+    }
+
+    @Test("Keeps ZWJ / ZWNJ joiners (they shape text and compose emoji)")
+    func keepsJoiners() {
+        #expect(UnicodeSanitizer.sanitize("a\u{200C}b") == "a\u{200C}b")    // ZWNJ kept
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"          // 👨‍👩‍👧 (ZWJ)
+        #expect(UnicodeSanitizer.sanitize(family) == family)               // ZWJ kept
     }
 
     @Test("Removes bidirectional formatting controls")
     func removesBidi() {
         #expect(UnicodeSanitizer.sanitize("a\u{202E}b\u{202C}c") == "abc")
         #expect(UnicodeSanitizer.sanitize("a\u{2066}b\u{2069}c") == "abc")
+        #expect(UnicodeSanitizer.sanitize("a\u{061C}b") == "ab")   // Arabic letter mark
     }
 
     @Test("Folds Unicode space variants to a plain space")
@@ -36,13 +42,14 @@ struct UnicodeSanitizerTests {
         #expect(UnicodeSanitizer.sanitize("a\u{3000}b") == "a b")   // ideographic space
     }
 
-    @Test("Folds line/paragraph separators and CR/CRLF/NEL to newline")
+    @Test("Normalizes CR/CRLF to newline; folds other separators to space")
     func foldsLineBreaks() {
-        #expect(UnicodeSanitizer.sanitize("a\u{2028}b") == "a\nb")  // line separator
-        #expect(UnicodeSanitizer.sanitize("a\u{2029}b") == "a\nb")  // paragraph separator
-        #expect(UnicodeSanitizer.sanitize("a\u{0085}b") == "a\nb")  // NEL
-        #expect(UnicodeSanitizer.sanitize("a\r\nb") == "a\nb")      // CRLF
-        #expect(UnicodeSanitizer.sanitize("a\rb") == "a\nb")        // lone CR
+        #expect(UnicodeSanitizer.sanitize("a\r\nb") == "a\nb")      // CRLF → LF
+        #expect(UnicodeSanitizer.sanitize("a\rb") == "a\nb")        // lone CR → LF
+        #expect(UnicodeSanitizer.sanitize("a\u{2028}b") == "a b")   // line separator → space
+        #expect(UnicodeSanitizer.sanitize("a\u{2029}b") == "a b")   // paragraph separator → space
+        #expect(UnicodeSanitizer.sanitize("a\u{0085}b") == "a b")   // NEL → space
+        #expect(UnicodeSanitizer.sanitize("a\u{000C}b") == "a b")   // form feed → space
     }
 
     @Test("Drops control characters but keeps tab and newline")
@@ -98,5 +105,21 @@ struct UnicodeSanitizerTests {
         let scalars = result.markdown().unicodeScalars
         #expect(scalars.contains("\u{200B}"))
         #expect(scalars.contains("\u{00A0}"))
+    }
+
+    @Test("convert throws when sanitizing removes all content")
+    func engineThrowsWhenSanitizedEmpty() async throws {
+        let data = Data("\u{FEFF}\u{200B}\u{2060}".utf8)   // only removable characters
+        await #expect(throws: PicoDocsError.self) {
+            _ = try await PicoDocsEngine.convert(data: data, filename: "blank.txt")
+        }
+    }
+
+    @Test("CSV export sanitizes metadata-backed cell content")
+    func csvExportSanitized() async throws {
+        let csv = Data("a\u{200B}b,c\u{00A0}d\n1,2".utf8)
+        let out = try await PicoDocsEngine.export(data: csv, filename: "t.csv", to: .csv)
+        #expect(!out.unicodeScalars.contains("\u{200B}"))   // ZWSP removed
+        #expect(!out.unicodeScalars.contains("\u{00A0}"))   // NBSP folded to space
     }
 }
