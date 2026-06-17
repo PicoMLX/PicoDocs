@@ -30,6 +30,7 @@ public enum PicoDocsEngine {
         charset: String.Encoding? = nil,
         enhanceReadability: Bool = true,
         enableOCR: Bool = true,
+        sanitizeUnicode: Bool = false,
         registry: DocumentConverterRegistry = .default
     ) async throws -> ConverterResult {
         let info = makeStreamInfo(
@@ -38,10 +39,28 @@ public enum PicoDocsEngine {
             url: url,
             charset: charset,
             enhanceReadability: enhanceReadability,
-            enableOCR: enableOCR
+            enableOCR: enableOCR,
+            sanitizeUnicode: sanitizeUnicode
         )
         let resolved = ContentTypeDetector.classify(data, info: info)
-        return try await registry.convert(data, info: resolved)
+        let result = try await registry.convert(data, info: resolved)
+        // Opt-in post-process (default off): clean the extracted text once so every
+        // caller (convert / export / PicoDocument.parse) benefits. NOTE: this runs
+        // on already-built Markdown, so it can alter Markdown structure for inputs
+        // with special characters in structural spots (line-leading markers,
+        // link/image destinations, CSV cell edges) — hence opt-in until a
+        // per-converter (pre-Markdown) pass lands. See `UnicodeSanitizer`.
+        guard resolved.sanitizeUnicode else { return result }
+        let sanitized = UnicodeSanitizer.sanitize(result)
+        // Converters reject empty input before this pass, but sanitizing can empty
+        // a result that held only removable characters — re-check so we don't
+        // surface a blank, "successful" document. (Image-bearing results are never
+        // considered empty: their byte carriers live in `.image` sections.)
+        if sanitized.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !sanitized.sections.contains(where: { $0.kind == .image }) {
+            throw PicoDocsError.emptyDocument
+        }
+        return sanitized
     }
 
     /// Convert and render to a specific `ExportFileType` (defaults to Markdown).
@@ -54,6 +73,7 @@ public enum PicoDocsEngine {
         to format: ExportFileType = .markdown,
         enhanceReadability: Bool = true,
         enableOCR: Bool = true,
+        sanitizeUnicode: Bool = false,
         registry: DocumentConverterRegistry = .default
     ) async throws -> String {
         let result = try await convert(
@@ -64,6 +84,7 @@ public enum PicoDocsEngine {
             charset: charset,
             enhanceReadability: enhanceReadability,
             enableOCR: enableOCR,
+            sanitizeUnicode: sanitizeUnicode,
             registry: registry
         )
         return try DocumentRenderer.render(result, to: format)
@@ -71,7 +92,7 @@ public enum PicoDocsEngine {
 
     // MARK: - StreamInfo construction
 
-    static func makeStreamInfo(filename: String?, mimeType: String?, url: URL?, charset: String.Encoding?, enhanceReadability: Bool = true, enableOCR: Bool = true) -> StreamInfo {
+    static func makeStreamInfo(filename: String?, mimeType: String?, url: URL?, charset: String.Encoding?, enhanceReadability: Bool = true, enableOCR: Bool = true, sanitizeUnicode: Bool = false) -> StreamInfo {
         let ext = fileExtension(filename: filename, url: url)
         // Use only the base type (before any ";" parameters) for UTType lookup.
         let baseMIME = mimeType?.split(separator: ";").first.map {
@@ -90,7 +111,8 @@ public enum PicoDocsEngine {
             url: url,
             charset: charset ?? encoding(fromMIME: mimeType),
             enhanceReadability: enhanceReadability,
-            enableOCR: enableOCR
+            enableOCR: enableOCR,
+            sanitizeUnicode: sanitizeUnicode
         )
     }
 

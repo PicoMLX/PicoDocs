@@ -71,6 +71,18 @@ public struct StreamInfo: Sendable, Equatable {
     /// unavailable.
     public var enableOCR: Bool
 
+    /// Whether extracted text is run through `UnicodeSanitizer` (NFC + removal of
+    /// invisible/control characters, folding Unicode whitespace/line separators to
+    /// ASCII; preserves visible typography). Applied by `PicoDocsEngine.convert`
+    /// to the result's text.
+    ///
+    /// Defaults to `false` (opt-in): the pass currently runs on already-built
+    /// Markdown, so for inputs with special characters in structurally-significant
+    /// positions (a line-leading marker, a link/image destination, a CSV cell
+    /// edge) it can alter Markdown structure. Per-converter (pre-Markdown)
+    /// integration that makes it safe to enable by default is a planned follow-up.
+    public var sanitizeUnicode: Bool
+
     public init(
         filename: String? = nil,
         fileExtension: String? = nil,
@@ -81,7 +93,8 @@ public struct StreamInfo: Sendable, Equatable {
         detectedFormat: DetectedFormat? = nil,
         confidence: Double = 0,
         enhanceReadability: Bool = true,
-        enableOCR: Bool = true
+        enableOCR: Bool = true,
+        sanitizeUnicode: Bool = false
     ) {
         self.filename = filename
         self.fileExtension = fileExtension
@@ -93,5 +106,6 @@ public struct StreamInfo: Sendable, Equatable {
         self.confidence = confidence
         self.enhanceReadability = enhanceReadability
         self.enableOCR = enableOCR
+        self.sanitizeUnicode = sanitizeUnicode
     }
 }
