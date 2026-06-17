@@ -73,8 +73,14 @@ public struct StreamInfo: Sendable, Equatable {
 
     /// Whether extracted text is run through `UnicodeSanitizer` (NFC + removal of
     /// invisible/control characters, folding Unicode whitespace/line separators to
-    /// ASCII). Defaults to `true`; applied by `PicoDocsEngine.convert` to the
-    /// result's text. Preserves visible typography (smart quotes, dashes, accents).
+    /// ASCII; preserves visible typography). Applied by `PicoDocsEngine.convert`
+    /// to the result's text.
+    ///
+    /// Defaults to `false` (opt-in): the pass currently runs on already-built
+    /// Markdown, so for inputs with special characters in structurally-significant
+    /// positions (a line-leading marker, a link/image destination, a CSV cell
+    /// edge) it can alter Markdown structure. Per-converter (pre-Markdown)
+    /// integration that makes it safe to enable by default is a planned follow-up.
     public var sanitizeUnicode: Bool
 
     public init(
@@ -88,7 +94,7 @@ public struct StreamInfo: Sendable, Equatable {
         confidence: Double = 0,
         enhanceReadability: Bool = true,
         enableOCR: Bool = true,
-        sanitizeUnicode: Bool = true
+        sanitizeUnicode: Bool = false
     ) {
         self.filename = filename
         self.fileExtension = fileExtension

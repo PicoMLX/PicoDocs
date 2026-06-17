@@ -89,36 +89,40 @@ struct UnicodeSanitizerTests {
 
     // MARK: - Engine integration
 
-    @Test("convert sanitizes extracted text by default")
-    func engineSanitizesByDefault() async throws {
+    @Test("convert leaves text raw by default (sanitization is opt-in)")
+    func engineDefaultsToRaw() async throws {
         let data = Data("Hello\u{200B}\u{00A0}World".utf8)
         let result = try await PicoDocsEngine.convert(data: data, filename: "note.txt")
-        #expect(result.markdown() == "Hello World")
-    }
-
-    @Test("convert leaves text untouched when sanitizeUnicode is false")
-    func engineRespectsOptOut() async throws {
-        let data = Data("Hello\u{200B}\u{00A0}World".utf8)
-        let result = try await PicoDocsEngine.convert(
-            data: data, filename: "note.txt", sanitizeUnicode: false
-        )
         let scalars = result.markdown().unicodeScalars
         #expect(scalars.contains("\u{200B}"))
         #expect(scalars.contains("\u{00A0}"))
     }
 
-    @Test("convert throws when sanitizing removes all content")
+    @Test("convert sanitizes when sanitizeUnicode is enabled")
+    func engineSanitizesWhenEnabled() async throws {
+        let data = Data("Hello\u{200B}\u{00A0}World".utf8)
+        let result = try await PicoDocsEngine.convert(
+            data: data, filename: "note.txt", sanitizeUnicode: true
+        )
+        #expect(result.markdown() == "Hello World")
+    }
+
+    @Test("convert throws when enabled sanitization removes all content")
     func engineThrowsWhenSanitizedEmpty() async throws {
         let data = Data("\u{FEFF}\u{200B}\u{2060}".utf8)   // only removable characters
         await #expect(throws: PicoDocsError.self) {
-            _ = try await PicoDocsEngine.convert(data: data, filename: "blank.txt")
+            _ = try await PicoDocsEngine.convert(
+                data: data, filename: "blank.txt", sanitizeUnicode: true
+            )
         }
     }
 
-    @Test("CSV export sanitizes metadata-backed cell content")
+    @Test("CSV export sanitizes metadata-backed cell content when enabled")
     func csvExportSanitized() async throws {
         let csv = Data("a\u{200B}b,c\u{00A0}d\n1,2".utf8)
-        let out = try await PicoDocsEngine.export(data: csv, filename: "t.csv", to: .csv)
+        let out = try await PicoDocsEngine.export(
+            data: csv, filename: "t.csv", to: .csv, sanitizeUnicode: true
+        )
         #expect(!out.unicodeScalars.contains("\u{200B}"))   // ZWSP removed
         #expect(!out.unicodeScalars.contains("\u{00A0}"))   // NBSP folded to space
     }

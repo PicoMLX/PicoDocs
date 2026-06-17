@@ -30,7 +30,7 @@ public enum PicoDocsEngine {
         charset: String.Encoding? = nil,
         enhanceReadability: Bool = true,
         enableOCR: Bool = true,
-        sanitizeUnicode: Bool = true,
+        sanitizeUnicode: Bool = false,
         registry: DocumentConverterRegistry = .default
     ) async throws -> ConverterResult {
         let info = makeStreamInfo(
@@ -44,8 +44,12 @@ public enum PicoDocsEngine {
         )
         let resolved = ContentTypeDetector.classify(data, info: info)
         let result = try await registry.convert(data, info: resolved)
-        // Central post-process: clean the extracted text once, so every converter
-        // and every caller (convert / export / PicoDocument.parse) benefits.
+        // Opt-in post-process (default off): clean the extracted text once so every
+        // caller (convert / export / PicoDocument.parse) benefits. NOTE: this runs
+        // on already-built Markdown, so it can alter Markdown structure for inputs
+        // with special characters in structural spots (line-leading markers,
+        // link/image destinations, CSV cell edges) — hence opt-in until a
+        // per-converter (pre-Markdown) pass lands. See `UnicodeSanitizer`.
         guard resolved.sanitizeUnicode else { return result }
         let sanitized = UnicodeSanitizer.sanitize(result)
         // Converters reject empty input before this pass, but sanitizing can empty
@@ -69,7 +73,7 @@ public enum PicoDocsEngine {
         to format: ExportFileType = .markdown,
         enhanceReadability: Bool = true,
         enableOCR: Bool = true,
-        sanitizeUnicode: Bool = true,
+        sanitizeUnicode: Bool = false,
         registry: DocumentConverterRegistry = .default
     ) async throws -> String {
         let result = try await convert(
@@ -88,7 +92,7 @@ public enum PicoDocsEngine {
 
     // MARK: - StreamInfo construction
 
-    static func makeStreamInfo(filename: String?, mimeType: String?, url: URL?, charset: String.Encoding?, enhanceReadability: Bool = true, enableOCR: Bool = true, sanitizeUnicode: Bool = true) -> StreamInfo {
+    static func makeStreamInfo(filename: String?, mimeType: String?, url: URL?, charset: String.Encoding?, enhanceReadability: Bool = true, enableOCR: Bool = true, sanitizeUnicode: Bool = false) -> StreamInfo {
         let ext = fileExtension(filename: filename, url: url)
         // Use only the base type (before any ";" parameters) for UTType lookup.
         let baseMIME = mimeType?.split(separator: ";").first.map {

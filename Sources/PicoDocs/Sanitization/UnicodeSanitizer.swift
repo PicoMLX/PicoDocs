@@ -23,6 +23,13 @@
 //
 //  `sanitize(_:)` is idempotent.
 //
+//  NOTE: today the engine applies this to *already-built* Markdown, so for inputs
+//  with special characters in structurally-significant positions (a line-leading
+//  `#`/`-`, a link/image destination, a CSV cell edge) it can change Markdown
+//  structure. It is therefore opt-in — `StreamInfo.sanitizeUnicode` defaults to
+//  false. Sanitizing per converter, before Markdown is built (which would make it
+//  safe to enable by default), is a planned follow-up.
+//
 
 import Foundation
 

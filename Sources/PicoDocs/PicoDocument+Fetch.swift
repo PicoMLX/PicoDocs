@@ -56,8 +56,8 @@ extension PicoDocument {
     ///     PDF pages and standalone images. Defaults to `true`.
     ///   - sanitizeUnicode: Run extracted text through `UnicodeSanitizer`
     ///     (NFC + invisible/control-character removal, whitespace folding).
-    ///     Defaults to `true`.
-    public nonisolated func parse(to type: ExportFileType? = nil, recursive: Bool = true, enhanceReadability: Bool = true, enableOCR: Bool = true, sanitizeUnicode: Bool = true) async throws {
+    ///     Defaults to `false` (opt-in) — see `StreamInfo.sanitizeUnicode`.
+    public nonisolated func parse(to type: ExportFileType? = nil, recursive: Bool = true, enhanceReadability: Bool = true, enableOCR: Bool = true, sanitizeUnicode: Bool = false) async throws {
         // Parse children first. A child failure is recorded on the child and is
         // not fatal to the parent.
         if let children = await self.children, recursive {
