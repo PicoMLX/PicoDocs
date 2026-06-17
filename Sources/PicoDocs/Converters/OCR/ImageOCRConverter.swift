@@ -39,17 +39,35 @@ public struct ImageOCRConverter: DocumentConverter {
         // Decode + OCR run off the cooperative pool (see `runOffCooperativePool`);
         // only `Data` in / `[String]` out crosses the boundary, so no non-Sendable
         // `CGImage` escapes. One element per frame, in source order (may be "").
+        // A per-frame Vision failure is recorded and skipped (so one bad page of a
+        // multi-page TIFF doesn't lose the rest); a real error is surfaced only
+        // when nothing at all was recognized — which also covers a single image
+        // that simply failed.
         let frameTexts = try await VisionOCRService.runOffCooperativePool { () throws -> [String] in
             guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
                 throw PicoDocsError.fileCorrupted
             }
             let frameCount = isMultiPage ? max(CGImageSourceGetCount(source), 1) : 1
             let service = VisionOCRService()
-            return try (0..<frameCount).map { index in
-                guard let image = Self.boundedImage(from: source, at: index) else { return "" }
-                return try service.recognizeText(in: image)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            var texts: [String] = []
+            var firstError: Error?
+            for index in 0..<frameCount {
+                do {
+                    guard let image = Self.boundedImage(from: source, at: index) else {
+                        texts.append("")
+                        continue
+                    }
+                    texts.append(try service.recognizeText(in: image)
+                        .trimmingCharacters(in: .whitespacesAndNewlines))
+                } catch {
+                    firstError = firstError ?? error
+                    texts.append("")
+                }
             }
+            if texts.allSatisfy({ $0.isEmpty }), let firstError {
+                throw firstError
+            }
+            return texts
         }
 
         guard frameTexts.contains(where: { !$0.isEmpty }) else {
