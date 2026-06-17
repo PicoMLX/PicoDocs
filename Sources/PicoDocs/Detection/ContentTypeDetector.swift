@@ -48,12 +48,20 @@ public enum ContentTypeDetector {
             || data.starts(with: Magic.zipEmpty)
             || data.starts(with: Magic.zipSpanned) {
             let zipFormat = classifyZip(data)
-            // If the archive couldn't be subtyped (generic .zip) but the caller's
-            // filename/MIME claims a specific OOXML/EPUB document — e.g. a
-            // truncated `report.docx` that still begins with PK — honor that hint
-            // so it routes to the right converter rather than the generic zip path.
-            if zipFormat == .zip, let docHint = documentFormatFromHints(info) {
-                return (docHint, 0.5)
+            if zipFormat == .zip {
+                // iWork '13+ packages are ZIPs without OOXML/EPUB markers. Route to
+                // the Pages converter when the filename/UTType says Pages, raising
+                // confidence when the archive's IWA layout confirms it.
+                if let iwork = iworkFormatFromHints(info) {
+                    return (iwork, isIWorkArchive(data) ? 0.95 : 0.5)
+                }
+                // If the archive couldn't be subtyped (generic .zip) but the
+                // caller's filename/MIME claims a specific OOXML/EPUB document —
+                // e.g. a truncated `report.docx` that still begins with PK — honor
+                // that hint so it routes to the right converter.
+                if let docHint = documentFormatFromHints(info) {
+                    return (docHint, 0.5)
+                }
             }
             return (zipFormat, 0.9)
         }
@@ -201,6 +209,29 @@ public enum ContentTypeDetector {
         case "epub": return .epub
         default: return nil
         }
+    }
+
+    /// Resolves iWork formats from hints. Only Pages has a converter today;
+    /// Numbers/Keynote will get their own `DetectedFormat` cases when supported.
+    static func iworkFormatFromHints(_ info: StreamInfo) -> DetectedFormat? {
+        if let ut = info.utType, ut.conforms(to: .pages) { return .pages }
+        switch info.fileExtension?.lowercased() {
+        case "pages": return .pages
+        default: return nil
+        }
+    }
+
+    /// Best-effort check that a ZIP is an iWork '13+ package: it carries IWA
+    /// component streams (`*.iwa`, possibly inside a nested `Index.zip`) or the
+    /// iWork `Metadata/DocumentIdentifier`. Scans the central directory when
+    /// locatable (authoritative), else a bounded whole-archive scan — mirroring
+    /// `classifyZipEntries`.
+    static func isIWorkArchive(_ data: Data) -> Bool {
+        let markers = [".iwa", "Index.zip", "Metadata/DocumentIdentifier"]
+        if let cd = zipCentralDirectory(data) {
+            return markers.contains { cd.range(of: Data($0.utf8)) != nil }
+        }
+        return markers.contains { boundedContains(data, Data($0.utf8)) }
     }
 
     /// Resolves text-family formats from extension / UTType. The extension switch

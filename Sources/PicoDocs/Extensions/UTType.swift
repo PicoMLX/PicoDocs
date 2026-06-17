@@ -24,6 +24,8 @@ public extension UTType {
     static let pptx = UTType(importedAs: "org.openxmlformats.presentationml.presentation", conformingTo: .zip)
     static let xhtml = UTType(importedAs: "public.xhtml", conformingTo: .xml)
     static let webloc = UTType(importedAs: "com.apple.web-internet-location")
+    // Apple Pages (iWork '13+) is a ZIP package of IWA streams, not XML.
+    static let pages = UTType(importedAs: "com.apple.iwork.pages.pages", conformingTo: .zip)
 
     /// Array of all supported documents
     static let supportedDocumentTypes: [UTType] = {
@@ -31,7 +33,7 @@ public extension UTType {
             .folder, .directory,
             .webloc,
             .doc, .docx, .xlsx,
-            .epub,
+            .epub, .pages,
             .pdf, .rtf, .rtfd, .text, .flatRTFD, .plainText, .utf8PlainText, .xml,
             .spreadsheet, .commaSeparatedText,
             .internetLocation, .internetShortcut, .url, .urlBookmarkData, .html, .xhtml,
