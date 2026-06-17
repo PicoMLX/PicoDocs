@@ -37,17 +37,19 @@ enum IWAArchive {
         var objects: [Object] = []
         var cursor = StreamCursor(stream)
         while let archiveLen = cursor.readVarint() {
-            guard archiveLen > 0, let archiveBytes = cursor.take(Int(archiveLen)) else { break }
+            guard archiveLen > 0, archiveLen <= UInt64(Int.max),
+                  let archiveBytes = cursor.take(Int(archiveLen)) else { break }
             let infos = messageInfos(in: archiveBytes)
             guard !infos.isEmpty else { break }
             // Payloads follow the ArchiveInfo, concatenated in MessageInfo order.
-            var tookAny = false
+            // Stop at the first failure (truncated/garbled stream, or a length past
+            // `Int.max`) and return what parsed cleanly — never re-read past a
+            // partially-consumed object, which would mis-parse or loop.
             for info in infos {
-                guard let payload = cursor.take(Int(info.length)) else { break }
+                guard info.length <= UInt64(Int.max),
+                      let payload = cursor.take(Int(info.length)) else { return objects }
                 objects.append(Object(identifier: info.identifier, type: info.type, payload: payload))
-                tookAny = true
             }
-            if !tookAny { break }
         }
         return objects
     }

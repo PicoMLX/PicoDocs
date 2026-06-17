@@ -54,7 +54,10 @@ enum Snappy {
         var pos = 0
         let expectedLength = try readPreambleLength(input, &pos)
         var output: [UInt8] = []
-        output.reserveCapacity(expectedLength)
+        // `expectedLength` is an attacker-controlled hint: cap the pre-allocation
+        // so a malformed block can't force a huge reserve (OOM). Real output stays
+        // bounded by the finite input regardless of the claimed length.
+        output.reserveCapacity(min(expectedLength, 16 * 1024 * 1024))
 
         let n = input.count
         while pos < n {
@@ -103,15 +106,20 @@ enum Snappy {
 
     /// Reads the block's leading varint (the uncompressed length).
     private static func readPreambleLength(_ input: [UInt8], _ pos: inout Int) throws -> Int {
-        var result = 0
-        var shift = 0
+        // Accumulate in UInt64 so the shift (up to 63) is safe on 32-bit `Int`
+        // platforms, then validate the result fits an `Int`.
+        var result: UInt64 = 0
+        var shift: UInt64 = 0
         while pos < input.count {
             let byte = input[pos]
             pos += 1
-            result |= Int(byte & 0x7F) << shift
-            if byte & 0x80 == 0 { return result }
+            result |= UInt64(byte & 0x7F) << shift
+            if byte & 0x80 == 0 {
+                guard result <= UInt64(Int.max) else { throw SnappyError.malformed }
+                return Int(result)
+            }
             shift += 7
-            if shift > 35 { break }
+            if shift >= 64 { break }
         }
         throw SnappyError.malformed
     }

@@ -116,10 +116,11 @@ public struct PagesConverter: DocumentConverter {
         for separator in ["\r\n", "\r", "\u{2028}", "\u{2029}", "\u{000B}", "\u{000C}"] {
             unified = unified.replacingOccurrences(of: separator, with: "\n")
         }
+        let inlineWhitespace = CharacterSet(charactersIn: " \t")
         var out: [String] = []
         var pendingBlank = false
         for rawLine in unified.components(separatedBy: "\n") {
-            let line = rawLine.trimmingCharacters(in: CharacterSet(charactersIn: " \t"))
+            let line = rawLine.trimmingCharacters(in: inlineWhitespace)
             if line.isEmpty {
                 pendingBlank = true
             } else {

@@ -53,9 +53,11 @@ struct ProtobufReader {
             guard let v = readFixed(8) else { return nil }
             return Field(number: number, value: .fixed64(v))
         case 2:
-            guard let len = readVarint() else { return nil }
+            // Reject lengths past `Int.max` before casting (avoids a trap on
+            // malformed/hostile input).
+            guard let len = readVarint(), len <= UInt64(Int.max) else { return nil }
             let length = Int(len)
-            guard length >= 0, pos + length <= end else { return nil }
+            guard pos + length <= end else { return nil }
             let sub = Array(bytes[pos ..< pos + length])
             pos += length
             return Field(number: number, value: .length(sub))
