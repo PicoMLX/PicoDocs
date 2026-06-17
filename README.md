@@ -13,6 +13,7 @@ PicoDocs supports and processes a variety of document formats:
 - **Export Options**: Convert documents to HTML, Markdown, and JSON formats for LLM compatibility, with embedded and referenced images.
 - **Content Cleanup**: Utilizes Readability to clean HTML content, enhancing focus on the main content similar to Safari's Reader View.
 - **OCR**: On-device text recognition (Apple Vision) for standalone images and scanned / image-only PDF pages — no model bundle or cloud service. Enabled by default; toggle with `enableOCR`.
+- **Unicode Sanitization**: Cleans extracted text for LLM/RAG use — canonical (NFC) normalization, removal of invisible/control characters (zero-width, bidi, soft hyphen, BOM), and folding of Unicode whitespace/line separators to ASCII, while preserving visible typography. Enabled by default; toggle with `sanitizeUnicode`.
 - **Multiple Sources**: Reads local files and iCloud files.
 
 ## How It Works

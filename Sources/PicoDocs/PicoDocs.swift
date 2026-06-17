@@ -30,6 +30,7 @@ public enum PicoDocsEngine {
         charset: String.Encoding? = nil,
         enhanceReadability: Bool = true,
         enableOCR: Bool = true,
+        sanitizeUnicode: Bool = true,
         registry: DocumentConverterRegistry = .default
     ) async throws -> ConverterResult {
         let info = makeStreamInfo(
@@ -38,10 +39,14 @@ public enum PicoDocsEngine {
             url: url,
             charset: charset,
             enhanceReadability: enhanceReadability,
-            enableOCR: enableOCR
+            enableOCR: enableOCR,
+            sanitizeUnicode: sanitizeUnicode
         )
         let resolved = ContentTypeDetector.classify(data, info: info)
-        return try await registry.convert(data, info: resolved)
+        let result = try await registry.convert(data, info: resolved)
+        // Central post-process: clean the extracted text once, so every converter
+        // and every caller (convert / export / PicoDocument.parse) benefits.
+        return resolved.sanitizeUnicode ? UnicodeSanitizer.sanitize(result) : result
     }
 
     /// Convert and render to a specific `ExportFileType` (defaults to Markdown).
@@ -54,6 +59,7 @@ public enum PicoDocsEngine {
         to format: ExportFileType = .markdown,
         enhanceReadability: Bool = true,
         enableOCR: Bool = true,
+        sanitizeUnicode: Bool = true,
         registry: DocumentConverterRegistry = .default
     ) async throws -> String {
         let result = try await convert(
@@ -64,6 +70,7 @@ public enum PicoDocsEngine {
             charset: charset,
             enhanceReadability: enhanceReadability,
             enableOCR: enableOCR,
+            sanitizeUnicode: sanitizeUnicode,
             registry: registry
         )
         return try DocumentRenderer.render(result, to: format)
@@ -71,7 +78,7 @@ public enum PicoDocsEngine {
 
     // MARK: - StreamInfo construction
 
-    static func makeStreamInfo(filename: String?, mimeType: String?, url: URL?, charset: String.Encoding?, enhanceReadability: Bool = true, enableOCR: Bool = true) -> StreamInfo {
+    static func makeStreamInfo(filename: String?, mimeType: String?, url: URL?, charset: String.Encoding?, enhanceReadability: Bool = true, enableOCR: Bool = true, sanitizeUnicode: Bool = true) -> StreamInfo {
         let ext = fileExtension(filename: filename, url: url)
         // Use only the base type (before any ";" parameters) for UTType lookup.
         let baseMIME = mimeType?.split(separator: ";").first.map {
@@ -90,7 +97,8 @@ public enum PicoDocsEngine {
             url: url,
             charset: charset ?? encoding(fromMIME: mimeType),
             enhanceReadability: enhanceReadability,
-            enableOCR: enableOCR
+            enableOCR: enableOCR,
+            sanitizeUnicode: sanitizeUnicode
         )
     }
 

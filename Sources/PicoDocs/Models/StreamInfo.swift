@@ -71,6 +71,12 @@ public struct StreamInfo: Sendable, Equatable {
     /// unavailable.
     public var enableOCR: Bool
 
+    /// Whether extracted text is run through `UnicodeSanitizer` (NFC + removal of
+    /// invisible/control characters, folding Unicode whitespace/line separators to
+    /// ASCII). Defaults to `true`; applied by `PicoDocsEngine.convert` to the
+    /// result's text. Preserves visible typography (smart quotes, dashes, accents).
+    public var sanitizeUnicode: Bool
+
     public init(
         filename: String? = nil,
         fileExtension: String? = nil,
@@ -81,7 +87,8 @@ public struct StreamInfo: Sendable, Equatable {
         detectedFormat: DetectedFormat? = nil,
         confidence: Double = 0,
         enhanceReadability: Bool = true,
-        enableOCR: Bool = true
+        enableOCR: Bool = true,
+        sanitizeUnicode: Bool = true
     ) {
         self.filename = filename
         self.fileExtension = fileExtension
@@ -93,5 +100,6 @@ public struct StreamInfo: Sendable, Equatable {
         self.confidence = confidence
         self.enhanceReadability = enhanceReadability
         self.enableOCR = enableOCR
+        self.sanitizeUnicode = sanitizeUnicode
     }
 }

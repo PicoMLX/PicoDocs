@@ -54,13 +54,16 @@ extension PicoDocument {
     ///     by non-HTML formats. Defaults to `true`.
     ///   - enableOCR: Allow on-device OCR (Apple Vision) for image-only / scanned
     ///     PDF pages and standalone images. Defaults to `true`.
-    public nonisolated func parse(to type: ExportFileType? = nil, recursive: Bool = true, enhanceReadability: Bool = true, enableOCR: Bool = true) async throws {
+    ///   - sanitizeUnicode: Run extracted text through `UnicodeSanitizer`
+    ///     (NFC + invisible/control-character removal, whitespace folding).
+    ///     Defaults to `true`.
+    public nonisolated func parse(to type: ExportFileType? = nil, recursive: Bool = true, enhanceReadability: Bool = true, enableOCR: Bool = true, sanitizeUnicode: Bool = true) async throws {
         // Parse children first. A child failure is recorded on the child and is
         // not fatal to the parent.
         if let children = await self.children, recursive {
             for child in children {
                 do {
-                    try await child.parse(to: type, recursive: recursive, enhanceReadability: enhanceReadability, enableOCR: enableOCR)
+                    try await child.parse(to: type, recursive: recursive, enhanceReadability: enhanceReadability, enableOCR: enableOCR, sanitizeUnicode: sanitizeUnicode)
                 } catch {
                     await child.setError(error)
                 }
@@ -94,7 +97,8 @@ extension PicoDocument {
                 mimeType: mimeHint,
                 url: self.originURL,
                 enhanceReadability: enhanceReadability,
-                enableOCR: enableOCR
+                enableOCR: enableOCR,
+                sanitizeUnicode: sanitizeUnicode
             )
             let exported = try Self.exportedContent(from: result, format: type)
             await updateParsedDocument(result, content: exported)
