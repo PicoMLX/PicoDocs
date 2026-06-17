@@ -30,25 +30,31 @@ public enum UnicodeSanitizer {
     public static func sanitize(_ string: String) -> String {
         guard !string.isEmpty else { return string }
 
-        // Normalize line endings up front so CR / CRLF fold to LF without
-        // producing extra blank lines in the scalar pass below.
-        var source = string
-        if source.contains("\r") {
-            source = source
-                .replacingOccurrences(of: "\r\n", with: "\n")
-                .replacingOccurrences(of: "\r", with: "\n")
-        }
+        // Single O(N) pass with inline carriage-return tracking, so CR, CRLF and
+        // NEL all collapse to one newline without any intermediate string copies.
+        var scalars: [Unicode.Scalar] = []
+        scalars.reserveCapacity(string.unicodeScalars.count)
+        var lastWasCarriageReturn = false
 
-        var output = ""
-        output.unicodeScalars.reserveCapacity(source.unicodeScalars.count)
-        for scalar in source.unicodeScalars {
+        for scalar in string.unicodeScalars {
+            // An LF immediately after a CR completes a CRLF; the CR already
+            // emitted the newline, so swallow this LF.
+            if lastWasCarriageReturn {
+                lastWasCarriageReturn = false
+                if scalar.value == 0x0A { continue }
+            }
+
             switch scalar.value {
-            // Keep tab and newline.
+            // CR → newline (a following LF is swallowed above).
+            case 0x0D:
+                scalars.append("\n")
+                lastWasCarriageReturn = true
+            // Keep tab and (standalone) newline.
             case 0x09, 0x0A:
-                output.unicodeScalars.append(scalar)
+                scalars.append(scalar)
             // NEL (next line) → newline.
             case 0x85:
-                output.unicodeScalars.append("\n")
+                scalars.append("\n")
             // Other C0 controls, DEL, and C1 controls → drop.
             case 0x00...0x1F, 0x7F...0x9F:
                 break
@@ -60,20 +66,20 @@ public enum UnicodeSanitizer {
                 break
             // Unicode space variants → ASCII space.
             case 0x00A0, 0x1680, 0x2000...0x200A, 0x202F, 0x205F, 0x3000:
-                output.unicodeScalars.append(" ")
+                scalars.append(" ")
             // Line / paragraph separators → newline.
             case 0x2028, 0x2029:
-                output.unicodeScalars.append("\n")
+                scalars.append("\n")
             // Replacement character (a failed decode) → drop.
             case 0xFFFD:
                 break
             default:
-                output.unicodeScalars.append(scalar)
+                scalars.append(scalar)
             }
         }
 
         // Canonical composition (NFC): combine base + combining marks, etc.
-        return output.precomposedStringWithCanonicalMapping
+        return String(String.UnicodeScalarView(scalars)).precomposedStringWithCanonicalMapping
     }
 
     /// Cleans the text-bearing fields of a `ConverterResult` — section `markdown`
