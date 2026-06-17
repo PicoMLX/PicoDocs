@@ -35,41 +35,55 @@ public struct ImageOCRConverter: DocumentConverter {
         // `info.utType` to `.image`, so the concrete type is known here.)
         let isMultiPage = info.utType?.conforms(to: .tiff) ?? false
 
-        try Task.checkCancellation()
-        // Decode + OCR run off the cooperative pool (see `runOffCooperativePool`);
-        // only `Data` in / `[String]` out crosses the boundary, so no non-Sendable
-        // `CGImage` escapes. One element per frame, in source order (may be "").
-        // A per-frame Vision failure is recorded and skipped (so one bad page of a
-        // multi-page TIFF doesn't lose the rest); a real error is surfaced only
-        // when nothing at all was recognized — which also covers a single image
-        // that simply failed.
-        let frameTexts = try await VisionOCRService.runOffCooperativePool { () throws -> [String] in
-            guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
-                throw PicoDocsError.fileCorrupted
-            }
-            let frameCount = isMultiPage ? max(CGImageSourceGetCount(source), 1) : 1
-            let service = VisionOCRService()
-            var texts: [String] = []
-            var firstError: Error?
-            for index in 0..<frameCount {
-                do {
-                    guard let image = Self.boundedImage(from: source, at: index) else {
-                        texts.append("")
-                        continue
-                    }
-                    texts.append(try service.recognizeText(in: image)
-                        .trimmingCharacters(in: .whitespacesAndNewlines))
-                } catch {
-                    firstError = firstError ?? error
-                    texts.append("")
+        // Frame count. Only a multi-page container needs a peek; a single image is
+        // always one frame, so the common path skips this extra hop.
+        let frameCount: Int
+        if isMultiPage {
+            try Task.checkCancellation()
+            frameCount = try await VisionOCRService.runOffCooperativePool { () throws -> Int in
+                guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+                    throw PicoDocsError.fileCorrupted
                 }
+                return max(CGImageSourceGetCount(source), 1)
             }
-            if texts.allSatisfy({ $0.isEmpty }), let firstError {
-                throw firstError
-            }
-            return texts
+        } else {
+            frameCount = 1
         }
 
+        // Each frame's decode + OCR runs off the cooperative pool (see
+        // `runOffCooperativePool`); looping here in the async context — rather than
+        // inside one offload — lets cancellation be checked between frames (the
+        // offloaded work runs on a GCD thread, where `Task.checkCancellation()`
+        // can't see cancellation). A per-frame failure is recorded and skipped so
+        // one bad page of a multi-page TIFF doesn't lose the rest; a real error is
+        // surfaced only when nothing at all was recognized (which also covers a
+        // single image that simply failed). One element per frame (may be "").
+        var frameTexts: [String] = []
+        var firstError: Error?
+        for index in 0..<frameCount {
+            try Task.checkCancellation()
+            do {
+                let text = try await VisionOCRService.runOffCooperativePool { () throws -> String in
+                    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+                        throw PicoDocsError.fileCorrupted
+                    }
+                    guard let image = Self.boundedImage(from: source, at: index) else { return "" }
+                    return try VisionOCRService().recognizeText(in: image)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                try Task.checkCancellation()
+                frameTexts.append(text)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                firstError = firstError ?? error
+                frameTexts.append("")
+            }
+        }
+
+        if frameTexts.allSatisfy({ $0.isEmpty }), let firstError {
+            throw firstError
+        }
         guard frameTexts.contains(where: { !$0.isEmpty }) else {
             throw PicoDocsError.emptyDocument
         }

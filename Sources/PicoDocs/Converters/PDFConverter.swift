@@ -84,6 +84,10 @@ public struct PDFConverter: DocumentConverter {
                             .recognizeText(in: image)
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                     }
+                    // The offload runs on a GCD thread and won't throw on
+                    // cancellation; check here so a cancel during OCR is honored
+                    // (and caught below) even on the last page.
+                    try Task.checkCancellation()
                     if !ocrText.isEmpty {
                         sections.append(DocumentSection(
                             kind: .body,
@@ -128,31 +132,26 @@ public struct PDFConverter: DocumentConverter {
     private static let maxOCRPixelsPerSide: CGFloat = 4000
 
     /// Renders `page` to an opaque RGB bitmap at `dpi`, capped to
-    /// `maxOCRPixelsPerSide` on the longer (displayed) side. Uses the crop box
-    /// (the visible page) rather than the media box, so trim/bleed or redacted
-    /// margins outside the visible area aren't OCR'd into the text; `bounds(for:)`
-    /// falls back to the media box when no crop box is set.
+    /// `maxOCRPixelsPerSide` on the longer side. Uses the crop box (the visible
+    /// page) rather than the media box, so trim/bleed or redacted margins outside
+    /// the visible area aren't OCR'd into the text; `bounds(for:)` falls back to
+    /// the media box when no crop box is set.
     ///
-    /// The page's `/Rotate` is honored so a rotated scan rasterizes upright —
-    /// Vision returns little/no text from a clipped, wrong-shaped bitmap.
-    /// `draw(with:to:)` ignores rotation on its own, so for a rotated page the
-    /// context is set up with `transform(_:for:)` (which bakes in the rotation,
-    /// box origin, and flip); the non-rotated path is unchanged.
+    /// The page's `/Rotate` is honored (`draw(with:to:)` ignores it) by rotating
+    /// the finished bitmap — see `rotated(_:clockwiseDegrees:)`. Doing it as a
+    /// post-step keeps the proven, test-covered non-rotated draw path untouched,
+    /// rather than relying on `transform(_:for:)` whose coordinate/flip behavior
+    /// in a raw bottom-left `CGBitmapContext` we can't verify here.
     ///
-    /// Internal (not private) so it can be unit-tested for the rotation sizing.
+    /// Internal (not private) so the rotation sizing can be unit-tested.
     static func renderImage(of page: PDFPage, dpi: CGFloat) -> CGImage? {
         let box: PDFDisplayBox = .cropBox
         let bounds = page.bounds(for: box)
         guard bounds.width > 0, bounds.height > 0 else { return nil }
 
-        // 90°/270° rotations swap the displayed width and height.
-        let isQuarterTurned = page.rotation % 180 != 0
-        let displayWidth = isQuarterTurned ? bounds.height : bounds.width
-        let displayHeight = isQuarterTurned ? bounds.width : bounds.height
-
-        let scale = min(dpi / 72.0, maxOCRPixelsPerSide / max(displayWidth, displayHeight))
-        let pixelWidth = Int((displayWidth * scale).rounded())
-        let pixelHeight = Int((displayHeight * scale).rounded())
+        let scale = min(dpi / 72.0, maxOCRPixelsPerSide / max(bounds.width, bounds.height))
+        let pixelWidth = Int((bounds.width * scale).rounded())
+        let pixelHeight = Int((bounds.height * scale).rounded())
         guard pixelWidth > 0, pixelHeight > 0,
               let context = CGContext(
                 data: nil,
@@ -170,13 +169,39 @@ public struct PDFConverter: DocumentConverter {
         context.setFillColor(gray: 1, alpha: 1)
         context.fill(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
         context.scaleBy(x: scale, y: scale)
-        if page.rotation % 360 != 0 {
-            page.transform(context, for: box)
-        } else {
-            context.translateBy(x: -bounds.minX, y: -bounds.minY)
-        }
+        context.translateBy(x: -bounds.minX, y: -bounds.minY)
         page.draw(with: box, to: context)
-        return context.makeImage()
+        guard let unrotated = context.makeImage() else { return nil }
+        return rotated(unrotated, clockwiseDegrees: page.rotation)
+    }
+
+    /// Applies a PDF `/Rotate` (clockwise, always a multiple of 90°) to a finished
+    /// bitmap. Lossless for quarter turns; any other value returns `image` as-is.
+    private static func rotated(_ image: CGImage, clockwiseDegrees: Int) -> CGImage? {
+        let degrees = ((clockwiseDegrees % 360) + 360) % 360
+        guard degrees == 90 || degrees == 180 || degrees == 270 else { return image }
+
+        let width = image.width, height = image.height
+        let quarterTurned = degrees == 90 || degrees == 270
+        guard let context = CGContext(
+            data: nil,
+            width: quarterTurned ? height : width,
+            height: quarterTurned ? width : height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ) else { return image }
+
+        // Rotate about the output centre. CGContext.rotate is counter-clockwise for
+        // positive angles, so negate for the clockwise `/Rotate`.
+        context.translateBy(x: CGFloat(context.width) / 2, y: CGFloat(context.height) / 2)
+        context.rotate(by: -CGFloat(degrees) * .pi / 180)
+        context.draw(image, in: CGRect(
+            x: -CGFloat(width) / 2, y: -CGFloat(height) / 2,
+            width: CGFloat(width), height: CGFloat(height)
+        ))
+        return context.makeImage() ?? image
     }
     #endif
 }
