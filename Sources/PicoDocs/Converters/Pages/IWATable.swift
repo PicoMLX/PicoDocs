@@ -64,7 +64,9 @@ enum IWATable {
     static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]]) -> [Block]? {
         let objects = buildObjects(streams)
         let tableMarkdown = reconstructTables(objects)
-        guard !tableMarkdown.isEmpty else { return nil }
+        // No early return on an empty table set: a table-less document still
+        // resolves to text-only blocks below, so the caller can use them directly
+        // instead of re-parsing the whole object graph in the appended fallback.
         let tiles = Set(tableMarkdown.keys)
 
         var blocks: [Block] = []
@@ -189,18 +191,19 @@ enum IWATable {
     /// A storage's body text (concatenated `repeated string text`, field 3) when
     /// it's a body storage (`kind` 0 or absent); nil for header/footer/etc.
     private static func bodyStorageText(_ storage: IWAArchive.Object) -> String? {
-        var kind: UInt64 = 0
         var runs: [String] = []
         var reader = ProtobufReader(storage.payload)
         while let field = reader.next() {
             switch (field.number, field.value) {
-            case (1, .varint(let value)): kind = value
+            case (1, .varint(let kind)):
+                guard kind == 0 else { return nil }   // header/footer/etc.: skip without decoding the rest
             case (3, .length(let bytes)):
                 if let run = String(bytes: bytes, encoding: .utf8) { runs.append(run) }
-            default: continue
+            default:
+                continue
             }
         }
-        return kind == 0 ? runs.joined() : nil
+        return runs.joined()
     }
 
     // MARK: - DataList (string store)
