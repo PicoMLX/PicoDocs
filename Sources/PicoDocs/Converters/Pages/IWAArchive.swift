@@ -68,6 +68,12 @@ enum IWAArchive {
     /// Concatenated plain text from all TSWP text storages in the stream, in
     /// object order. Each storage's `repeated string text` runs are joined; a
     /// blank line separates distinct storages (body, header/footer, footnotes…).
+    ///
+    /// NOTE: this includes *all* type-2001 storages rather than filtering to body
+    /// storages via `StorageArchive.kind` (field 1). The KindType enum values
+    /// aren't verified against a real Pages file, and filtering on a wrong value
+    /// would drop real body text; confirming `kind` (and the alternate id 2005)
+    /// against a real fixture is part of the real-file-validation follow-up.
     static func text(in stream: [UInt8]) -> String {
         var storages: [String] = []
         for object in objects(in: stream) where object.type == textStorageType {
