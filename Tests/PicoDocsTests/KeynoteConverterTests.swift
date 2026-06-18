@@ -1,0 +1,73 @@
+//
+//  KeynoteConverterTests.swift
+//  PicoDocsTests
+//
+//  Exercises the Keynote converter with synthetic `.key` packages built from the
+//  shared IWA byte-builders in `PagesConverterTests` (Snappy + protobuf + a
+//  hand-rolled stored ZIP) — no Keynote.app needed. A real `.key` fixture is a
+//  planned follow-up to confirm slide-text kinds/ordering against actual files,
+//  mirroring the Pages real-file pass.
+//
+
+import Foundation
+import Testing
+@testable import PicoDocs
+
+struct KeynoteConverterTests {
+
+    /// A synthetic `.key`: loose `Index/Slide<N>.iwa`, each a Snappy-framed IWA
+    /// holding one body (kind-absent → 0) TSWP storage with `text`.
+    static func makeKeynoteFile(slides: [String]) -> Data {
+        var entries: [(name: String, data: [UInt8])] = []
+        for (index, text) in slides.enumerated() {
+            let iwa = PagesConverterTests.snappyFrame(PagesConverterTests.makeIWAStream(runs: [text]))
+            entries.append((name: "Index/Slide\(index + 1).iwa", data: iwa))
+        }
+        return PagesConverterTests.makeZip(entries)
+    }
+
+    @Test("KeynoteConverter emits one section per slide, in slide-number order")
+    func keynoteSlides() async throws {
+        let key = Self.makeKeynoteFile(slides: ["First slide title", "Second slide body", "Third slide"])
+        let result = try await PicoDocsEngine.convert(data: key, filename: "deck.key")
+        #expect(result.sections.count == 3)
+        #expect(result.sections.allSatisfy { $0.kind == .slide })
+        #expect(result.sections.map(\.slideNumber) == [1, 2, 3])
+        #expect(result.sections[0].markdown.contains("First slide title"))
+        #expect(result.sections[2].markdown.contains("Third slide"))
+        #expect(result.markdown().contains("Second slide body"))
+    }
+
+    @Test("MasterSlide components are excluded from slides")
+    func keynoteExcludesMasters() async throws {
+        // One real slide plus a master template; only the slide should surface.
+        let slide = PagesConverterTests.snappyFrame(PagesConverterTests.makeIWAStream(runs: ["Real slide content"]))
+        let master = PagesConverterTests.snappyFrame(PagesConverterTests.makeIWAStream(runs: ["Master placeholder"]))
+        let key = PagesConverterTests.makeZip([
+            (name: "Index/Slide1.iwa", data: slide),
+            (name: "Index/MasterSlide-1.iwa", data: master),
+        ])
+        let result = try await PicoDocsEngine.convert(data: key, filename: "deck.key")
+        #expect(result.sections.count == 1)
+        #expect(result.markdown().contains("Real slide content"))
+        #expect(!result.markdown().contains("Master placeholder"))
+    }
+
+    @Test("Detector routes a .key package to the Keynote format")
+    func detectionRoutesToKeynote() {
+        let key = Self.makeKeynoteFile(slides: ["Hi"])
+        let info = PicoDocsEngine.makeStreamInfo(filename: "talk.key", mimeType: nil, url: nil, charset: nil)
+        let resolved = ContentTypeDetector.classify(key, info: info)
+        #expect(resolved.detectedFormat == .keynote)
+    }
+
+    @Test("Detector routes a Keynote MIME type without a .key extension")
+    func detectionRoutesByMIME() {
+        let key = Self.makeKeynoteFile(slides: ["Hi"])
+        let info = PicoDocsEngine.makeStreamInfo(
+            filename: "download", mimeType: "application/vnd.apple.keynote", url: nil, charset: nil
+        )
+        let resolved = ContentTypeDetector.classify(key, info: info)
+        #expect(resolved.detectedFormat == .keynote)
+    }
+}

@@ -57,6 +57,7 @@ public struct DocumentConverterRegistry: Sendable {
             .registering(RTFConverter(), priority: Priority.specific)
             .registering(CSVConverter(), priority: Priority.specific)
             .registering(PagesConverter(), priority: Priority.specific)
+            .registering(KeynoteConverter(), priority: Priority.specific)
         #if canImport(PDFKit)
         registry = registry.registering(PDFConverter(), priority: Priority.specific)
         #endif

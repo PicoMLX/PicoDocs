@@ -214,18 +214,27 @@ public enum ContentTypeDetector {
         }
     }
 
-    /// Resolves iWork formats from hints. Only Pages has a converter today;
-    /// Numbers/Keynote will get their own `DetectedFormat` cases when supported.
+    /// Resolves iWork formats from hints (Pages, Keynote). Numbers will get its
+    /// own `DetectedFormat` case when supported.
     static func iworkFormatFromHints(_ info: StreamInfo) -> DetectedFormat? {
-        if let ut = info.utType, ut.conforms(to: .pages) || ut.conforms(to: .pagesSingleFile) { return .pages }
-        if info.fileExtension?.lowercased() == "pages" { return .pages }
-        // Extensionless web downloads: route by the Pages MIME type (current and
-        // legacy), since the URL may carry no `.pages` suffix.
+        if let ut = info.utType {
+            if ut.conforms(to: .pages) || ut.conforms(to: .pagesSingleFile) { return .pages }
+            if ut.conforms(to: .keynote) || ut.conforms(to: .keynoteSingleFile) { return .keynote }
+        }
+        switch info.fileExtension?.lowercased() {
+        case "pages": return .pages
+        case "key": return .keynote
+        default: break
+        }
+        // Extensionless web downloads: route by the iWork MIME type (current and
+        // legacy), since the URL may carry no extension.
         let baseMIME = info.mimeType?.split(separator: ";").first
             .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
         switch baseMIME {
         case "application/vnd.apple.pages", "application/x-iwork-pages-sffpages":
             return .pages
+        case "application/vnd.apple.keynote", "application/x-iwork-keynote-sffkey":
+            return .keynote
         default:
             return nil
         }
