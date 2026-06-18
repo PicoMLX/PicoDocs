@@ -1,0 +1,184 @@
+//
+//  IWAArchive.swift
+//  PicoDocs
+//
+//  Walks a decompressed IWA object stream into (identifier, type, payload)
+//  objects, and pulls plain text out of TSWP text storages.
+//
+//  Stream layout (after Snappy), repeated for each object:
+//      varint(ArchiveInfo length) · ArchiveInfo · payload bytes
+//  where
+//      ArchiveInfo { uint64 identifier = 1; repeated MessageInfo message_infos = 2 }
+//      MessageInfo { uint32 type = 1; uint32 length = 3 }   (other fields ignored)
+//  The payload(s) follow the ArchiveInfo, one per MessageInfo, each `length`
+//  bytes long. In practice iWork emits a single message per archive.
+//
+//  Format references: obriensp/iWorkFileFormat, the SheetJS IWA notes, and
+//  Cocoanetics/SwiftText (MIT).
+//
+
+import Foundation
+
+enum IWAArchive {
+
+    /// The TSWP text storage message type (`TSWP.StorageArchive`). Its field 3 is
+    /// `repeated string text` — the document's paragraph text runs. Shared across
+    /// Pages/Numbers/Keynote.
+    ///
+    /// Only the well-established id 2001 is matched. Other ids occasionally cited
+    /// for text storage (e.g. 2005) are deliberately not included until confirmed
+    /// against a real Pages file / the type registry — a wrong id would surface
+    /// non-text payloads as garbage. Revisit with the real-file fixture follow-up.
+    static let textStorageType: UInt64 = 2001
+    static let textRunsField = 3
+
+    struct Object {
+        let identifier: UInt64
+        let type: UInt64
+        let payload: [UInt8]
+    }
+
+    /// Parses every object in a decompressed IWA stream. Best-effort: on a
+    /// truncated/garbled envelope it returns the objects parsed so far rather than
+    /// throwing, so partially-recoverable files still yield text. Strict
+    /// envelope-truncation detection (failing on any malformation) is deferred to
+    /// the real-file-validation follow-up, to avoid mis-rejecting valid documents
+    /// whose envelope quirks aren't yet covered by tests.
+    static func objects(in stream: [UInt8]) -> [Object] {
+        var objects: [Object] = []
+        var cursor = StreamCursor(stream)
+        while let archiveLen = cursor.readVarint() {
+            guard archiveLen > 0, archiveLen <= UInt64(Int.max),
+                  let archiveBytes = cursor.take(Int(archiveLen)) else { break }
+            let infos = messageInfos(in: archiveBytes)
+            guard !infos.isEmpty else { break }
+            // Payloads follow the ArchiveInfo, concatenated in MessageInfo order.
+            // Stop at the first failure (truncated/garbled stream, or a length past
+            // `Int.max`) and return what parsed cleanly — never re-read past a
+            // partially-consumed object, which would mis-parse or loop.
+            for info in infos {
+                guard info.length <= UInt64(Int.max),
+                      let payload = cursor.take(Int(info.length)) else { return objects }
+                objects.append(Object(identifier: info.identifier, type: info.type, payload: payload))
+            }
+        }
+        return objects
+    }
+
+    /// Concatenated plain text from all TSWP text storages in the stream, in
+    /// object order. Each storage's `repeated string text` runs are joined; a
+    /// blank line separates distinct storages (body, header/footer, footnotes…).
+    ///
+    /// NOTE: this includes *all* type-2001 storages rather than filtering to body
+    /// storages via `StorageArchive.kind` (field 1). The KindType enum values
+    /// aren't verified against a real Pages file, and filtering on a wrong value
+    /// would drop real body text; confirming `kind` (and the alternate id 2005)
+    /// against a real fixture is part of the real-file-validation follow-up.
+    static func text(in stream: [UInt8]) -> String {
+        var storages: [String] = []
+        for object in objects(in: stream) where object.type == textStorageType {
+            let joined = textRuns(in: object.payload).joined()
+            if !joined.isEmpty { storages.append(joined) }
+        }
+        return storages.joined(separator: "\n\n")
+    }
+
+    // MARK: - Helpers
+
+    private struct InfoEntry {
+        let identifier: UInt64
+        let type: UInt64
+        let length: UInt64
+    }
+
+    /// Reads ArchiveInfo: identifier (field 1) + each MessageInfo (field 2) into
+    /// (identifier, type, length) entries.
+    private static func messageInfos(in archiveBytes: [UInt8]) -> [InfoEntry] {
+        var identifier: UInt64 = 0
+        var entries: [InfoEntry] = []
+        var reader = ProtobufReader(archiveBytes)
+        while let field = reader.next() {
+            switch (field.number, field.value) {
+            case (1, .varint(let id)):
+                identifier = id
+            case (2, .length(let messageInfoBytes)):
+                if let (type, length) = parseMessageInfo(messageInfoBytes) {
+                    entries.append(InfoEntry(identifier: identifier, type: type, length: length))
+                }
+            default:
+                continue
+            }
+        }
+        return entries
+    }
+
+    /// MessageInfo: type (field 1) + payload length (field 3).
+    private static func parseMessageInfo(_ bytes: [UInt8]) -> (type: UInt64, length: UInt64)? {
+        var type: UInt64?
+        var length: UInt64?
+        var reader = ProtobufReader(bytes)
+        while let field = reader.next() {
+            switch (field.number, field.value) {
+            case (1, .varint(let t)): type = t
+            case (3, .varint(let l)): length = l
+            default: continue
+            }
+        }
+        guard let type, let length else { return nil }
+        return (type, length)
+    }
+
+    /// TSWP.StorageArchive: field 3 is `repeated string text`. Returns the runs in
+    /// order (concatenation reconstructs the storage's full text).
+    private static func textRuns(in payload: [UInt8]) -> [String] {
+        var runs: [String] = []
+        var reader = ProtobufReader(payload)
+        while let field = reader.next() {
+            if field.number == textRunsField, case .length(let bytes) = field.value,
+               let run = String(bytes: bytes, encoding: .utf8) {
+                runs.append(run)
+            }
+        }
+        return runs
+    }
+}
+
+/// Raw varint + slice cursor over the decompressed object stream (the IWA
+/// envelope is read by hand rather than via `ProtobufReader`, which decodes
+/// whole messages).
+private struct StreamCursor {
+    private let bytes: [UInt8]
+    private var pos: Int = 0
+
+    init(_ bytes: [UInt8]) { self.bytes = bytes }
+
+    mutating func readVarint() -> UInt64? {
+        guard pos < bytes.count else { return nil }
+        var result: UInt64 = 0
+        var shift: UInt64 = 0
+        while pos < bytes.count {
+            let byte = bytes[pos]
+            pos += 1
+            // Reject overflow before shifting: at the 10th byte (shift 63) only the
+            // low bit fits a 64-bit value; a longer varint is malformed.
+            if shift == 63 {
+                if byte & 0x7E != 0 { return nil }
+            } else if shift >= 64 {
+                return nil
+            }
+            result |= UInt64(byte & 0x7F) << shift
+            if byte & 0x80 == 0 { return result }
+            shift += 7
+        }
+        return nil
+    }
+
+    mutating func take(_ count: Int) -> [UInt8]? {
+        // `count <= bytes.count - pos` rather than `pos + count <= count` so a
+        // hostile length near Int.max can't overflow the addition.
+        guard count >= 0, count <= bytes.count - pos else { return nil }
+        let slice = Array(bytes[pos ..< pos + count])
+        pos += count
+        return slice
+    }
+}
