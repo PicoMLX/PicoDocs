@@ -107,11 +107,13 @@ public struct KeynoteConverter: DocumentConverter {
             if !cleaned.isEmpty { sections = [DocumentSection(kind: .body, markdown: cleaned)] }
         }
 
-        // Reconstruct tables from the whole deck (table cells live in separate
-        // Tile/DataList objects) and append them after the slides. Per-slide inline
-        // placement is a follow-up.
+        // Reconstruct tables from the deck's slide and shared components (table
+        // cells live in separate Tile/DataList objects) and append them after the
+        // slides. Master/template components are excluded — as for slide text — so
+        // theme placeholder tables don't leak in. Per-slide inline placement is a
+        // follow-up.
         var deckStreams: [[UInt8]] = []
-        for component in components {
+        for component in components where !Self.isMaster(component.name) {
             try Task.checkCancellation()
             if let stream = try? Snappy.decompressIWA(component.bytes) { deckStreams.append(stream) }
         }

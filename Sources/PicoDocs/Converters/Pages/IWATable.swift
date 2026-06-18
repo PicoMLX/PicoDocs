@@ -127,8 +127,18 @@ enum IWATable {
         var richMaps: [UInt64: [UInt32: String]] = [:]
         var inlineMaps: [UInt64: [UInt32: String]] = [:]
         for object in objects.values where object.type == dataListType {
-            if let map = richTextMap(object, objects: objects) { richMaps[object.identifier] = map }
-            else if let map = inlineTextMap(object) { inlineMaps[object.identifier] = map }
+            // Dispatch on list_type (field 1) so each datalist's entries are fully
+            // parsed at most once — rich and inline text are mutually exclusive.
+            var listType: UInt64?
+            var reader = ProtobufReader(object.payload)
+            while let field = reader.next() {
+                if field.number == 1, case .varint(let type) = field.value { listType = type; break }
+            }
+            if listType == stringListType {
+                if let map = richTextMap(object, objects: objects) { richMaps[object.identifier] = map }
+            } else if listType == inlineListType {
+                if let map = inlineTextMap(object) { inlineMaps[object.identifier] = map }
+            }
         }
 
         var byTile: [UInt64: String] = [:]
@@ -406,16 +416,30 @@ enum IWATable {
         return Double(bitPattern: bits)
     }
 
-    /// Formats seconds-since-2001 (iWork's reference date) as `yyyy-MM-dd` in UTC.
-    /// Implausible magnitudes return "".
+    /// Formats seconds-since-2001 (iWork's reference date) as `yyyy-MM-dd`.
+    /// Computed arithmetically — no `DateFormatter`, which is allocation-free and
+    /// avoids a shared static formatter (not `Sendable` under Swift 6). Implausible
+    /// magnitudes return "".
     private static func isoDate(_ secondsSinceReference: Double) -> String {
         guard secondsSinceReference.isFinite, abs(secondsSinceReference) < 4e11 else { return "" }
-        let date = Date(timeIntervalSinceReferenceDate: secondsSinceReference)
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: date)
+        // Days since 1970-01-01 (2001-01-01 is 11_323 days after 1970-01-01).
+        let days = Int((secondsSinceReference / 86_400).rounded(.down)) + 11_323
+        // Howard Hinnant's civil-from-days algorithm.
+        let z = days + 719_468
+        let era = (z >= 0 ? z : z - 146_096) / 146_097
+        let doe = z - era * 146_097
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+        let mp = (5 * doy + 2) / 153
+        let day = doy - (153 * mp + 2) / 5 + 1
+        let month = mp < 10 ? mp + 3 : mp - 9
+        let year = yoe + era * 400 + (month <= 2 ? 1 : 0)
+        func pad(_ value: Int, _ width: Int) -> String {
+            var string = String(value)
+            while string.count < width { string = "0" + string }
+            return string
+        }
+        return "\(pad(year, 4))-\(pad(month, 2))-\(pad(day, 2))"
     }
 
     // MARK: - Markdown rendering
