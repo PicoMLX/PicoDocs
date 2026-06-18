@@ -69,6 +69,11 @@ public struct KeynoteConverter: DocumentConverter {
             let rr = rank[rhs.id] ?? Int.max
             if lr != rr { return lr < rr }
             if lhs.id != rhs.id { return lhs.id < rhs.id }
+            // Final fallback (no slide tree, ids unresolved): numeric filename
+            // order, so Slide2 precedes Slide10 (lexicographic would not).
+            let lo = Self.slideOrder(lhs.name)
+            let ro = Self.slideOrder(rhs.name)
+            if lo != ro { return lo < ro }
             return lhs.name < rhs.name
         }
 
@@ -116,7 +121,17 @@ public struct KeynoteConverter: DocumentConverter {
 
     static func isMaster(_ path: String) -> Bool {
         let base = path.split(separator: "/").last.map(String.init) ?? path
-        return base.hasPrefix("MasterSlide")
+        return base.hasPrefix("MasterSlide") || base.hasPrefix("TemplateSlide")
+    }
+
+    /// The trailing number in a `Slide<N>.iwa` filename (`Slide12.iwa` → 12), used
+    /// only as the final ordering fallback when the slide tree and slide ids can't
+    /// be resolved. Numeric so `Slide2` precedes `Slide10`; unnumbered names
+    /// (e.g. `Slide.iwa`) sort last.
+    static func slideOrder(_ path: String) -> Int {
+        let base = path.split(separator: "/").last.map(String.init) ?? path
+        let digits = base.drop { !$0.isNumber }.prefix { $0.isNumber }
+        return Int(digits) ?? Int.max
     }
 
     /// KN.SlideArchive message type — the slide object inside each `Slide*.iwa`,
