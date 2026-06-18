@@ -233,7 +233,7 @@ enum IWATable {
         let rows: [[String]] = grid.map { row in
             row.map { key in
                 guard let key, let text = strings[key] else { return "" }
-                return escape(text)
+                return cleanCell(text)
             }
         }
         let columnCount = rows.map(\.count).max() ?? 0
@@ -250,18 +250,33 @@ enum IWATable {
         return lines.joined(separator: "\n")
     }
 
-    /// Escapes characters that would break a Markdown table cell: backslash and
-    /// pipe are escaped, and every line/paragraph separator (CR-LF, CR, LF, and
-    /// the Unicode separators iWork uses) is folded to a single space so a
-    /// multi-line cell stays on one row. CR-LF is handled before the bare CR/LF
-    /// so it collapses to one space, not two. Same separator set as
-    /// `PagesConverter.normalize`.
-    private static func escape(_ text: String) -> String {
-        var escaped = text.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "|", with: "\\|")
+    /// Cleans a cell's raw storage text for a Markdown table cell, mirroring
+    /// `PagesConverter.normalize`:
+    ///  • folds every line/paragraph separator (CR-LF, CR, LF, and the Unicode
+    ///    separators iWork uses) to a single space so a multi-line cell stays on
+    ///    one row — CR-LF first, so it collapses to one space, not two;
+    ///  • drops the U+FFFC object-replacement sentinel (image / embedded-object
+    ///    placeholders) and C0/C1 control characters that aren't real text, so a
+    ///    placeholder-only cell becomes empty (and an all-placeholder table is
+    ///    skipped) rather than rendering as visible garbage;
+    ///  • escapes backslash and pipe so the text can't break the table; and
+    ///  • trims surrounding whitespace.
+    private static func cleanCell(_ text: String) -> String {
+        var folded = text
         for separator in ["\r\n", "\r", "\n", "\u{2028}", "\u{2029}", "\u{000B}", "\u{000C}"] {
-            escaped = escaped.replacingOccurrences(of: separator, with: " ")
+            folded = folded.replacingOccurrences(of: separator, with: " ")
         }
-        return escaped
+        var scalars = folded.unicodeScalars
+        scalars.removeAll { scalar in
+            let value = scalar.value
+            guard value != 0x09 else { return false }        // keep tab
+            return value <= 0x1F                              // C0 controls
+                || (0x7F...0x9F).contains(value)             // DEL + C1 controls
+                || value == 0xFFFC                           // object-replacement placeholder
+        }
+        let escaped = String(scalars)
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "|", with: "\\|")
+        return escaped.trimmingCharacters(in: .whitespaces)
     }
 }
