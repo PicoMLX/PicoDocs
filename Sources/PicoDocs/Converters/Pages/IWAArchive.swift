@@ -99,25 +99,29 @@ enum IWAArchive {
     }
 
     /// Reads ArchiveInfo: identifier (field 1) + each MessageInfo (field 2) into
-    /// (identifier, type, length, references) entries.
+    /// (identifier, type, length, references) entries. Protobuf fields may be
+    /// serialized in any order, so the MessageInfo payloads are collected first
+    /// and stamped with the identifier only after the whole ArchiveInfo has been
+    /// scanned — never assuming field 1 precedes field 2 (an archive that emitted
+    /// `message_infos` first would otherwise get identifier 0, breaking the
+    /// object-graph lookups, e.g. Keynote's slide-tree ordering).
     private static func messageInfos(in archiveBytes: [UInt8]) -> [InfoEntry] {
         var identifier: UInt64 = 0
-        var entries: [InfoEntry] = []
+        var infos: [(type: UInt64, length: UInt64, references: [UInt64])] = []
         var reader = ProtobufReader(archiveBytes)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (1, .varint(let id)):
                 identifier = id
             case (2, .length(let messageInfoBytes)):
-                if let info = parseMessageInfo(messageInfoBytes) {
-                    entries.append(InfoEntry(identifier: identifier, type: info.type,
-                                             length: info.length, references: info.references))
-                }
+                if let info = parseMessageInfo(messageInfoBytes) { infos.append(info) }
             default:
                 continue
             }
         }
-        return entries
+        return infos.map {
+            InfoEntry(identifier: identifier, type: $0.type, length: $0.length, references: $0.references)
+        }
     }
 
     /// MessageInfo: type (field 1), payload length (field 3), and object_references
