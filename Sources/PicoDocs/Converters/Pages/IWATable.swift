@@ -37,6 +37,7 @@ enum IWATable {
     private static let stringListType: UInt64 = 8       // DataList.list_type for strings
     private static let richTextPayloadType: UInt64 = 6218
     private static let storageType: UInt64 = 2001
+    private static let tableModelTypes: Set<UInt64> = [6001, 6316]   // TST.TableModelArchive
 
     /// Reconstructs every text table found across the given decompressed IWA
     /// streams, rendered as Markdown, ordered by tile identifier (a stable proxy
@@ -66,10 +67,12 @@ enum IWATable {
         guard !stringLists.isEmpty else { return [] }
 
         // A table model references exactly one tile and the datalist holding its
-        // strings. Collect (tile, strings) pairs, then render once per tile in a
-        // stable order (Dictionary iteration order is unspecified).
+        // strings. Restrict to the known table-model types so an unrelated object
+        // that happens to reference both can't be mistaken for a table. Collect
+        // (tile, strings) pairs, then render once per tile in a stable order
+        // (Dictionary iteration order is unspecified).
         var pairs: [(tile: UInt64, strings: UInt64)] = []
-        for object in objects.values {
+        for object in objects.values where tableModelTypes.contains(object.type) {
             guard let tile = object.references.first(where: { tileIDs.contains($0) }),
                   let strings = object.references.first(where: { stringLists[$0] != nil }) else { continue }
             pairs.append((tile, strings))
@@ -247,11 +250,18 @@ enum IWATable {
         return lines.joined(separator: "\n")
     }
 
-    /// Escapes characters that would break a Markdown table cell.
+    /// Escapes characters that would break a Markdown table cell: backslash and
+    /// pipe are escaped, and every line/paragraph separator (CR-LF, CR, LF, and
+    /// the Unicode separators iWork uses) is folded to a single space so a
+    /// multi-line cell stays on one row. CR-LF is handled before the bare CR/LF
+    /// so it collapses to one space, not two. Same separator set as
+    /// `PagesConverter.normalize`.
     private static func escape(_ text: String) -> String {
-        text.replacingOccurrences(of: "\\", with: "\\\\")
+        var escaped = text.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "|", with: "\\|")
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
+        for separator in ["\r\n", "\r", "\n", "\u{2028}", "\u{2029}", "\u{000B}", "\u{000C}"] {
+            escaped = escaped.replacingOccurrences(of: separator, with: " ")
+        }
+        return escaped
     }
 }
