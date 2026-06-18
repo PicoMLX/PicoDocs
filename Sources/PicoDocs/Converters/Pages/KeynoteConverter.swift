@@ -50,7 +50,14 @@ public struct KeynoteConverter: DocumentConverter {
         var sections: [DocumentSection] = []
         for (index, slide) in slides.enumerated() {
             try Task.checkCancellation()
-            guard let stream = try? Snappy.decompressIWA(slide.bytes) else { continue }
+            // A slide's stream is primary content: a decompression failure is
+            // corruption, not an empty slide — fail rather than silently drop it.
+            let stream: [UInt8]
+            do {
+                stream = try Snappy.decompressIWA(slide.bytes)
+            } catch {
+                throw PicoDocsError.fileCorrupted
+            }
             let text = Self.normalize(IWAArchive.text(in: stream))
             guard !text.isEmpty else { continue }
             // slideNumber reflects the slide's position in deck order (by Slide<N>
@@ -168,7 +175,9 @@ public struct KeynoteConverter: DocumentConverter {
         scalars.removeAll { scalar in
             let value = scalar.value
             guard value != 0x0A, value != 0x09 else { return false }  // keep newline, tab
-            return value <= 0x1F || (0x7F...0x9F).contains(value)      // C0 / C1 controls
+            return value <= 0x1F                  // C0 controls
+                || (0x7F...0x9F).contains(value)  // C1 controls
+                || value == 0xFFFC                // object-replacement placeholder (image/table/etc.)
         }
         unified = String(scalars)
         let inlineWhitespace = CharacterSet(charactersIn: " \t")

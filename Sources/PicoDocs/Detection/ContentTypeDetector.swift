@@ -81,7 +81,12 @@ public enum ContentTypeDetector {
         // 3. Document formats identified by hint but lacking magic bytes (corrupt
         //    or mislabeled). Honor the hint so they reach the right converter (or
         //    report unsupported) instead of being mis-read as text.
-        if let iwork = iworkFormatFromHints(info) {
+        // iWork hints, but NOT Keynote here: `.key` is an ambiguous extension
+        // (PEM/SSH/license keys), and Keynote — like all iWork formats — is always
+        // a ZIP, so a non-ZIP `.key` is left to the text path rather than routed to
+        // a converter that would only fail. Real `.key` packages still match in the
+        // ZIP branch above.
+        if let iwork = iworkFormatFromHints(info), iwork != .keynote {
             return (iwork, 0.4)
         }
         if let docHint = documentFormatFromHints(info) {

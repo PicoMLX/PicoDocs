@@ -70,4 +70,23 @@ struct KeynoteConverterTests {
         let resolved = ContentTypeDetector.classify(key, info: info)
         #expect(resolved.detectedFormat == .keynote)
     }
+
+    @Test("A non-ZIP .key file (e.g. a PEM key) is not routed to Keynote")
+    func plaintextKeyNotKeynote() {
+        let pem = Data("-----BEGIN PRIVATE KEY-----\nMIIBVwIBADANBgkq\n-----END PRIVATE KEY-----\n".utf8)
+        let info = PicoDocsEngine.makeStreamInfo(filename: "server.key", mimeType: nil, url: nil, charset: nil)
+        let resolved = ContentTypeDetector.classify(pem, info: info)
+        #expect(resolved.detectedFormat != .keynote)
+        #expect(resolved.detectedFormat == .plainText)
+    }
+
+    @Test("A corrupt slide stream fails rather than silently dropping the slide")
+    func corruptSlideFails() async {
+        // A valid ZIP entry whose bytes aren't a valid Snappy/IWA stream.
+        let key = PagesConverterTests.makeZip([(name: "Index/Slide1.iwa", data: [0xFF, 0x00, 0x00, 0x00, 0x01])])
+        let info = PicoDocsEngine.makeStreamInfo(filename: "deck.key", mimeType: nil, url: nil, charset: nil)
+        await #expect(throws: Error.self) {
+            _ = try await KeynoteConverter().convert(key, info: info)
+        }
+    }
 }

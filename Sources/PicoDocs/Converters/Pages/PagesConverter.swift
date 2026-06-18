@@ -142,7 +142,9 @@ public struct PagesConverter: DocumentConverter {
         scalars.removeAll { scalar in
             let value = scalar.value
             guard value != 0x0A, value != 0x09 else { return false }  // keep newline, tab
-            return value <= 0x1F || (0x7F...0x9F).contains(value)      // C0 / C1 controls
+            return value <= 0x1F                  // C0 controls
+                || (0x7F...0x9F).contains(value)  // C1 controls
+                || value == 0xFFFC                // object-replacement placeholder (image/table/etc.)
         }
         unified = String(scalars)
         let inlineWhitespace = CharacterSet(charactersIn: " \t")
