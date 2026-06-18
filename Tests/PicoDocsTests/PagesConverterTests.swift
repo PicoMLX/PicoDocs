@@ -69,6 +69,31 @@ struct PagesConverterTests {
         #expect(markdown.contains("Second paragraph."))
     }
 
+    @Test("PagesConverter extracts body text from a real Pages fixture, excluding header/footer")
+    func realPagesFixture() async throws {
+        let data = try Fixture.data("sample", "pages")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.pages")
+        let markdown = result.markdown()
+
+        // Body storage (kind == 0) is extracted: heading, body paragraphs (incl.
+        // inline code, full Unicode coverage), and the end-of-document marker.
+        #expect(markdown.contains("Representative Import Fixture for Apple Pages"))
+        #expect(markdown.contains("let importer = PagesImporter()"))
+        #expect(markdown.contains("café, naïve"))
+        #expect(markdown.contains("🚀"))
+        #expect(markdown.contains("日本語"))
+        #expect(markdown.contains("END_OF_PAGES_IMPORT_FIXTURE"))
+
+        // Header/footer storages (kind == 1) are excluded from the body.
+        #expect(!markdown.contains("generated source DOCX"))
+        #expect(!markdown.contains("Fixture coverage: headings"))
+        #expect(!markdown.contains("End of fixture"))
+
+        // Control-character artifacts (e.g. the U+0004 section-break sentinel) are
+        // stripped from the output.
+        #expect(!markdown.unicodeScalars.contains("\u{0004}"))
+    }
+
     @Test("Detector routes a .pages package to the Pages format")
     func detectionRoutesToPages() {
         let pages = Self.makePagesFile(paragraphs: ["Hi"])

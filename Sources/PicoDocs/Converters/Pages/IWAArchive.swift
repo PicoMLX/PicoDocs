@@ -21,16 +21,16 @@ import Foundation
 
 enum IWAArchive {
 
-    /// The TSWP text storage message type (`TSWP.StorageArchive`). Its field 3 is
-    /// `repeated string text` — the document's paragraph text runs. Shared across
+    /// The TSWP text storage message type (`TSWP.StorageArchive`): field 1 is the
+    /// storage `kind` (0 = body; non-zero = header/footer/footnote/…) and field 3
+    /// is `repeated string text`, the paragraph text runs. Shared across
     /// Pages/Numbers/Keynote.
     ///
-    /// Only the well-established id 2001 is matched. Other ids occasionally cited
-    /// for text storage (e.g. 2005) are deliberately not included until confirmed
-    /// against a real Pages file / the type registry — a wrong id would surface
-    /// non-text payloads as garbage. Revisit with the real-file fixture follow-up.
+    /// Confirmed against a real Pages file: 2001 is the text storage and the body
+    /// is `kind == 0`. The alternate id 2005 sometimes cited for text storage did
+    /// not appear there, so it's intentionally not matched (a wrong id would
+    /// surface non-text payloads as garbage).
     static let textStorageType: UInt64 = 2001
-    static let textRunsField = 3
 
     struct Object {
         let identifier: UInt64
@@ -65,20 +65,16 @@ enum IWAArchive {
         return objects
     }
 
-    /// Concatenated plain text from all TSWP text storages in the stream, in
-    /// object order. Each storage's `repeated string text` runs are joined; a
-    /// blank line separates distinct storages (body, header/footer, footnotes…).
-    ///
-    /// NOTE: this includes *all* type-2001 storages rather than filtering to body
-    /// storages via `StorageArchive.kind` (field 1). The KindType enum values
-    /// aren't verified against a real Pages file, and filtering on a wrong value
-    /// would drop real body text; confirming `kind` (and the alternate id 2005)
-    /// against a real fixture is part of the real-file-validation follow-up.
+    /// Concatenated plain *body* text from the stream's TSWP text storages, in
+    /// object order. Only body storages (`kind == 0`) are included — header,
+    /// footer, footnote, and text-box storages (non-zero `kind`) are skipped so
+    /// their text isn't passed off as the document body. Each storage's `repeated
+    /// string text` runs are joined; a blank line separates distinct body storages.
     static func text(in stream: [UInt8]) -> String {
         var storages: [String] = []
         for object in objects(in: stream) where object.type == textStorageType {
-            let joined = textRuns(in: object.payload).joined()
-            if !joined.isEmpty { storages.append(joined) }
+            guard let body = bodyText(in: object.payload), !body.isEmpty else { continue }
+            storages.append(body)
         }
         return storages.joined(separator: "\n\n")
     }
@@ -128,18 +124,24 @@ enum IWAArchive {
         return (type, length)
     }
 
-    /// TSWP.StorageArchive: field 3 is `repeated string text`. Returns the runs in
-    /// order (concatenation reconstructs the storage's full text).
-    private static func textRuns(in payload: [UInt8]) -> [String] {
+    /// TSWP.StorageArchive: the concatenated `repeated string text` (field 3) runs,
+    /// but only when this is a *body* storage — `kind` (field 1) is 0, or absent
+    /// (protobuf default 0). Header/footer/footnote storages (non-zero kind) return
+    /// nil so callers skip them.
+    private static func bodyText(in payload: [UInt8]) -> String? {
         var runs: [String] = []
         var reader = ProtobufReader(payload)
         while let field = reader.next() {
-            if field.number == textRunsField, case .length(let bytes) = field.value,
-               let run = String(bytes: bytes, encoding: .utf8) {
-                runs.append(run)
+            switch (field.number, field.value) {
+            case (1, .varint(let kind)):                // StorageArchive.kind
+                guard kind == 0 else { return nil }     // non-body (header/footer/…) → skip
+            case (3, .length(let bytes)):               // repeated string text
+                if let run = String(bytes: bytes, encoding: .utf8) { runs.append(run) }
+            default:
+                continue
             }
         }
-        return runs
+        return runs.joined()                            // kind 0 or absent (default 0) = body
     }
 }
 
