@@ -67,10 +67,28 @@ struct OOXMLPackageWriter {
     static let xmlDeclaration = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
 
     /// Escapes text content for an XML element body.
+    ///
+    /// Also drops scalars that XML 1.0 forbids (most C0 control characters, plus the
+    /// surrogate/`FFFE`/`FFFF` ranges). LLM output and text extracted from PDFs can
+    /// carry stray `NUL`/vertical-tab/etc.; left in, they'd make `document.xml`,
+    /// worksheet, or slide parts non-well-formed and Office would reject the file.
+    /// Raw `write(markdown:)` input doesn't pass through `sanitizeUnicode`, so this
+    /// is the single choke point that guarantees valid XML bodies.
     static func escape(_ text: String) -> String {
-        text.replacingOccurrences(of: "&", with: "&amp;")
+        let sanitized = String(String.UnicodeScalarView(text.unicodeScalars.filter(isValidXMLScalar)))
+        return sanitized.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    /// Whether a scalar is allowed in an XML 1.0 document (tab/LF/CR, then the
+    /// permitted BMP and supplementary ranges).
+    private static func isValidXMLScalar(_ scalar: Unicode.Scalar) -> Bool {
+        let v = scalar.value
+        return v == 0x9 || v == 0xA || v == 0xD ||
+            (v >= 0x20 && v <= 0xD7FF) ||
+            (v >= 0xE000 && v <= 0xFFFD) ||
+            (v >= 0x10000 && v <= 0x10FFFF)
     }
 
     /// Escapes a value for an XML attribute (adds quote escaping).

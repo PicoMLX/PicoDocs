@@ -104,7 +104,10 @@ enum MarkdownInlineParser {
     private static func parseLinkOrImage(_ chars: [Character], from: Int, isImage: Bool) -> (node: MarkdownInline, next: Int)? {
         let bracket = isImage ? from + 1 : from
         guard bracket < chars.count, chars[bracket] == "[" else { return nil }
-        guard let labelEnd = firstIndex(of: "]", in: chars, from: bracket + 1) else { return nil }
+        // Find the label's closing `]`, skipping backslash-escaped delimiters:
+        // `WordConverter` escapes `[`/`]` inside labels and alt text, so a visible
+        // `]` arrives as `\]` and must not terminate the label early.
+        guard let labelEnd = indexOfUnescaped("]", in: chars, from: bracket + 1) else { return nil }
         let parenOpen = labelEnd + 1
         guard parenOpen < chars.count, chars[parenOpen] == "(" else { return nil }
 
@@ -117,34 +120,84 @@ enum MarkdownInlineParser {
             cursor = gt + 1
             guard cursor < chars.count, chars[cursor] == ")" else { return nil }
         } else {
-            guard let parenClose = firstIndex(of: ")", in: chars, from: destStart) else { return nil }
-            dest = String(chars[destStart..<parenClose])
+            // Bare destination: match balanced parentheses so a URL such as
+            // `https://example.com/Foo_(bar)` (common in raw LLM Markdown) isn't
+            // truncated at the first `)`.
+            guard let parenClose = balancedParenClose(chars, from: destStart) else { return nil }
+            dest = unescape(String(chars[destStart..<parenClose]))
             cursor = parenClose
         }
-        let labelText = String(chars[(bracket + 1)..<labelEnd])
+        let labelText = unescape(String(chars[(bracket + 1)..<labelEnd]))
         let node: MarkdownInline = isImage
             ? .image(alt: labelText, source: dest)
             : .link(label: parse(labelText), destination: dest)
         return (node, cursor + 1)   // past the ")"
     }
 
+    /// First index of `character` at or after `start` that isn't backslash-escaped.
+    private static func indexOfUnescaped(_ character: Character, in chars: [Character], from start: Int) -> Int? {
+        var i = start
+        while i < chars.count {
+            if chars[i] == "\\" { i += 2; continue }   // skip the escape and its target
+            if chars[i] == character { return i }
+            i += 1
+        }
+        return nil
+    }
+
+    /// Index of the `)` that closes a bare destination opened just past `(`,
+    /// honoring nested balanced parens and backslash escapes; nil if unbalanced.
+    private static func balancedParenClose(_ chars: [Character], from start: Int) -> Int? {
+        var depth = 0
+        var i = start
+        while i < chars.count {
+            let c = chars[i]
+            if c == "\\" { i += 2; continue }
+            if c == "(" { depth += 1 }
+            else if c == ")" {
+                if depth == 0 { return i }
+                depth -= 1
+            }
+            i += 1
+        }
+        return nil
+    }
+
+    /// Removes backslash escapes (`\x` -> `x`), recovering the literal label/destination
+    /// text that `WordConverter` (and CommonMark authors) escape.
+    private static func unescape(_ text: String) -> String {
+        guard text.contains("\\") else { return text }
+        var out = ""
+        var escaped = false
+        for ch in text {
+            if escaped { out.append(ch); escaped = false }
+            else if ch == "\\" { escaped = true }
+            else { out.append(ch) }
+        }
+        if escaped { out.append("\\") }
+        return out
+    }
+
     // MARK: - Emphasis
+
+    /// `***`/`**`/`*` matchers, compiled once. `parseEmphasis` recurses over every
+    /// inline run, so rebuilding these per call was needless CPU; the patterns are
+    /// constant and known-valid, hence `try!`.
+    private static let emphasisPatterns: [(regex: NSRegularExpression, wrap: ([MarkdownInline]) -> MarkdownInline)] = [
+        (try! NSRegularExpression(pattern: "\\*\\*\\*(.+?)\\*\\*\\*"), { .strong([.emphasis($0)]) }),
+        (try! NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*"), { .strong($0) }),
+        (try! NSRegularExpression(pattern: "\\*(.+?)\\*"), { .emphasis($0) }),
+    ]
 
     /// Parses `***`/`**`/`*` emphasis into nested nodes, preferring (at the same
     /// position) the longest delimiter — mirroring the renderer's pass order so
     /// `***x***` becomes strong(emphasis(x)).
     static func parseEmphasis(_ text: String) -> [MarkdownInline] {
         guard !text.isEmpty else { return [] }
-        let patterns: [(pattern: String, wrap: ([MarkdownInline]) -> MarkdownInline)] = [
-            ("\\*\\*\\*(.+?)\\*\\*\\*", { .strong([.emphasis($0)]) }),
-            ("\\*\\*(.+?)\\*\\*", { .strong($0) }),
-            ("\\*(.+?)\\*", { .emphasis($0) }),
-        ]
         let ns = text as NSString
         var best: (full: Range<String.Index>, inner: String, wrap: ([MarkdownInline]) -> MarkdownInline)?
-        for (pattern, wrap) in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern),
-                  let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
+        for (regex, wrap) in emphasisPatterns {
+            guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
                   let full = Range(match.range, in: text),
                   let inner = Range(match.range(at: 1), in: text) else { continue }
             // Strictly-less keeps the first (longest) pattern at a tie position.

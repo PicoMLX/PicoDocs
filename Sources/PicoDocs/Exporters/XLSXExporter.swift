@@ -138,7 +138,12 @@ public struct XLSXExporter: DocumentExporter {
     /// Excel sheet names: ≤31 chars and none of `: \ / ? * [ ]`.
     private static func sanitizeSheetName(_ name: String) -> String {
         let invalid = CharacterSet(charactersIn: ":\\/?*[]")
-        let cleaned = String(name.unicodeScalars.map { invalid.contains($0) ? Character(" ") : Character($0) })
+        // Map scalars (not characters) so multi-scalar grapheme clusters — flag
+        // emoji, skin-tone modifiers, family sequences — survive intact; rebuilding
+        // a String from the scalar view re-segments them into single characters.
+        let space: Unicode.Scalar = " "
+        let cleanedScalars = name.unicodeScalars.map { invalid.contains($0) ? space : $0 }
+        let cleaned = String(String.UnicodeScalarView(cleanedScalars))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return String(cleaned.prefix(31))
     }

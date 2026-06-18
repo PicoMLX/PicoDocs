@@ -34,7 +34,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         try pkg.addXML("word/document.xml", Self.documentXML(body: builder.body))
         try pkg.addXML("word/_rels/document.xml.rels", Self.documentRels(builder.relationships))
         if builder.usedNumbering {
-            try pkg.addXML("word/numbering.xml", Self.numberingXML)
+            try pkg.addXML("word/numbering.xml", Self.numberingXML(usedBullet: builder.usedBullet, orderedNumIds: builder.orderedNumIds))
         }
         for media in builder.media {
             try pkg.addData("word/media/\(media.filename)", media.data)
@@ -66,11 +66,18 @@ public struct WordprocessingMLExporter: DocumentExporter {
         private(set) var relationships: [Relationship] = []
         private(set) var media: [(filename: String, data: Data)] = []
         private(set) var mediaExtensions: Set<String> = []
-        private(set) var usedNumbering = false
+        private(set) var usedBullet = false
+        private(set) var orderedNumIds: [Int] = []
+
+        /// Numbering is needed when any list (bullet or ordered) was emitted.
+        var usedNumbering: Bool { usedBullet || !orderedNumIds.isEmpty }
 
         private let images: [String: Data]
         private var relCounter = 0
         private var numberingRelAdded = false
+        private var drawingCounter = 0
+        private var emittedMediaRel: [String: String] = [:]   // media filename -> relID
+        private var nextOrderedNumId = 2                       // 1 is reserved for bullets
 
         struct Relationship { let id: String; let type: String; let target: String; let external: Bool }
 
@@ -104,8 +111,18 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 }
 
             case .list(let ordered, let items):
-                usedNumbering = true
-                let numId = ordered ? 2 : 1
+                // Each ordered list gets its own numbering instance so Word restarts
+                // it at 1 instead of continuing the previous list; bullets can all
+                // share one instance (their marker doesn't accumulate).
+                let numId: Int
+                if ordered {
+                    numId = nextOrderedNumId
+                    nextOrderedNumId += 1
+                    orderedNumIds.append(numId)
+                } else {
+                    usedBullet = true
+                    numId = 1
+                }
                 let pPr = "<w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"\(numId)\"/></w:numPr></w:pPr>"
                 for item in items {
                     body += paragraph(pPr: pPr, content: inlineRuns(item.replacingOccurrences(of: "\n", with: " ")))
@@ -170,37 +187,58 @@ public struct WordprocessingMLExporter: DocumentExporter {
             return out
         }
 
-        /// Emits a drawing run for an image whose bytes we hold (keyed by the body's
-        /// reference basename). Returns nil when the reference isn't a known image
-        /// (e.g. an external URL), so the caller falls back to alt text. The media
-        /// file is stored under the same basename so `WordConverter` re-emits the
-        /// identical `![name](name)` on round-trip.
+        /// Emits a drawing run for an image whose bytes we hold. Returns nil when the
+        /// reference isn't a known image (e.g. an external URL), so the caller falls
+        /// back to alt text.
+        ///
+        /// - Looks the bytes up by the reference, falling back to its basename when
+        ///   the source carries a path prefix (e.g. `word/media/pic.png`).
+        /// - Packages and relates each distinct media file exactly once, reusing the
+        ///   relationship for repeated references so the OOXML package can't end up
+        ///   with duplicate `word/media/<file>` parts.
+        /// - Writes the Markdown alt text into `wp:docPr/@descr`, which
+        ///   `WordConverter.imageAltText` reads first, so meaningful alt text survives
+        ///   the round-trip instead of collapsing to the filename.
         private func imageRun(alt: String, source: String) -> String? {
-            guard let data = images[source] else { return nil }
-            var filename = source
+            let basename = (source as NSString).lastPathComponent
+            let lookupKey = images[source] != nil ? source : basename
+            guard let data = images[lookupKey] else { return nil }
+
+            var filename = basename.isEmpty ? source : basename
             var ext = (filename as NSString).pathExtension.lowercased()
             if ext.isEmpty {
                 ext = OfficeMediaType.fileExtension(forMIME: OfficeMediaType.mimeType(forExtension: ext))
                 filename += ".\(ext)"
             }
-            mediaExtensions.insert(ext)
-            media.append((filename, data))
 
-            let relID = nextRelID()
-            relationships.append(Relationship(
-                id: relID,
-                type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
-                target: "media/\(filename)",
-                external: false
-            ))
-            let docPrID = media.count
-            let name = OOXMLPackageWriter.escapeAttribute(source.isEmpty ? "image" : source)
+            // One media part + one relationship per distinct file; reuse for repeats.
+            let relID: String
+            if let existing = emittedMediaRel[filename] {
+                relID = existing
+            } else {
+                mediaExtensions.insert(ext)
+                media.append((filename, data))
+                relID = nextRelID()
+                relationships.append(Relationship(
+                    id: relID,
+                    type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+                    target: "media/\(filename)",
+                    external: false
+                ))
+                emittedMediaRel[filename] = relID
+            }
+
+            // Each drawing needs a unique non-visual id, even when reusing media.
+            drawingCounter += 1
+            let docPrID = drawingCounter
+            let name = OOXMLPackageWriter.escapeAttribute(filename.isEmpty ? "image" : filename)
+            let descr = alt.isEmpty ? "" : " descr=\"\(OOXMLPackageWriter.escapeAttribute(alt))\""
             // Fixed display size (EMU); WordConverter ignores extents on read.
             let cx = 4572000, cy = 3429000
             return """
             <w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">\
             <wp:extent cx="\(cx)" cy="\(cy)"/>\
-            <wp:docPr id="\(docPrID)" name="\(name)"/>\
+            <wp:docPr id="\(docPrID)" name="\(name)"\(descr)/>\
             <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">\
             <pic:pic><pic:nvPicPr><pic:cNvPr id="\(docPrID)" name="\(name)"/><pic:cNvPicPr/></pic:nvPicPr>\
             <pic:blipFill><a:blip r:embed="\(relID)"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>\
@@ -319,14 +357,36 @@ public struct WordprocessingMLExporter: DocumentExporter {
         """
     }
 
-    private static let numberingXML = OOXMLPackageWriter.xmlDeclaration + """
-    <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">\
-    <w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/>\
-    <w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>\
-    <w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>\
-    <w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>\
-    <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>\
-    <w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>\
-    </w:numbering>
-    """
+    /// Builds `numbering.xml` for the lists that were actually emitted. Bullets map
+    /// to a single shared instance (`numId` 1); every ordered list gets its own
+    /// `numId` over a shared decimal abstract definition, each with a `startOverride`
+    /// of 1 so Word restarts separate lists instead of continuing the count.
+    private static func numberingXML(usedBullet: Bool, orderedNumIds: [Int]) -> String {
+        var abstracts = ""
+        if usedBullet {
+            abstracts += """
+            <w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/>\
+            <w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>
+            """
+        }
+        if !orderedNumIds.isEmpty {
+            abstracts += """
+            <w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>\
+            <w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>
+            """
+        }
+        var nums = ""
+        if usedBullet {
+            nums += "<w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num>"
+        }
+        for numId in orderedNumIds {
+            nums += """
+            <w:num w:numId="\(numId)"><w:abstractNumId w:val="1"/>\
+            <w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride></w:num>
+            """
+        }
+        return OOXMLPackageWriter.xmlDeclaration + """
+        <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">\(abstracts)\(nums)</w:numbering>
+        """
+    }
 }
