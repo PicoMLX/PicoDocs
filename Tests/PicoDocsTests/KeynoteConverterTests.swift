@@ -80,6 +80,31 @@ struct KeynoteConverterTests {
         #expect(resolved.detectedFormat == .plainText)
     }
 
+    @Test("A .key file carrying a synthesized Keynote MIME is still not routed to Keynote")
+    func synthesizedKeynoteMIMEOnKeyExtensionNotKeynote() {
+        // Mirrors PicoDocument+Fetch synthesizing the MIME from the .key UTType:
+        // a PEM server.key arrives with `application/vnd.apple.keynote` but must
+        // still be treated as text, not a (failing) Keynote.
+        let pem = Data("-----BEGIN PRIVATE KEY-----\nMIIBVwIBADANBgkq\n-----END PRIVATE KEY-----\n".utf8)
+        let info = PicoDocsEngine.makeStreamInfo(
+            filename: "server.key", mimeType: "application/vnd.apple.keynote", url: nil, charset: nil
+        )
+        let resolved = ContentTypeDetector.classify(pem, info: info)
+        #expect(resolved.detectedFormat != .keynote)
+    }
+
+    @Test("An explicit Keynote MIME with no .key extension routes to Keynote")
+    func explicitKeynoteMIMEWithoutExtensionRoutesToKeynote() {
+        // A truncated/extensionless web download with a real server Content-Type:
+        // not a ZIP, no `.key` extension, so the MIME can't have been synthesized.
+        let truncated = Data("PK-ish but truncated, not a real archive".utf8)
+        let info = PicoDocsEngine.makeStreamInfo(
+            filename: "download", mimeType: "application/vnd.apple.keynote", url: nil, charset: nil
+        )
+        let resolved = ContentTypeDetector.classify(truncated, info: info)
+        #expect(resolved.detectedFormat == .keynote)
+    }
+
     @Test("A corrupt slide stream fails rather than silently dropping the slide")
     func corruptSlideFails() async {
         // A valid ZIP entry whose bytes aren't a valid Snappy/IWA stream.

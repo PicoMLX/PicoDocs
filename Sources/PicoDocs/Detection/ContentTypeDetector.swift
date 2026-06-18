@@ -82,15 +82,19 @@ public enum ContentTypeDetector {
         //    or mislabeled). Honor the hint so they reach the right converter (or
         //    report unsupported) instead of being mis-read as text.
         // iWork hints without ZIP magic (corrupt/mislabeled). Pages routes by any
-        // hint (its extension is unambiguous). Keynote is NOT routed here: `.key`
-        // is ambiguous with PEM/SSH/license keys, and no available signal
-        // disambiguates — the UTType is extension-derived, and the MIME may itself
-        // be synthesized from that UTType (PicoDocument+Fetch builds a mimeHint from
-        // `utType.preferredMIMEType`). Since Keynote is always a ZIP, a non-ZIP
-        // `.key` is left to the text/binary path; real `.key` packages still match
-        // in the ZIP branch above.
+        // hint (its extension is unambiguous).
         if let iwork = iworkFormatFromHints(info), iwork != .keynote {
             return (iwork, 0.4)
+        }
+        // Keynote needs care: the `.key` extension is ambiguous (PEM/SSH/license
+        // keys), and a local `.key`'s MIME can be *synthesized* from its
+        // extension-derived UTType (PicoDocument+Fetch uses `preferredMIMEType`),
+        // so neither the extension nor a `.key`-derived MIME is trustworthy. But an
+        // explicit Keynote MIME with NO `.key` extension can't have been synthesized
+        // that way — it's a real server `Content-Type` (e.g. a truncated,
+        // extensionless download) — so honor it. Real `.key` ZIPs still match above.
+        if info.fileExtension?.lowercased() != "key", isKeynoteMIME(info.mimeType) {
+            return (.keynote, 0.4)
         }
         if let docHint = documentFormatFromHints(info) {
             return (docHint, 0.4)
