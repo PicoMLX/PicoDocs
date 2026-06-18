@@ -10,12 +10,14 @@
 //
 //  Scope (v1): extracts the document's plain text (paragraphs) from the flat,
 //  single-file `.pages` ZIP — the common transport form (downloads, mail, Files
-//  exports) — plus table content, reconstructed as Markdown grids and appended
-//  after the body (see IWATable). Remaining rich structure (headings, styling,
-//  footnotes, inline images, inline table placement), the legacy iWork '09 XML
-//  format, and ingesting a `.pages` *package directory* (an on-disk bundle,
-//  which the FileFetcher currently treats as a folder) are planned follow-ups;
-//  this converter raises a clear, actionable error for inputs it can't yet read
+//  exports) — plus table content, reconstructed as Markdown grids and placed
+//  inline at their attachment points in reading order (falling back to appending
+//  them after the body when attachments can't be mapped 1:1; see IWATable).
+//  Remaining rich structure (headings, styling, footnotes, inline images),
+//  non-text table cells (numbers/dates), the legacy iWork '09 XML format, and
+//  ingesting a `.pages` *package directory* (an on-disk bundle, which the
+//  FileFetcher currently treats as a folder) are planned follow-ups; this
+//  converter raises a clear, actionable error for inputs it can't yet read
 //  rather than emitting nothing.
 //
 //  Format references: obriensp/iWorkFileFormat, the SheetJS IWA notes, and
@@ -68,33 +70,49 @@ public struct PagesConverter: DocumentConverter {
             }
         }
 
-        // Body text: from Document.iwa if present, else the first component (by
-        // name) that yields any text.
-        let bodyText: String
-        if let documentStream {
-            bodyText = IWAArchive.text(in: documentStream)
-        } else {
-            var firstText = ""
-            for entry in streams.sorted(by: { $0.name < $1.name }) {
-                let extracted = IWAArchive.text(in: entry.stream)
-                if !extracted.isEmpty { firstText = extracted; break }
-            }
-            bodyText = firstText
-        }
-
-        // Tables are reconstructed from the whole component set and appended after
-        // the body as standalone sections (inline placement is a follow-up).
-        let cleaned = Self.normalize(bodyText)
-        let tables = IWATable.markdownTables(from: streams.map(\.stream))
-        guard !cleaned.isEmpty || !tables.isEmpty else { throw PicoDocsError.emptyDocument }
-
+        let allStreams = streams.map(\.stream)
         var sections: [DocumentSection] = []
-        if !cleaned.isEmpty {
-            sections.append(DocumentSection(kind: .body, markdown: cleaned, sourcePath: "Index/Document.iwa"))
+
+        // Prefer inline layout: tables placed at their ￼ attachment points, in
+        // reading order. Falls back to body text + tables appended after it when
+        // the attachments can't be mapped 1:1 (so a table is never dropped).
+        if let documentStream,
+           let blocks = IWATable.inlineBlocks(documentStream: documentStream, in: allStreams) {
+            for block in blocks {
+                switch block {
+                case .text(let raw):
+                    let cleaned = Self.normalize(raw)
+                    if !cleaned.isEmpty {
+                        sections.append(DocumentSection(kind: .body, markdown: cleaned, sourcePath: "Index/Document.iwa"))
+                    }
+                case .table(let markdown):
+                    sections.append(DocumentSection(kind: .table, markdown: markdown, sourcePath: "Index/Tables"))
+                }
+            }
+        } else {
+            // Body text: from Document.iwa if present, else the first component (by
+            // name) that yields any text.
+            let bodyText: String
+            if let documentStream {
+                bodyText = IWAArchive.text(in: documentStream)
+            } else {
+                var firstText = ""
+                for entry in streams.sorted(by: { $0.name < $1.name }) {
+                    let extracted = IWAArchive.text(in: entry.stream)
+                    if !extracted.isEmpty { firstText = extracted; break }
+                }
+                bodyText = firstText
+            }
+            let cleaned = Self.normalize(bodyText)
+            if !cleaned.isEmpty {
+                sections.append(DocumentSection(kind: .body, markdown: cleaned, sourcePath: "Index/Document.iwa"))
+            }
+            for markdown in IWATable.markdownTables(from: allStreams) {
+                sections.append(DocumentSection(kind: .table, markdown: markdown, sourcePath: "Index/Tables"))
+            }
         }
-        for table in tables {
-            sections.append(DocumentSection(kind: .table, markdown: table, sourcePath: "Index/Tables"))
-        }
+
+        guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
         let title = (info.filename?.isEmpty == false) ? info.filename : nil
         return ConverterResult(title: title, sections: sections)
     }

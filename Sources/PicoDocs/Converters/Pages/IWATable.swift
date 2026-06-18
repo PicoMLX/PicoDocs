@@ -39,56 +39,168 @@ enum IWATable {
     private static let storageType: UInt64 = 2001
     private static let tableModelTypes: Set<UInt64> = [6001, 6316]   // TST.TableModelArchive
 
-    /// Reconstructs every text table found across the given decompressed IWA
-    /// streams, rendered as Markdown, ordered by tile identifier (a stable proxy
-    /// for document order). Best-effort: undecodable or empty tables are skipped,
-    /// so a document with no tables simply yields `[]`.
+    /// One ordered piece of a converted body — a run of text or a reconstructed
+    /// table, in reading order. Text is raw; the caller normalizes it.
+    enum Block: Equatable {
+        case text(String)
+        case table(String)
+    }
+
+    /// Every text table across the given decompressed IWA streams, rendered as
+    /// Markdown and ordered by tile identifier (a stable proxy for document
+    /// order). This is the appended-table fallback; `inlineBlocks` instead places
+    /// tables at their attachment points. Best-effort: a document with no tables
+    /// yields `[]`.
     static func markdownTables(from streams: [[UInt8]]) -> [String] {
-        // A table model lives in CalculationEngine.iwa but references tiles and
-        // datalists in Tables/*.iwa, so the whole document is indexed by id.
+        let byTile = reconstructTables(buildObjects(streams))
+        return byTile.keys.sorted().compactMap { byTile[$0] }
+    }
+
+    /// Splits the document body into ordered text/table blocks, placing each
+    /// reconstructed table inline at its ￼ (U+FFFC) attachment position. Returns
+    /// nil — so the caller can fall back to appended tables — unless every
+    /// reconstructed table is cleanly placed (e.g. it bails on a count mismatch
+    /// between ￼ markers and attachment runs), so a table is never dropped.
+    static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]]) -> [Block]? {
+        let objects = buildObjects(streams)
+        let tableMarkdown = reconstructTables(objects)
+        guard !tableMarkdown.isEmpty else { return nil }
+        let tiles = Set(tableMarkdown.keys)
+
+        var blocks: [Block] = []
+        var placed = Set<UInt64>()
+        // Body storages in document (stream) order; each carries its own text
+        // (field 3) and drawable attachment runs (field 9).
+        for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
+            guard let text = bodyStorageText(storage) else { continue }    // kind 0 only
+            let runs = attachmentRuns(in: storage)
+            let markers = text.indices.filter { text[$0] == "\u{FFFC}" }
+            guard markers.count == runs.count else { return nil }          // can't map 1:1
+
+            var buffer = ""
+            var segmentStart = text.startIndex
+            for (marker, run) in zip(markers, runs) {
+                buffer += String(text[segmentStart..<marker])
+                segmentStart = text.index(after: marker)                   // always drop the ￼
+                guard let tile = reachableTile(from: run.objectID, objects: objects, tiles: tiles),
+                      let markdown = tableMarkdown[tile] else { continue }  // non-table (image): merge text
+                if !buffer.isEmpty { blocks.append(.text(buffer)); buffer = "" }
+                blocks.append(.table(markdown))
+                placed.insert(tile)
+            }
+            buffer += String(text[segmentStart...])
+            if !buffer.isEmpty { blocks.append(.text(buffer)) }
+        }
+        // Commit to inline layout only if every reconstructed table found a home.
+        return placed == tiles ? blocks : nil
+    }
+
+    // MARK: - Object graph
+
+    private static func buildObjects(_ streams: [[UInt8]]) -> [UInt64: IWAArchive.Object] {
         var objects: [UInt64: IWAArchive.Object] = [:]
         for stream in streams {
-            for object in IWAArchive.objects(in: stream) {
-                objects[object.identifier] = object
-            }
+            for object in IWAArchive.objects(in: stream) { objects[object.identifier] = object }
         }
-        guard !objects.isEmpty else { return [] }
+        return objects
+    }
 
+    /// Maps each content table's tile id to its rendered Markdown. A table model
+    /// (6001/6316) references exactly one tile and the datalist holding its
+    /// strings; restricting to those types avoids mistaking an unrelated object
+    /// that references both for a table.
+    private static func reconstructTables(_ objects: [UInt64: IWAArchive.Object]) -> [UInt64: String] {
         let tileIDs = Set(objects.values.filter { $0.type == tileType }.map(\.identifier))
-        guard !tileIDs.isEmpty else { return [] }
+        guard !tileIDs.isEmpty else { return [:] }
 
-        // Resolve every non-empty string DataList to key -> text.
         var stringLists: [UInt64: [UInt32: String]] = [:]
         for object in objects.values where object.type == dataListType {
             if let map = stringList(object, objects: objects), !map.isEmpty {
                 stringLists[object.identifier] = map
             }
         }
-        guard !stringLists.isEmpty else { return [] }
+        guard !stringLists.isEmpty else { return [:] }
 
-        // A table model references exactly one tile and the datalist holding its
-        // strings. Restrict to the known table-model types so an unrelated object
-        // that happens to reference both can't be mistaken for a table. Collect
-        // (tile, strings) pairs, then render once per tile in a stable order
-        // (Dictionary iteration order is unspecified).
-        var pairs: [(tile: UInt64, strings: UInt64)] = []
+        var byTile: [UInt64: String] = [:]
         for object in objects.values where tableModelTypes.contains(object.type) {
             guard let tile = object.references.first(where: { tileIDs.contains($0) }),
-                  let strings = object.references.first(where: { stringLists[$0] != nil }) else { continue }
-            pairs.append((tile, strings))
-        }
-        pairs.sort { $0.tile < $1.tile }
-
-        var tables: [String] = []
-        var seenTiles = Set<UInt64>()
-        for pair in pairs {
-            guard seenTiles.insert(pair.tile).inserted,
-                  let tile = objects[pair.tile], let strings = stringLists[pair.strings] else { continue }
-            if let markdown = render(grid: cellKeyGrid(tile), strings: strings) {
-                tables.append(markdown)
+                  let strings = object.references.first(where: { stringLists[$0] != nil }),
+                  byTile[tile] == nil,
+                  let tileObject = objects[tile], let stringMap = stringLists[strings] else { continue }
+            if let markdown = render(grid: cellKeyGrid(tileObject), strings: stringMap) {
+                byTile[tile] = markdown
             }
         }
-        return tables
+        return byTile
+    }
+
+    // MARK: - Inline attachments
+
+    /// A body storage's drawable attachment runs (field 9, a wrapper of repeated
+    /// runs), sorted by character index. Each run pairs a ￼ with the attached
+    /// object's id; for a table that object (TSWP attachment, type 2003) leads on
+    /// to the TableInfo → model → tile.
+    private static func attachmentRuns(in storage: IWAArchive.Object) -> [(charIndex: Int, objectID: UInt64)] {
+        var runs: [(charIndex: Int, objectID: UInt64)] = []
+        var reader = ProtobufReader(storage.payload)
+        while let field = reader.next() {
+            guard field.number == 9, case .length(let wrapper) = field.value else { continue }
+            var wrapperReader = ProtobufReader(wrapper)
+            while let entry = wrapperReader.next() {
+                guard entry.number == 1, case .length(let runBytes) = entry.value else { continue }
+                var charIndex: Int?
+                var objectID: UInt64?
+                var runReader = ProtobufReader(runBytes)
+                while let runField = runReader.next() {
+                    switch (runField.number, runField.value) {
+                    case (1, .varint(let index)): charIndex = Int(index)
+                    case (2, .length(let reference)): objectID = referencedID(in: reference)
+                    default: continue
+                    }
+                }
+                if let charIndex, let objectID { runs.append((charIndex, objectID)) }
+            }
+        }
+        return runs.sorted { $0.charIndex < $1.charIndex }
+    }
+
+    /// Bounded breadth-first walk from an attachment object to a referenced tile
+    /// (2003 → TableInfo 6000 → model 6001/6316 → tile 6002), returning the first
+    /// tile that has a reconstructed table — or nil (e.g. for an image).
+    private static func reachableTile(from start: UInt64, objects: [UInt64: IWAArchive.Object],
+                                      tiles: Set<UInt64>) -> UInt64? {
+        var frontier = [start]
+        var visited: Set<UInt64> = [start]
+        for _ in 0..<5 {
+            var next: [UInt64] = []
+            for id in frontier {
+                guard let object = objects[id] else { continue }
+                for reference in object.references {
+                    if tiles.contains(reference) { return reference }
+                    if visited.insert(reference).inserted { next.append(reference) }
+                }
+            }
+            if next.isEmpty { break }
+            frontier = next
+        }
+        return nil
+    }
+
+    /// A storage's body text (concatenated `repeated string text`, field 3) when
+    /// it's a body storage (`kind` 0 or absent); nil for header/footer/etc.
+    private static func bodyStorageText(_ storage: IWAArchive.Object) -> String? {
+        var kind: UInt64 = 0
+        var runs: [String] = []
+        var reader = ProtobufReader(storage.payload)
+        while let field = reader.next() {
+            switch (field.number, field.value) {
+            case (1, .varint(let value)): kind = value
+            case (3, .length(let bytes)):
+                if let run = String(bytes: bytes, encoding: .utf8) { runs.append(run) }
+            default: continue
+            }
+        }
+        return kind == 0 ? runs.joined() : nil
     }
 
     // MARK: - DataList (string store)

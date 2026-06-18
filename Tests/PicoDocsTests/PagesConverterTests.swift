@@ -137,6 +137,36 @@ struct PagesConverterTests {
         #expect(tables.contains { $0.markdown.contains("| --- | --- | --- | --- |") })
     }
 
+    @Test("PagesConverter places tables inline at their attachment points, in reading order")
+    func realPagesTablesInline() async throws {
+        let data = try Fixture.data("sample", "pages")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.pages")
+        let kinds = result.sections.map(\.kind)
+
+        // Tables are interleaved with the body, not all appended at the end: a
+        // body section follows the first table section.
+        let firstTable = kinds.firstIndex(of: .table)
+        #expect(firstTable != nil)
+        if let firstTable {
+            #expect(kinds[(firstTable + 1)...].contains(.body))
+        }
+
+        // Reading order in the rendered Markdown: intro text → Table 1 → Table 2
+        // → end marker. (In the appended fallback the end marker would precede the
+        // tables, so this also asserts the inline path is taken.)
+        let markdown = result.markdown()
+        let intro = markdown.range(of: "Representative Import Fixture for Apple Pages")
+        let table1 = markdown.range(of: "| Feature | Expected import | Sample value | Notes |")
+        let table2 = markdown.range(of: "| Column A | Column B | Column C | Column D | Column E | Column F |")
+        let endMarker = markdown.range(of: "END_OF_PAGES_IMPORT_FIXTURE")
+        #expect(intro != nil && table1 != nil && table2 != nil && endMarker != nil)
+        if let intro, let table1, let table2, let endMarker {
+            #expect(intro.lowerBound < table1.lowerBound)
+            #expect(table1.lowerBound < table2.lowerBound)
+            #expect(table2.lowerBound < endMarker.lowerBound)
+        }
+    }
+
     @Test("Detector routes a .pages package to the Pages format")
     func detectionRoutesToPages() {
         let pages = Self.makePagesFile(paragraphs: ["Hi"])
