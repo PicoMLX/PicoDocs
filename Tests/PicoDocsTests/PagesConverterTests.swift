@@ -115,6 +115,28 @@ struct PagesConverterTests {
         #expect(!markdown.unicodeScalars.contains("\u{0004}"))
     }
 
+    @Test("PagesConverter reconstructs tables from a real Pages fixture")
+    func realPagesTables() async throws {
+        let data = try Fixture.data("sample", "pages")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.pages")
+        let tables = result.sections.filter { $0.kind == .table }
+
+        // Two content tables (5×4 and 4×6); two empty/placeholder tables are skipped.
+        #expect(tables.count == 2)
+
+        // Table 1: exact header row, plus a body row exercising empty cells.
+        #expect(tables.contains { $0.markdown.contains("| Feature | Expected import | Sample value | Notes |") })
+        #expect(tables.contains { $0.markdown.contains("| Empty cell |  |  | Importer should not crash |") })
+
+        // Table 2: exact header row across all six columns.
+        #expect(tables.contains {
+            $0.markdown.contains("| Column A | Column B | Column C | Column D | Column E | Column F |")
+        })
+
+        // GitHub-flavored separator row for the four-column table.
+        #expect(tables.contains { $0.markdown.contains("| --- | --- | --- | --- |") })
+    }
+
     @Test("Detector routes a .pages package to the Pages format")
     func detectionRoutesToPages() {
         let pages = Self.makePagesFile(paragraphs: ["Hi"])
