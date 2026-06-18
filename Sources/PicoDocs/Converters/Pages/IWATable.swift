@@ -13,19 +13,20 @@
 //      columns (one per aspect: strings, formats, styles, …).
 //    • TST.Tile (type 6002) — the cell grid: `repeated TileRowInfo` (field 5),
 //      each row carrying a packed cell buffer (field 6) and a uint16 offset
-//      array (field 7). A string cell record begins with the bytes `05 09` and
-//      stores its string key as a little-endian uint32 at byte offset 12.
-//    • TST.DataList (type 6005) with `list_type == 8` (field 1) — the string
-//      store: `repeated entry` (field 3) mapping a key (field 1) to a
-//      RichTextPayload reference (field 9 → type 6218 → type 2001
-//      TSWP.StorageArchive, whose `repeated string text` is the cell text).
+//      array (field 7). A cell record begins `05 <value-type>`; the value-type
+//      byte selects how to read offset +12: rich text key (0x09), inline text
+//      key (0x03), or a date as a double in seconds since 2001-01-01 (0x05).
+//    • TST.DataList (type 6005) — the cell-value store, two flavors keyed by
+//      `list_type` (field 1): rich text (`8`) maps a key (entry field 1) to a
+//      RichTextPayload (entry field 9 → 6218 → 2001 TSWP.StorageArchive); inline
+//      text (`1`) stores the string directly in the entry (field 3, Keynote).
 //
-//  Confirmed against a real `.pages` fixture (two text tables, 5×4 and 4×6,
-//  including empty cells and Unicode/URL content).
+//  Confirmed against real `.pages` and `.key` fixtures (text + date cells).
 //
-//  Scope (v1): text cells only — numeric/date/formula cells render as empty
-//  cells. Tables are emitted as standalone sections appended after the body
-//  rather than positioned inline at their attachment point (see README).
+//  Scope: text and date cells; number, duration, and formula cells aren't
+//  decoded yet and render empty. For Pages, tables are placed inline at their
+//  attachment point (see PagesConverter); for Keynote they're appended after the
+//  slides.
 //
 
 import Foundation
@@ -38,6 +39,13 @@ enum IWATable {
     private static let richTextPayloadType: UInt64 = 6218
     private static let storageType: UInt64 = 2001
     private static let tableModelTypes: Set<UInt64> = [6001, 6316]   // TST.TableModelArchive
+    private static let inlineListType: UInt64 = 1        // DataList.list_type for inline cell text
+    // Cell record value-type byte (record offset 1): rich text (key → f1==8 list),
+    // inline text (key → f1==1 list), and date (double, seconds since 2001-01-01,
+    // at offset +12). Number/duration/formula cells aren't decoded yet.
+    private static let richTextCell: UInt8 = 0x09
+    private static let inlineTextCell: UInt8 = 0x03
+    private static let dateCell: UInt8 = 0x05
 
     /// One ordered piece of a converted body — a run of text or a reconstructed
     /// table, in reading order. Text is raw; the caller normalizes it.
@@ -108,28 +116,28 @@ enum IWATable {
     }
 
     /// Maps each content table's tile id to its rendered Markdown. A table model
-    /// (6001/6316) references exactly one tile and the datalist holding its
-    /// strings; restricting to those types avoids mistaking an unrelated object
-    /// that references both for a table.
+    /// (6001/6316) references its tile plus the datalists backing the cells: a
+    /// rich-text list (`f1==8`, via RichTextPayload → Storage) and/or an
+    /// inline-text list (`f1==1`, text stored directly in the entry). Cells choose
+    /// between them by value type; dates live in the cell record itself.
     private static func reconstructTables(_ objects: [UInt64: IWAArchive.Object]) -> [UInt64: String] {
         let tileIDs = Set(objects.values.filter { $0.type == tileType }.map(\.identifier))
         guard !tileIDs.isEmpty else { return [:] }
 
-        var stringLists: [UInt64: [UInt32: String]] = [:]
+        var richMaps: [UInt64: [UInt32: String]] = [:]
+        var inlineMaps: [UInt64: [UInt32: String]] = [:]
         for object in objects.values where object.type == dataListType {
-            if let map = stringList(object, objects: objects), !map.isEmpty {
-                stringLists[object.identifier] = map
-            }
+            if let map = richTextMap(object, objects: objects) { richMaps[object.identifier] = map }
+            else if let map = inlineTextMap(object) { inlineMaps[object.identifier] = map }
         }
-        guard !stringLists.isEmpty else { return [:] }
 
         var byTile: [UInt64: String] = [:]
         for object in objects.values where tableModelTypes.contains(object.type) {
-            guard let tile = object.references.first(where: { tileIDs.contains($0) }),
-                  let strings = object.references.first(where: { stringLists[$0] != nil }),
-                  byTile[tile] == nil,
-                  let tileObject = objects[tile], let stringMap = stringLists[strings] else { continue }
-            if let markdown = render(grid: cellKeyGrid(tileObject), strings: stringMap) {
+            guard let tile = object.references.first(where: { tileIDs.contains($0) }), byTile[tile] == nil,
+                  let tileObject = objects[tile] else { continue }
+            let rich = object.references.compactMap { richMaps[$0] }.first ?? [:]
+            let inline = object.references.compactMap { inlineMaps[$0] }.first ?? [:]
+            if let markdown = render(grid: cellGrid(tileObject, rich: rich, inline: inline)) {
                 byTile[tile] = markdown
             }
         }
@@ -208,11 +216,12 @@ enum IWATable {
 
     // MARK: - DataList (string store)
 
-    /// For a `list_type == 8` DataList, resolves entry key -> text by following
-    /// each entry's RichTextPayload reference (6218) to its TSWP.StorageArchive
-    /// (2001). Returns nil for non-string lists. Field order independent.
-    private static func stringList(_ object: IWAArchive.Object,
-                                   objects: [UInt64: IWAArchive.Object]) -> [UInt32: String]? {
+    /// Resolves a rich-text DataList (`list_type == 8`): entry key → text by
+    /// following the RichTextPayload reference (field 9 → type 6218) to its
+    /// TSWP.StorageArchive (2001). Returns nil for other list types or no text.
+    /// Field-order independent.
+    private static func richTextMap(_ object: IWAArchive.Object,
+                                    objects: [UInt64: IWAArchive.Object]) -> [UInt32: String]? {
         var listType: UInt64?
         var entries: [(key: UInt32, payload: UInt64)] = []
         var reader = ProtobufReader(object.payload)
@@ -226,7 +235,7 @@ enum IWATable {
                 continue
             }
         }
-        guard let listType, listType == stringListType else { return nil }
+        guard listType == stringListType else { return nil }
 
         var map: [UInt32: String] = [:]
         for entry in entries {
@@ -235,7 +244,38 @@ enum IWATable {
                   let storage = objects[storageID], storage.type == storageType else { continue }
             map[entry.key] = storageText(storage.payload)
         }
-        return map
+        return map.isEmpty ? nil : map
+    }
+
+    /// Resolves an inline-text DataList (`list_type == 1`): entry key → text stored
+    /// directly in the entry (field 3). Keynote tables (and some Pages cells) use
+    /// this instead of the rich-text list. Returns nil for other types or no text.
+    private static func inlineTextMap(_ object: IWAArchive.Object) -> [UInt32: String]? {
+        var listType: UInt64?
+        var map: [UInt32: String] = [:]
+        var reader = ProtobufReader(object.payload)
+        while let field = reader.next() {
+            switch (field.number, field.value) {
+            case (1, .varint(let type)):
+                listType = type
+            case (3, .length(let entryBytes)):
+                var key: UInt32?
+                var text: String?
+                var entryReader = ProtobufReader(entryBytes)
+                while let entryField = entryReader.next() {
+                    switch (entryField.number, entryField.value) {
+                    case (1, .varint(let k)): key = UInt32(truncatingIfNeeded: k)
+                    case (3, .length(let bytes)): text = String(bytes: bytes, encoding: .utf8)
+                    default: continue
+                    }
+                }
+                if let key, let text { map[key] = text }
+            default:
+                continue
+            }
+        }
+        guard listType == inlineListType else { return nil }
+        return map.isEmpty ? nil : map
     }
 
     /// One DataList entry: key (field 1) + RichTextPayload id (field 9 → field 1).
@@ -291,14 +331,15 @@ enum IWATable {
 
     // MARK: - Tile (cell grid)
 
-    /// Decodes a Tile into a grid of per-cell string keys (nil = empty or
-    /// non-text cell). Trailing empty columns are trimmed per row.
-    private static func cellKeyGrid(_ tile: IWAArchive.Object) -> [[UInt32?]] {
-        var rows: [[UInt32?]] = []
+    /// Decodes a Tile into a grid of rendered cell strings (nil = absent cell).
+    /// Trailing absent columns are trimmed per row.
+    private static func cellGrid(_ tile: IWAArchive.Object,
+                                 rich: [UInt32: String], inline: [UInt32: String]) -> [[String?]] {
+        var rows: [[String?]] = []
         var reader = ProtobufReader(tile.payload)
         while let field = reader.next() {
             if field.number == 5, case .length(let rowBytes) = field.value {
-                rows.append(cellKeys(inRow: rowBytes))
+                rows.append(cellTexts(inRow: rowBytes, rich: rich, inline: inline))
             }
         }
         return rows
@@ -306,7 +347,8 @@ enum IWATable {
 
     /// One TileRowInfo: uint16 offsets (field 7) into the cell buffer (field 6);
     /// 0xFFFF marks an absent cell.
-    private static func cellKeys(inRow rowBytes: [UInt8]) -> [UInt32?] {
+    private static func cellTexts(inRow rowBytes: [UInt8],
+                                  rich: [UInt32: String], inline: [UInt32: String]) -> [String?] {
         var buffer: [UInt8] = []
         var offsets: [UInt8] = []
         var reader = ProtobufReader(rowBytes)
@@ -317,40 +359,72 @@ enum IWATable {
             default: continue
             }
         }
-        var keys: [UInt32?] = []
+        var cells: [String?] = []
         var i = 0
         while i + 1 < offsets.count {
             let offset = Int(offsets[i]) | (Int(offsets[i + 1]) << 8)
             i += 2
-            keys.append(offset == 0xFFFF ? nil : stringKey(inCell: buffer, at: offset))
+            cells.append(offset == 0xFFFF ? nil : cellText(in: buffer, at: offset, rich: rich, inline: inline))
         }
-        while let last = keys.last, last == nil { keys.removeLast() }   // trim trailing empties
-        return keys
+        while let last = cells.last, last == nil { cells.removeLast() }   // trim trailing absent cells
+        return cells
     }
 
-    /// The string key stored in a cell record, or nil if it isn't a string cell
-    /// (`05 09` marker) or would read out of bounds. The key is a little-endian
-    /// uint32 at byte offset 12.
-    private static func stringKey(inCell buffer: [UInt8], at offset: Int) -> UInt32? {
-        guard offset >= 0, offset + 16 <= buffer.count,
-              buffer[offset] == 0x05, buffer[offset + 1] == 0x09 else { return nil }
-        let k = offset + 12
-        return UInt32(buffer[k]) | (UInt32(buffer[k + 1]) << 8)
-            | (UInt32(buffer[k + 2]) << 16) | (UInt32(buffer[k + 3]) << 24)
+    /// The rendered text of a cell record (`05 <type> …`): rich or inline text via
+    /// the string maps (key is a little-endian uint32 at +12), or a date (double,
+    /// seconds since 2001-01-01, at +12). Number/duration/formula cells aren't
+    /// decoded yet and render as "". Returns "" (a present-but-empty cell) on any
+    /// unhandled type or out-of-bounds read.
+    private static func cellText(in buffer: [UInt8], at offset: Int,
+                                 rich: [UInt32: String], inline: [UInt32: String]) -> String {
+        guard offset >= 0, offset + 2 <= buffer.count, buffer[offset] == 0x05 else { return "" }
+        switch buffer[offset + 1] {
+        case richTextCell:
+            guard let key = readUInt32(buffer, at: offset + 12) else { return "" }
+            return cleanCell(rich[key] ?? "")
+        case inlineTextCell:
+            guard let key = readUInt32(buffer, at: offset + 12) else { return "" }
+            return cleanCell(inline[key] ?? "")
+        case dateCell:
+            guard let seconds = readDouble(buffer, at: offset + 12) else { return "" }
+            return isoDate(seconds)
+        default:
+            return ""
+        }
+    }
+
+    private static func readUInt32(_ buffer: [UInt8], at offset: Int) -> UInt32? {
+        guard offset >= 0, offset + 4 <= buffer.count else { return nil }
+        return UInt32(buffer[offset]) | (UInt32(buffer[offset + 1]) << 8)
+            | (UInt32(buffer[offset + 2]) << 16) | (UInt32(buffer[offset + 3]) << 24)
+    }
+
+    private static func readDouble(_ buffer: [UInt8], at offset: Int) -> Double? {
+        guard offset >= 0, offset + 8 <= buffer.count else { return nil }
+        var bits: UInt64 = 0
+        for k in 0 ..< 8 { bits |= UInt64(buffer[offset + k]) << (8 * k) }
+        return Double(bitPattern: bits)
+    }
+
+    /// Formats seconds-since-2001 (iWork's reference date) as `yyyy-MM-dd` in UTC.
+    /// Implausible magnitudes return "".
+    private static func isoDate(_ secondsSinceReference: Double) -> String {
+        guard secondsSinceReference.isFinite, abs(secondsSinceReference) < 4e11 else { return "" }
+        let date = Date(timeIntervalSinceReferenceDate: secondsSinceReference)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
     }
 
     // MARK: - Markdown rendering
 
-    /// Renders a key grid + string map as a GitHub-flavored Markdown table (first
-    /// row is the header). Returns nil if there are no columns or no resolvable
-    /// text, so empty/placeholder tables are skipped.
-    private static func render(grid: [[UInt32?]], strings: [UInt32: String]) -> String? {
-        let rows: [[String]] = grid.map { row in
-            row.map { key in
-                guard let key, let text = strings[key] else { return "" }
-                return cleanCell(text)
-            }
-        }
+    /// Renders a grid of cell strings as a GitHub-flavored Markdown table (first
+    /// row is the header). Returns nil if there are no columns or no non-empty
+    /// cell, so empty/placeholder tables are skipped.
+    private static func render(grid: [[String?]]) -> String? {
+        let rows: [[String]] = grid.map { row in row.map { $0 ?? "" } }
         let columnCount = rows.map(\.count).max() ?? 0
         guard columnCount > 0,
               rows.contains(where: { $0.contains { !$0.isEmpty } }) else { return nil }

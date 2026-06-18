@@ -14,8 +14,10 @@
 //  as Pages) becomes one section, in deck order resolved from `Document.iwa`'s
 //  slide tree. Master/template slides are excluded, and presenter notes (`kind`
 //  4) are excluded by the `kind == 0` filter — both confirmed against a real
-//  `.key` (kinds: 0=body, 1=header/footer, 4=note, 5=cell). Per-slide
-//  title-vs-body structure, tables, and inline images remain follow-ups.
+//  `.key` (kinds: 0=body, 1=header/footer, 4=note, 5=cell). Tables are
+//  reconstructed (see IWATable) and appended after the slides; per-slide
+//  title-vs-body structure, inline images, and per-slide table placement remain
+//  follow-ups.
 //
 //  NOTE: `readEntry` / `normalize` mirror PagesConverter; a shared iWork helper
 //  is a planned cleanup once both converters have settled.
@@ -102,10 +104,22 @@ public struct KeynoteConverter: DocumentConverter {
                 if !text.isEmpty { pieces.append(text) }
             }
             let cleaned = Self.normalize(pieces.joined(separator: "\n\n"))
-            guard !cleaned.isEmpty else { throw PicoDocsError.emptyDocument }
-            sections = [DocumentSection(kind: .body, markdown: cleaned)]
+            if !cleaned.isEmpty { sections = [DocumentSection(kind: .body, markdown: cleaned)] }
         }
 
+        // Reconstruct tables from the whole deck (table cells live in separate
+        // Tile/DataList objects) and append them after the slides. Per-slide inline
+        // placement is a follow-up.
+        var deckStreams: [[UInt8]] = []
+        for component in components {
+            try Task.checkCancellation()
+            if let stream = try? Snappy.decompressIWA(component.bytes) { deckStreams.append(stream) }
+        }
+        for markdown in IWATable.markdownTables(from: deckStreams) {
+            sections.append(DocumentSection(kind: .table, markdown: markdown, sourcePath: "Index/Tables"))
+        }
+
+        guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
         let title = (info.filename?.isEmpty == false) ? info.filename : nil
         return ConverterResult(title: title, sections: sections)
     }
