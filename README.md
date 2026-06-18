@@ -86,7 +86,7 @@ Create a PR to include your app here.
 
 ## Known Limitations
 
-- **iWork table positioning**: Tables in Pages and Keynote documents are extracted and appended after the document body rather than placed inline at their original position in the text. Restoring inline table placement is planned for a future release.
+- **iWork tables**: In Pages, tables are reconstructed and placed inline at their original position in the text (falling back to appending them after the body when their anchor can't be resolved). Non-text cells (numbers, dates, formulas) currently render as empty, and Keynote table extraction is not yet implemented.
 
 ## License
 
