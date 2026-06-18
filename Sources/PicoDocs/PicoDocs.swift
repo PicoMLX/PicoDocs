@@ -90,6 +90,82 @@ public enum PicoDocsEngine {
         return try DocumentRenderer.render(result, to: format)
     }
 
+    // MARK: - Writing (Markdown / ConverterResult -> office files)
+
+    /// Serialize a structured `ConverterResult` into an office file's bytes.
+    ///
+    /// The inverse of `convert`: detection/conversion produced the canonical
+    /// `ConverterResult`; this hands it to the first registered exporter that
+    /// accepts `format`. Throws `PicoDocsError.unableToExportToRequestedFormat`
+    /// when no exporter accepts (e.g. `.pages`/`.keynote`, which are unimplemented),
+    /// and `PicoDocsError.emptyDocument` for empty input.
+    public static func write(
+        _ result: ConverterResult,
+        to format: ExportableFileType,
+        registry: DocumentExporterRegistry = .default
+    ) throws -> Data {
+        // Mirror `convert`'s post-sanitize check: an empty document is an error,
+        // *unless* it carries image sections (an image-only doc is valid output).
+        if result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !result.sections.contains(where: { $0.kind == .image }) {
+            throw PicoDocsError.emptyDocument
+        }
+        return try registry.write(result, format: format)
+    }
+
+    /// Convenience: serialize a raw Markdown string into an office file's bytes.
+    ///
+    /// The string is wrapped into a single-body `ConverterResult` (exactly as the
+    /// plain-text/RTF converters model raw input), so LLM Markdown output and a
+    /// structured result share one write path. Empty input throws
+    /// `PicoDocsError.emptyDocument`.
+    public static func write(
+        markdown: String,
+        title: String? = nil,
+        author: String? = nil,
+        to format: ExportableFileType,
+        registry: DocumentExporterRegistry = .default
+    ) throws -> Data {
+        guard !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw PicoDocsError.emptyDocument
+        }
+        let result = ConverterResult(
+            title: title,
+            author: author,
+            sections: [DocumentSection(kind: .body, markdown: markdown)]
+        )
+        return try write(result, to: format, registry: registry)
+    }
+
+    /// Read bytes in one format and write bytes in another (office -> office),
+    /// bridging `convert` and `write`.
+    public static func transcode(
+        data: Data,
+        filename: String? = nil,
+        mimeType: String? = nil,
+        url: URL? = nil,
+        charset: String.Encoding? = nil,
+        to format: ExportableFileType,
+        enhanceReadability: Bool = true,
+        enableOCR: Bool = true,
+        sanitizeUnicode: Bool = false,
+        convertRegistry: DocumentConverterRegistry = .default,
+        exportRegistry: DocumentExporterRegistry = .default
+    ) async throws -> Data {
+        let result = try await convert(
+            data: data,
+            filename: filename,
+            mimeType: mimeType,
+            url: url,
+            charset: charset,
+            enhanceReadability: enhanceReadability,
+            enableOCR: enableOCR,
+            sanitizeUnicode: sanitizeUnicode,
+            registry: convertRegistry
+        )
+        return try write(result, to: format, registry: exportRegistry)
+    }
+
     // MARK: - StreamInfo construction
 
     static func makeStreamInfo(filename: String?, mimeType: String?, url: URL?, charset: String.Encoding?, enhanceReadability: Bool = true, enableOCR: Bool = true, sanitizeUnicode: Bool = false) -> StreamInfo {

@@ -615,18 +615,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     private static func mimeType(forExtension ext: String) -> String {
-        switch ext.lowercased() {
-        case "png": return "image/png"
-        case "jpg", "jpeg": return "image/jpeg"
-        case "gif": return "image/gif"
-        case "bmp": return "image/bmp"
-        case "tif", "tiff": return "image/tiff"
-        case "svg": return "image/svg+xml"
-        case "webp": return "image/webp"
-        case "emf": return "image/emf"
-        case "wmf": return "image/wmf"
-        default: return "application/octet-stream"
-        }
+        OfficeMediaType.mimeType(forExtension: ext)
     }
 
     // MARK: - Archive helpers

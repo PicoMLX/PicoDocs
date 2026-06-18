@@ -62,6 +62,31 @@ try await doc.parse()
 print(doc.exportedContent)
 ```
 
+## Exporting (Markdown / LLM output → office files)
+
+PicoDocs can also go the other way: turn LLM Markdown output (or a structured
+`ConverterResult`) into a real office file via `PicoDocsEngine.write(...)`.
+
+```swift
+// From a Markdown string (e.g. an LLM response):
+let docx = try PicoDocsEngine.write(markdown: markdown, to: .docx)
+let xlsx = try PicoDocsEngine.write(markdown: markdown, to: .xlsx)
+let pptx = try PicoDocsEngine.write(markdown: markdown, to: .pptx)
+let rtf  = try PicoDocsEngine.write(markdown: markdown, to: .rtf)   // Apple platforms
+
+// From a structured result (e.g. round-tripping an imported document):
+let data = try PicoDocsEngine.write(result, to: .docx)
+```
+
+Notes:
+- **DOCX/XLSX/PPTX** are written as OOXML (ZIP + XML) on all platforms. **RTF** uses
+  `NSAttributedString` and is available on Apple platforms.
+- **Pages/Keynote** are intentionally not implemented — writing valid iWork files
+  third-party is unsupported (`ExportableFileType.isImplemented == false`); export to
+  DOCX/PPTX and let Pages/Keynote import it instead.
+- Custom or additional writers can be registered via `DocumentExporterRegistry`,
+  mirroring `DocumentConverterRegistry` on the import side.
+
 ## Setup for Apps
 
 ### Info.plist Configuration
