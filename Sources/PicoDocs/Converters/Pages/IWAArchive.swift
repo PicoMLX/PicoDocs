@@ -36,6 +36,9 @@ enum IWAArchive {
         let identifier: UInt64
         let type: UInt64
         let payload: [UInt8]
+        /// Cross-object references (`MessageInfo.object_references`), in order —
+        /// used to follow the document object graph (e.g. Keynote's slide tree).
+        let references: [UInt64]
     }
 
     /// Parses every object in a decompressed IWA stream. Best-effort: on a
@@ -59,7 +62,8 @@ enum IWAArchive {
             for info in infos {
                 guard info.length <= UInt64(Int.max),
                       let payload = cursor.take(Int(info.length)) else { return objects }
-                objects.append(Object(identifier: info.identifier, type: info.type, payload: payload))
+                objects.append(Object(identifier: info.identifier, type: info.type,
+                                      payload: payload, references: info.references))
             }
         }
         return objects
@@ -85,10 +89,11 @@ enum IWAArchive {
         let identifier: UInt64
         let type: UInt64
         let length: UInt64
+        let references: [UInt64]
     }
 
     /// Reads ArchiveInfo: identifier (field 1) + each MessageInfo (field 2) into
-    /// (identifier, type, length) entries.
+    /// (identifier, type, length, references) entries.
     private static func messageInfos(in archiveBytes: [UInt8]) -> [InfoEntry] {
         var identifier: UInt64 = 0
         var entries: [InfoEntry] = []
@@ -98,8 +103,9 @@ enum IWAArchive {
             case (1, .varint(let id)):
                 identifier = id
             case (2, .length(let messageInfoBytes)):
-                if let (type, length) = parseMessageInfo(messageInfoBytes) {
-                    entries.append(InfoEntry(identifier: identifier, type: type, length: length))
+                if let info = parseMessageInfo(messageInfoBytes) {
+                    entries.append(InfoEntry(identifier: identifier, type: info.type,
+                                             length: info.length, references: info.references))
                 }
             default:
                 continue
@@ -108,20 +114,32 @@ enum IWAArchive {
         return entries
     }
 
-    /// MessageInfo: type (field 1) + payload length (field 3).
-    private static func parseMessageInfo(_ bytes: [UInt8]) -> (type: UInt64, length: UInt64)? {
+    /// MessageInfo: type (field 1), payload length (field 3), and object_references
+    /// (field 5 — packed or repeated uint64).
+    private static func parseMessageInfo(_ bytes: [UInt8]) -> (type: UInt64, length: UInt64, references: [UInt64])? {
         var type: UInt64?
         var length: UInt64?
+        var references: [UInt64] = []
         var reader = ProtobufReader(bytes)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (1, .varint(let t)): type = t
             case (3, .varint(let l)): length = l
+            case (5, .varint(let r)): references.append(r)                       // unpacked
+            case (5, .length(let packed)): references.append(contentsOf: unpackVarints(packed))
             default: continue
             }
         }
         guard let type, let length else { return nil }
-        return (type, length)
+        return (type, length, references)
+    }
+
+    /// Unpacks a protobuf packed-repeated varint field.
+    private static func unpackVarints(_ bytes: [UInt8]) -> [UInt64] {
+        var values: [UInt64] = []
+        var cursor = StreamCursor(bytes)
+        while let value = cursor.readVarint() { values.append(value) }
+        return values
     }
 
     /// TSWP.StorageArchive: the concatenated `repeated string text` (field 3) runs,

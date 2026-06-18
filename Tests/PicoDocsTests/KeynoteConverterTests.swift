@@ -114,4 +114,32 @@ struct KeynoteConverterTests {
             _ = try await KeynoteConverter().convert(key, info: info)
         }
     }
+
+    @Test("KeynoteConverter extracts deck-ordered slide text from a real .key, excluding presenter notes")
+    func realKeynoteFixture() async throws {
+        let data = try Fixture.data("sample", "key")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.key")
+
+        let slides = result.sections.filter { $0.kind == .slide }
+        #expect(slides.count == 3)
+        #expect(slides.map(\.slideNumber) == [1, 2, 3])
+
+        // Deck order comes from Document.iwa's slide tree, NOT the filenames:
+        // Slide.iwa ("The problem") is slide 2, not last. (Filename order would
+        // put it last and swap slides 2/3.)
+        #expect(slides[0].markdown.contains("The Spoon"))
+        #expect(slides[0].markdown.contains("Ronald Mannak"))
+        #expect(slides[1].markdown.contains("The problem"))
+        #expect(slides[1].markdown.contains("Every mug has a spoon-shaped absence"))
+        #expect(slides[2].markdown.contains("The data"))
+
+        // Presenter notes are kind 4 → excluded by the kind==0 filter; they must
+        // not leak into slide text.
+        let markdown = result.markdown()
+        #expect(!markdown.contains("Good morning. Thank you all"))
+        #expect(!markdown.contains("barista pea"))
+
+        // Object-replacement image placeholders are stripped.
+        #expect(!markdown.unicodeScalars.contains("\u{FFFC}"))
+    }
 }
