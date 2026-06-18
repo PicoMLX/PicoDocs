@@ -81,13 +81,17 @@ public enum ContentTypeDetector {
         // 3. Document formats identified by hint but lacking magic bytes (corrupt
         //    or mislabeled). Honor the hint so they reach the right converter (or
         //    report unsupported) instead of being mis-read as text.
-        // iWork hints, but NOT Keynote here: `.key` is an ambiguous extension
-        // (PEM/SSH/license keys), and Keynote — like all iWork formats — is always
-        // a ZIP, so a non-ZIP `.key` is left to the text path rather than routed to
-        // a converter that would only fail. Real `.key` packages still match in the
-        // ZIP branch above.
+        // iWork hints without ZIP magic (corrupt/mislabeled). Pages routes by any
+        // hint (its extension is unambiguous). Keynote routes ONLY by an explicit
+        // MIME type: the `.key` extension — and the UTType derived from it — is
+        // ambiguous with PEM/SSH/license keys, so a bare-extension `.key` is left
+        // to the text path, while an explicit Keynote MIME (e.g. a truncated web
+        // download) is still honored.
         if let iwork = iworkFormatFromHints(info), iwork != .keynote {
             return (iwork, 0.4)
+        }
+        if isKeynoteMIME(info.mimeType) {
+            return (.keynote, 0.4)
         }
         if let docHint = documentFormatFromHints(info) {
             return (docHint, 0.4)
@@ -231,18 +235,26 @@ public enum ContentTypeDetector {
         case "key": return .keynote
         default: break
         }
-        // Extensionless web downloads: route by the iWork MIME type (current and
-        // legacy), since the URL may carry no extension.
-        let baseMIME = info.mimeType?.split(separator: ";").first
-            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-        switch baseMIME {
-        case "application/vnd.apple.pages", "application/x-iwork-pages-sffpages":
-            return .pages
-        case "application/vnd.apple.keynote", "application/x-iwork-keynote-sffkey":
-            return .keynote
-        default:
-            return nil
-        }
+        // Extensionless web downloads: route by the iWork MIME type.
+        if isPagesMIME(info.mimeType) { return .pages }
+        if isKeynoteMIME(info.mimeType) { return .keynote }
+        return nil
+    }
+
+    private static func baseMIME(_ mimeType: String?) -> String? {
+        mimeType?.split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+    }
+
+    /// True for the current/legacy Pages MIME types.
+    static func isPagesMIME(_ mimeType: String?) -> Bool {
+        let m = baseMIME(mimeType)
+        return m == "application/vnd.apple.pages" || m == "application/x-iwork-pages-sffpages"
+    }
+
+    /// True for the current/legacy Keynote MIME types.
+    static func isKeynoteMIME(_ mimeType: String?) -> Bool {
+        let m = baseMIME(mimeType)
+        return m == "application/vnd.apple.keynote" || m == "application/x-iwork-keynote-sffkey"
     }
 
     /// Best-effort check that a ZIP is an iWork '13+ package: it carries IWA

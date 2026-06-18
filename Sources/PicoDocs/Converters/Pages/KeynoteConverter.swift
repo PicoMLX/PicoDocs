@@ -123,9 +123,13 @@ public struct KeynoteConverter: DocumentConverter {
         var components: [Component] = []
         for entry in archive where entry.type == .file
             && entry.path.hasPrefix("Index/") && entry.path.hasSuffix(".iwa") {
-            if let data = Self.readEntry(archive, path: entry.path) {
-                components.append((entry.path, [UInt8](data)))
+            guard let data = Self.readEntry(archive, path: entry.path) else {
+                // A present-but-unreadable slide is corruption (primary content);
+                // auxiliary components are skipped leniently.
+                if Self.isSlide(entry.path) { throw PicoDocsError.fileCorrupted }
+                continue
             }
+            components.append((entry.path, [UInt8](data)))
         }
         if !components.isEmpty { return components }
 
@@ -138,9 +142,11 @@ public struct KeynoteConverter: DocumentConverter {
                 throw PicoDocsError.fileCorrupted
             }
             for entry in inner where entry.type == .file && entry.path.hasSuffix(".iwa") {
-                if let data = Self.readEntry(inner, path: entry.path) {
-                    components.append((entry.path, [UInt8](data)))
+                guard let data = Self.readEntry(inner, path: entry.path) else {
+                    if Self.isSlide(entry.path) { throw PicoDocsError.fileCorrupted }
+                    continue
                 }
+                components.append((entry.path, [UInt8](data)))
             }
         }
         return components
