@@ -96,7 +96,10 @@ public struct PagesConverter: DocumentConverter {
     /// fail to extract are skipped leniently.
     private func iwaComponents(in archive: Archive) throws -> [Component] {
         var components: [Component] = []
-        for entry in archive where entry.type == .file && entry.path.hasSuffix(".iwa") {
+        // Loose layout is `Index/*.iwa`; scope the scan to that path so a stray
+        // outer `.iwa` can't shadow the nested `Index.zip` body below.
+        for entry in archive where entry.type == .file
+            && entry.path.hasPrefix("Index/") && entry.path.hasSuffix(".iwa") {
             guard let data = Self.readEntry(archive, path: entry.path) else {
                 if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
                 continue
@@ -154,7 +157,9 @@ public struct PagesConverter: DocumentConverter {
     static func readEntry(_ archive: Archive, path: String) -> Data? {
         let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
         guard let entry = archive[cleanPath] else { return nil }
-        var data = Data(capacity: Int(entry.uncompressedSize))
+        // Cap the reservation hint: `uncompressedSize` is untrusted central-
+        // directory data, only validated during extract.
+        var data = Data(capacity: min(Int(entry.uncompressedSize), 16 * 1024 * 1024))
         do {
             _ = try archive.extract(entry) { data.append($0) }
         } catch {

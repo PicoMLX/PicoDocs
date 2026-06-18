@@ -76,6 +76,7 @@ enum Snappy {
                 }
                 length += 1
                 guard length <= n - pos else { throw SnappyError.malformed }
+                guard output.count + length <= expectedLength else { throw SnappyError.malformed }
                 output.append(contentsOf: input[pos ..< pos + length])
                 pos += length
             case 0x01:
@@ -84,21 +85,21 @@ enum Snappy {
                 guard pos + 1 <= n else { throw SnappyError.malformed }
                 let offset = (Int(tag >> 5) << 8) | Int(input[pos])
                 pos += 1
-                try appendCopy(&output, offset: offset, length: length)
+                try appendCopy(&output, offset: offset, length: length, limit: expectedLength)
             case 0x02:
                 // Copy, 2-byte offset.
                 let length = 1 + Int(tag >> 2)
                 guard pos + 2 <= n else { throw SnappyError.malformed }
                 let offset = Int(input[pos]) | (Int(input[pos + 1]) << 8)
                 pos += 2
-                try appendCopy(&output, offset: offset, length: length)
+                try appendCopy(&output, offset: offset, length: length, limit: expectedLength)
             default:
                 // Copy, 4-byte offset.
                 let length = 1 + Int(tag >> 2)
                 guard pos + 4 <= n else { throw SnappyError.malformed }
                 let offset = Int(readLittleEndian(input, pos, 4))
                 pos += 4
-                try appendCopy(&output, offset: offset, length: length)
+                try appendCopy(&output, offset: offset, length: length, limit: expectedLength)
             }
         }
         // A well-formed Snappy block decodes to exactly its preamble length; a
@@ -145,8 +146,11 @@ enum Snappy {
 
     /// Appends a back-reference copy byte-by-byte, so overlapping runs (offset <
     /// length) expand correctly — the Snappy way to encode repeats.
-    private static func appendCopy(_ output: inout [UInt8], offset: Int, length: Int) throws {
+    private static func appendCopy(_ output: inout [UInt8], offset: Int, length: Int, limit: Int) throws {
         guard offset > 0, offset <= output.count else { throw SnappyError.malformed }
+        // A valid block never expands past its preamble length; reject corrupt
+        // tags that would balloon output before the final size check.
+        guard output.count + length <= limit else { throw SnappyError.malformed }
         var src = output.count - offset
         for _ in 0 ..< length {
             output.append(output[src])
