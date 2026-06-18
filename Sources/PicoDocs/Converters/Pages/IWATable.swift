@@ -155,7 +155,7 @@ enum IWATable {
                 var runReader = ProtobufReader(runBytes)
                 while let runField = runReader.next() {
                     switch (runField.number, runField.value) {
-                    case (1, .varint(let index)): charIndex = Int(index)
+                    case (1, .varint(let index)): charIndex = Int(exactly: index)   // nil (skip run) on overflow
                     case (2, .length(let reference)): objectID = referencedID(in: reference)
                     default: continue
                     }
