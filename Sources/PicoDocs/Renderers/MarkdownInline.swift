@@ -180,13 +180,16 @@ enum MarkdownInlineParser {
 
     // MARK: - Emphasis
 
-    /// `***`/`**`/`*` matchers, compiled once. `parseEmphasis` recurses over every
-    /// inline run, so rebuilding these per call was needless CPU; the patterns are
-    /// constant and known-valid, hence `try!`.
-    private static let emphasisPatterns: [(regex: NSRegularExpression, wrap: ([MarkdownInline]) -> MarkdownInline)] = [
-        (try! NSRegularExpression(pattern: "\\*\\*\\*(.+?)\\*\\*\\*"), { .strong([.emphasis($0)]) }),
-        (try! NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*"), { .strong($0) }),
-        (try! NSRegularExpression(pattern: "\\*(.+?)\\*"), { .emphasis($0) }),
+    /// `***`/`**`/`*` matchers, compiled once (the expensive part). `parseEmphasis`
+    /// recurses over every inline run, so rebuilding these per call was needless CPU;
+    /// the patterns are constant and known-valid, hence `try!`. `NSRegularExpression`
+    /// is immutable/thread-safe once built, so `nonisolated(unsafe)` is sound here —
+    /// and it keeps non-`Sendable` closures out of global state (the wraps are cheap
+    /// and stay local to the call).
+    nonisolated(unsafe) private static let emphasisRegexes: [NSRegularExpression] = [
+        try! NSRegularExpression(pattern: "\\*\\*\\*(.+?)\\*\\*\\*"),
+        try! NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*"),
+        try! NSRegularExpression(pattern: "\\*(.+?)\\*"),
     ]
 
     /// Parses `***`/`**`/`*` emphasis into nested nodes, preferring (at the same
@@ -194,9 +197,14 @@ enum MarkdownInlineParser {
     /// `***x***` becomes strong(emphasis(x)).
     static func parseEmphasis(_ text: String) -> [MarkdownInline] {
         guard !text.isEmpty else { return [] }
+        let wraps: [([MarkdownInline]) -> MarkdownInline] = [
+            { .strong([.emphasis($0)]) },
+            { .strong($0) },
+            { .emphasis($0) },
+        ]
         let ns = text as NSString
         var best: (full: Range<String.Index>, inner: String, wrap: ([MarkdownInline]) -> MarkdownInline)?
-        for (regex, wrap) in emphasisPatterns {
+        for (regex, wrap) in zip(emphasisRegexes, wraps) {
             guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
                   let full = Range(match.range, in: text),
                   let inner = Range(match.range(at: 1), in: text) else { continue }

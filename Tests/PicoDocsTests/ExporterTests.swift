@@ -95,6 +95,25 @@ struct ExporterTests {
         #expect(recovered.sections.contains { $0.kind == .image })
     }
 
+    @Test("Image-only result embeds its images instead of a blank file")
+    func docxImageOnlyEmbeds() async throws {
+        // A 1x1 transparent PNG, carried as the only section (no inline body ref).
+        let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        let image = DocumentSection(
+            title: "pic.png",
+            kind: .image,
+            markdown: "![pic.png](pic.png)",
+            sourcePath: "word/media/pic.png",
+            metadata: ["mimeType": "image/png", "base64": pngBase64]
+        )
+        let result = ConverterResult(sections: [image])
+        let data = try PicoDocsEngine.write(result, to: .docx)
+
+        #expect(entry(data, "word/media/pic.png") != nil)
+        let recovered = try await PicoDocsEngine.convert(data: data, filename: "out.docx")
+        #expect(recovered.sections.contains { $0.kind == .image })
+    }
+
     // MARK: - XLSX round-trip (via SpreadsheetConverter / CoreXLSX)
 
     @Test("XLSX round-trips table cells through SpreadsheetConverter")
@@ -201,5 +220,19 @@ struct MarkdownInlineParserTests {
     func parsesImageAndFootnote() {
         #expect(MarkdownInlineParser.parse("![alt](pic.png)") == [.image(alt: "alt", source: "pic.png")])
         #expect(MarkdownInlineParser.parse("[^1]") == [.footnoteReference("1")])
+    }
+
+    @Test("Handles balanced parens and escaped delimiters in links")
+    func parsesTrickyLinks() {
+        // Balanced parens in a bare destination aren't truncated at the first `)`.
+        #expect(
+            MarkdownInlineParser.parse("[spec](https://e.com/Foo_(bar))")
+                == [.link(label: [.text("spec")], destination: "https://e.com/Foo_(bar)")]
+        )
+        // An escaped `]` in a label doesn't end it early and is unescaped.
+        #expect(
+            MarkdownInlineParser.parse("![a\\]b](pic.png)")
+                == [.image(alt: "a]b", source: "pic.png")]
+        )
     }
 }

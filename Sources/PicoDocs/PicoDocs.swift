@@ -106,11 +106,36 @@ public enum PicoDocsEngine {
     ) throws -> Data {
         // Mirror `convert`'s post-sanitize check: an empty document is an error,
         // *unless* it carries image sections (an image-only doc is valid output).
-        if result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           !result.sections.contains(where: { $0.kind == .image }) {
+        let isEmpty = result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasImages = result.sections.contains { $0.kind == .image }
+        if isEmpty, !hasImages {
             throw PicoDocsError.emptyDocument
         }
-        return try registry.write(result, format: format)
+        // An image-only result carries `.image` byte sections but no body referencing
+        // them; `result.markdown()` (which omits `.image` carriers) is empty, so the
+        // markdown-driven exporters would emit a blank file. Synthesize one inline
+        // reference per carrier so the bytes are actually embedded.
+        let exportable = isEmpty && hasImages ? Self.withSynthesizedImageReferences(result) : result
+        return try registry.write(exportable, format: format)
+    }
+
+    /// Appends a `.body` section with an inline `![alt](name)` reference for each
+    /// `.image` carrier, so an image-only result renders its images instead of a
+    /// blank document. `name` mirrors the exporters' image-index key (the source
+    /// path's basename, falling back to the title), so each reference resolves to
+    /// the carrier's bytes.
+    private static func withSynthesizedImageReferences(_ result: ConverterResult) -> ConverterResult {
+        let refs: [DocumentSection] = result.sections.compactMap { section in
+            guard section.kind == .image else { return nil }
+            let name = (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
+            guard let name, !name.isEmpty else { return nil }
+            let alt = section.title ?? name
+            return DocumentSection(kind: .body, markdown: "![\(alt)](\(name))")
+        }
+        guard !refs.isEmpty else { return result }
+        var copy = result
+        copy.sections.append(contentsOf: refs)
+        return copy
     }
 
     /// Convenience: serialize a raw Markdown string into an office file's bytes.
