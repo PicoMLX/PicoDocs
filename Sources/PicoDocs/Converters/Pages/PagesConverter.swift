@@ -139,7 +139,11 @@ public struct PagesConverter: DocumentConverter {
         // Drop C0/C1 control characters (e.g. Pages' U+0004 section-break sentinel)
         // that aren't real text; tab/newline are kept and handled by the line loop.
         var scalars = unified.unicodeScalars
-        scalars.removeAll { $0 != "\n" && $0 != "\t" && $0.properties.generalCategory == .control }
+        scalars.removeAll { scalar in
+            let value = scalar.value
+            guard value != 0x0A, value != 0x09 else { return false }  // keep newline, tab
+            return value <= 0x1F || (0x7F...0x9F).contains(value)      // C0 / C1 controls
+        }
         unified = String(scalars)
         let inlineWhitespace = CharacterSet(charactersIn: " \t")
         var out: [String] = []

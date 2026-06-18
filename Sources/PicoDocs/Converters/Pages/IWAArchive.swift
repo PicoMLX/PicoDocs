@@ -129,21 +129,19 @@ enum IWAArchive {
     /// (protobuf default 0). Header/footer/footnote storages (non-zero kind) return
     /// nil so callers skip them.
     private static func bodyText(in payload: [UInt8]) -> String? {
-        var kind: UInt64 = 0
         var runs: [String] = []
         var reader = ProtobufReader(payload)
         while let field = reader.next() {
             switch (field.number, field.value) {
-            case (1, .varint(let k)):                   // StorageArchive.kind
-                kind = k
+            case (1, .varint(let kind)):                // StorageArchive.kind
+                guard kind == 0 else { return nil }     // non-body (header/footer/…) → skip
             case (3, .length(let bytes)):               // repeated string text
                 if let run = String(bytes: bytes, encoding: .utf8) { runs.append(run) }
             default:
                 continue
             }
         }
-        guard kind == 0 else { return nil }             // 0 = body
-        return runs.joined()
+        return runs.joined()                            // kind 0 or absent (default 0) = body
     }
 }
 
