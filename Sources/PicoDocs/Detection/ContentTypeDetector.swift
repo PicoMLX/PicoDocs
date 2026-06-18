@@ -81,8 +81,20 @@ public enum ContentTypeDetector {
         // 3. Document formats identified by hint but lacking magic bytes (corrupt
         //    or mislabeled). Honor the hint so they reach the right converter (or
         //    report unsupported) instead of being mis-read as text.
-        if let iwork = iworkFormatFromHints(info) {
+        // iWork hints without ZIP magic (corrupt/mislabeled). Pages routes by any
+        // hint (its extension is unambiguous).
+        if let iwork = iworkFormatFromHints(info), iwork != .keynote {
             return (iwork, 0.4)
+        }
+        // Keynote needs care: the `.key` extension is ambiguous (PEM/SSH/license
+        // keys), and a local `.key`'s MIME can be *synthesized* from its
+        // extension-derived UTType (PicoDocument+Fetch uses `preferredMIMEType`),
+        // so neither the extension nor a `.key`-derived MIME is trustworthy. But an
+        // explicit Keynote MIME with NO `.key` extension can't have been synthesized
+        // that way — it's a real server `Content-Type` (e.g. a truncated,
+        // extensionless download) — so honor it. Real `.key` ZIPs still match above.
+        if info.fileExtension?.lowercased() != "key", isKeynoteMIME(info.mimeType) {
+            return (.keynote, 0.4)
         }
         if let docHint = documentFormatFromHints(info) {
             return (docHint, 0.4)
@@ -214,21 +226,38 @@ public enum ContentTypeDetector {
         }
     }
 
-    /// Resolves iWork formats from hints. Only Pages has a converter today;
-    /// Numbers/Keynote will get their own `DetectedFormat` cases when supported.
+    /// Resolves iWork formats from hints (Pages, Keynote). Numbers will get its
+    /// own `DetectedFormat` case when supported.
     static func iworkFormatFromHints(_ info: StreamInfo) -> DetectedFormat? {
-        if let ut = info.utType, ut.conforms(to: .pages) || ut.conforms(to: .pagesSingleFile) { return .pages }
-        if info.fileExtension?.lowercased() == "pages" { return .pages }
-        // Extensionless web downloads: route by the Pages MIME type (current and
-        // legacy), since the URL may carry no `.pages` suffix.
-        let baseMIME = info.mimeType?.split(separator: ";").first
-            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-        switch baseMIME {
-        case "application/vnd.apple.pages", "application/x-iwork-pages-sffpages":
-            return .pages
-        default:
-            return nil
+        if let ut = info.utType {
+            if ut.conforms(to: .pages) || ut.conforms(to: .pagesSingleFile) { return .pages }
+            if ut.conforms(to: .keynote) || ut.conforms(to: .keynoteSingleFile) { return .keynote }
         }
+        switch info.fileExtension?.lowercased() {
+        case "pages": return .pages
+        case "key": return .keynote
+        default: break
+        }
+        // Extensionless web downloads: route by the iWork MIME type.
+        if isPagesMIME(info.mimeType) { return .pages }
+        if isKeynoteMIME(info.mimeType) { return .keynote }
+        return nil
+    }
+
+    private static func baseMIME(_ mimeType: String?) -> String? {
+        mimeType?.split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+    }
+
+    /// True for the current/legacy Pages MIME types.
+    static func isPagesMIME(_ mimeType: String?) -> Bool {
+        let m = baseMIME(mimeType)
+        return m == "application/vnd.apple.pages" || m == "application/x-iwork-pages-sffpages"
+    }
+
+    /// True for the current/legacy Keynote MIME types.
+    static func isKeynoteMIME(_ mimeType: String?) -> Bool {
+        let m = baseMIME(mimeType)
+        return m == "application/vnd.apple.keynote" || m == "application/x-iwork-keynote-sffkey"
     }
 
     /// Best-effort check that a ZIP is an iWork '13+ package: it carries IWA
