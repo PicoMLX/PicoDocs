@@ -36,7 +36,7 @@ public struct KeynoteConverter: DocumentConverter {
         guard let archive = Archive(data: data, accessMode: .read) else {
             throw PicoDocsError.fileCorrupted
         }
-        let components = iwaComponents(in: archive)
+        let components = try iwaComponents(in: archive)
         guard !components.isEmpty else {
             throw PicoDocsError.documentTypeNotSupported
         }
@@ -48,16 +48,19 @@ public struct KeynoteConverter: DocumentConverter {
             .sorted { Self.slideOrder($0.name) < Self.slideOrder($1.name) }
 
         var sections: [DocumentSection] = []
-        for slide in slides {
+        for (index, slide) in slides.enumerated() {
             try Task.checkCancellation()
             guard let stream = try? Snappy.decompressIWA(slide.bytes) else { continue }
             let text = Self.normalize(IWAArchive.text(in: stream))
             guard !text.isEmpty else { continue }
+            // slideNumber reflects the slide's position in deck order (by Slide<N>
+            // filename), not the count of emitted sections, so skipping an empty
+            // slide doesn't renumber the slides after it.
             sections.append(DocumentSection(
                 kind: .slide,
                 markdown: text,
                 sourcePath: slide.name,
-                slideNumber: sections.count + 1
+                slideNumber: index + 1
             ))
         }
 
@@ -109,7 +112,7 @@ public struct KeynoteConverter: DocumentConverter {
 
     /// Reads the `.iwa` component streams from loose `Index/*.iwa` entries, or —
     /// failing that — from a nested `Index.zip` (the common Keynote layout).
-    private func iwaComponents(in archive: Archive) -> [Component] {
+    private func iwaComponents(in archive: Archive) throws -> [Component] {
         var components: [Component] = []
         for entry in archive where entry.type == .file
             && entry.path.hasPrefix("Index/") && entry.path.hasSuffix(".iwa") {
@@ -119,8 +122,14 @@ public struct KeynoteConverter: DocumentConverter {
         }
         if !components.isEmpty { return components }
 
-        if let indexZip = Self.readEntry(archive, path: "Index.zip"),
-           let inner = Archive(data: indexZip, accessMode: .read) {
+        // Nested layout: slides live inside Index.zip. If that container is present
+        // but can't be read/opened, the file is corrupt — not an unsupported
+        // layout — so surface that distinctly rather than failing silently.
+        if archive["Index.zip"] != nil {
+            guard let indexZip = Self.readEntry(archive, path: "Index.zip"),
+                  let inner = Archive(data: indexZip, accessMode: .read) else {
+                throw PicoDocsError.fileCorrupted
+            }
             for entry in inner where entry.type == .file && entry.path.hasSuffix(".iwa") {
                 if let data = Self.readEntry(inner, path: entry.path) {
                     components.append((entry.path, [UInt8](data)))
