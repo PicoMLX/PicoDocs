@@ -136,6 +136,11 @@ public struct PagesConverter: DocumentConverter {
         for separator in ["\r\n", "\r", "\u{2028}", "\u{2029}", "\u{000B}", "\u{000C}"] {
             unified = unified.replacingOccurrences(of: separator, with: "\n")
         }
+        // Drop C0/C1 control characters (e.g. Pages' U+0004 section-break sentinel)
+        // that aren't real text; tab/newline are kept and handled by the line loop.
+        var scalars = unified.unicodeScalars
+        scalars.removeAll { $0 != "\n" && $0 != "\t" && $0.properties.generalCategory == .control }
+        unified = String(scalars)
         let inlineWhitespace = CharacterSet(charactersIn: " \t")
         var out: [String] = []
         var pendingBlank = false
