@@ -6,16 +6,16 @@
 //  reusing the in-module iWork Archive (IWA) decoder built for Pages — Snappy +
 //  protobuf-wire + `IWAArchive` (no Keynote.app, no Apple frameworks, no
 //  protobuf/snappy dependency). A `.key` is the same ZIP/IWA container; slides
-//  live in `Index/Slide<N>.iwa` (loose, or inside a nested `Index.zip`), with
-//  `MasterSlide-*.iwa` masters and `Document.iwa` presentation metadata.
+//  live in `Index/Slide*.iwa` (loose, or inside a nested `Index.zip`), with
+//  `MasterSlide-*.iwa` / `TemplateSlide-*.iwa` masters and `Document.iwa`
+//  presentation metadata (incl. the slide tree).
 //
-//  Scope (v1): each slide's body text (the `kind == 0` TSWP storages, same
-//  extraction as Pages) becomes one section, in slide-number order. Master/theme
-//  template text and presenter notes are excluded; speaker notes, per-slide
-//  titles vs body, ordering via the document object graph, tables, and inline
-//  images are follow-ups — best validated against a real `.key` fixture (the
-//  Pages real-file pass confirmed body = `kind 0`; slide-text kinds should be
-//  re-confirmed the same way).
+//  Scope: each slide's body text (the `kind == 0` TSWP storages, same extraction
+//  as Pages) becomes one section, in deck order resolved from `Document.iwa`'s
+//  slide tree. Master/template slides are excluded, and presenter notes (`kind`
+//  4) are excluded by the `kind == 0` filter — both confirmed against a real
+//  `.key` (kinds: 0=body, 1=header/footer, 4=note, 5=cell). Per-slide
+//  title-vs-body structure, tables, and inline images remain follow-ups.
 //
 //  NOTE: `readEntry` / `normalize` mirror PagesConverter; a shared iWork helper
 //  is a planned cleanup once both converters have settled.
@@ -41,31 +41,50 @@ public struct KeynoteConverter: DocumentConverter {
             throw PicoDocsError.documentTypeNotSupported
         }
 
-        // One section per slide (Index/Slide<N>.iwa), in slide-number order,
-        // excluding MasterSlide* template text.
-        let slides = components
-            .filter { Self.isSlide($0.name) }
-            .sorted { Self.slideOrder($0.name) < Self.slideOrder($1.name) }
-
-        var sections: [DocumentSection] = []
-        for (index, slide) in slides.enumerated() {
+        // Decompress each slide once; capture its KN.SlideArchive id (to resolve
+        // deck order from the document's slide tree) and its body text (kind == 0;
+        // presenter notes are kind 4 and so already excluded).
+        var slides: [(name: String, id: UInt64, text: String)] = []
+        for component in components where Self.isSlide(component.name) {
             try Task.checkCancellation()
-            // A slide's stream is primary content: a decompression failure is
-            // corruption, not an empty slide — fail rather than silently drop it.
             let stream: [UInt8]
             do {
-                stream = try Snappy.decompressIWA(slide.bytes)
+                stream = try Snappy.decompressIWA(component.bytes)
             } catch {
+                // A slide's stream is primary content: a decompression failure is
+                // corruption, not an empty slide.
                 throw PicoDocsError.fileCorrupted
             }
-            let text = Self.normalize(IWAArchive.text(in: stream))
-            guard !text.isEmpty else { continue }
-            // slideNumber reflects the slide's position in deck order (by Slide<N>
-            // filename), not the count of emitted sections, so skipping an empty
-            // slide doesn't renumber the slides after it.
+            let objects = IWAArchive.objects(in: stream)
+            let slideID = objects.first { $0.type == Self.slideArchiveType }?.identifier ?? 0
+            slides.append((component.name, slideID, Self.normalize(IWAArchive.text(from: objects))))
+        }
+
+        // Order by the document's slide tree (authoritative); fall back to
+        // slide-archive id, then filename, when it can't be resolved.
+        let deck = Self.deckOrder(components: components, slideIDs: Set(slides.map(\.id)))
+        let rank = Dictionary(deck.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
+        let ordered = slides.sorted { lhs, rhs in
+            let lr = rank[lhs.id] ?? Int.max
+            let rr = rank[rhs.id] ?? Int.max
+            if lr != rr { return lr < rr }
+            if lhs.id != rhs.id { return lhs.id < rhs.id }
+            // Final fallback (no slide tree, ids unresolved): numeric filename
+            // order, so Slide2 precedes Slide10 (lexicographic would not).
+            let lo = Self.slideOrder(lhs.name)
+            let ro = Self.slideOrder(rhs.name)
+            if lo != ro { return lo < ro }
+            return lhs.name < rhs.name
+        }
+
+        var sections: [DocumentSection] = []
+        for (index, slide) in ordered.enumerated() {
+            // slideNumber is the deck position, so skipping an empty slide leaves a
+            // gap rather than renumbering the slides after it.
+            guard !slide.text.isEmpty else { continue }
             sections.append(DocumentSection(
                 kind: .slide,
-                markdown: text,
+                markdown: slide.text,
                 sourcePath: slide.name,
                 slideNumber: index + 1
             ))
@@ -102,15 +121,51 @@ public struct KeynoteConverter: DocumentConverter {
 
     static func isMaster(_ path: String) -> Bool {
         let base = path.split(separator: "/").last.map(String.init) ?? path
-        return base.hasPrefix("MasterSlide")
+        return base.hasPrefix("MasterSlide") || base.hasPrefix("TemplateSlide")
     }
 
-    /// The trailing slide number from the filename (`Slide12.iwa` → 12), for
-    /// ordering. Falls back to `Int.max` so unnumbered names sort last/stably.
+    /// The trailing number in a `Slide<N>.iwa` filename (`Slide12.iwa` → 12), used
+    /// only as the final ordering fallback when the slide tree and slide ids can't
+    /// be resolved. Numeric so `Slide2` precedes `Slide10`; unnumbered names
+    /// (e.g. `Slide.iwa`) sort last.
     static func slideOrder(_ path: String) -> Int {
         let base = path.split(separator: "/").last.map(String.init) ?? path
         let digits = base.drop { !$0.isNumber }.prefix { $0.isNumber }
         return Int(digits) ?? Int.max
+    }
+
+    /// KN.SlideArchive message type — the slide object inside each `Slide*.iwa`,
+    /// whose identifier the document's slide tree references (confirmed against a
+    /// real `.key`).
+    static let slideArchiveType: UInt64 = 5
+
+    /// Resolves deck order from `Document.iwa`'s slide tree: each tree node
+    /// references one slide, and the tree references its nodes in order. Returns
+    /// slide ids in deck order, or empty if it can't be resolved (caller then
+    /// falls back to slide-id / filename order). Structural — it identifies the
+    /// tree and nodes via the reference graph rather than hard-coding their
+    /// message types; only the slide-archive type above is fixed.
+    private static func deckOrder(components: [Component], slideIDs: Set<UInt64>) -> [UInt64] {
+        guard !slideIDs.isEmpty,
+              let doc = components.first(where: { $0.name.hasSuffix("Document.iwa") }),
+              let stream = try? Snappy.decompressIWA(doc.bytes) else { return [] }
+        let objects = IWAArchive.objects(in: stream)
+        // A slide-tree node references exactly one slide; map node id -> slide id.
+        var nodeToSlide: [UInt64: UInt64] = [:]
+        for object in objects {
+            if let slideID = object.references.first(where: { slideIDs.contains($0) }) {
+                nodeToSlide[object.identifier] = slideID
+            }
+        }
+        guard !nodeToSlide.isEmpty else { return [] }
+        // The slide tree is the object referencing the most of those nodes; its
+        // node references, in order, give the deck order.
+        var orderedNodes: [UInt64] = []
+        for object in objects {
+            let nodes = object.references.filter { nodeToSlide[$0] != nil }
+            if nodes.count > orderedNodes.count { orderedNodes = nodes }
+        }
+        return orderedNodes.compactMap { nodeToSlide[$0] }
     }
 
     // MARK: - IWA gathering

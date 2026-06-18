@@ -58,6 +58,27 @@ struct PagesConverterTests {
         #expect(IWAArchive.text(in: stream) == "real")
     }
 
+    @Test("IWAArchive captures the identifier regardless of ArchiveInfo field order")
+    func iwaIdentifierOrderIndependent() {
+        // Protobuf fields may be serialized in any order: an ArchiveInfo that
+        // emits message_infos (field 2) BEFORE identifier (field 1) must still
+        // attach the right id (it would be 0 if we trusted field order).
+        let payload = Array("body".utf8)
+        var storage: [UInt8] = []                         // TSWP.StorageArchive { text }
+        storage += Self.tag(field: 3, wire: 2) + Self.varint(UInt64(payload.count)) + payload
+        var messageInfo: [UInt8] = []                     // MessageInfo { type=2001; length }
+        messageInfo += Self.tag(field: 1, wire: 0) + Self.varint(2001)
+        messageInfo += Self.tag(field: 3, wire: 0) + Self.varint(UInt64(storage.count))
+        var archiveInfo: [UInt8] = []                     // field 2 before field 1
+        archiveInfo += Self.tag(field: 2, wire: 2) + Self.varint(UInt64(messageInfo.count)) + messageInfo
+        archiveInfo += Self.tag(field: 1, wire: 0) + Self.varint(4242)
+        var stream: [UInt8] = []
+        stream += Self.varint(UInt64(archiveInfo.count)) + archiveInfo + storage
+
+        #expect(IWAArchive.objects(in: stream).first?.identifier == 4242)
+        #expect(IWAArchive.text(in: stream) == "body")
+    }
+
     // MARK: - End to end
 
     @Test("PagesConverter extracts body text from a synthetic .pages package")
@@ -92,6 +113,28 @@ struct PagesConverterTests {
         // Control-character artifacts (e.g. the U+0004 section-break sentinel) are
         // stripped from the output.
         #expect(!markdown.unicodeScalars.contains("\u{0004}"))
+    }
+
+    @Test("PagesConverter reconstructs tables from a real Pages fixture")
+    func realPagesTables() async throws {
+        let data = try Fixture.data("sample", "pages")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.pages")
+        let tables = result.sections.filter { $0.kind == .table }
+
+        // Two content tables (5×4 and 4×6); two empty/placeholder tables are skipped.
+        #expect(tables.count == 2)
+
+        // Table 1: exact header row, plus a body row exercising empty cells.
+        #expect(tables.contains { $0.markdown.contains("| Feature | Expected import | Sample value | Notes |") })
+        #expect(tables.contains { $0.markdown.contains("| Empty cell |  |  | Importer should not crash |") })
+
+        // Table 2: exact header row across all six columns.
+        #expect(tables.contains {
+            $0.markdown.contains("| Column A | Column B | Column C | Column D | Column E | Column F |")
+        })
+
+        // GitHub-flavored separator row for the four-column table.
+        #expect(tables.contains { $0.markdown.contains("| --- | --- | --- | --- |") })
     }
 
     @Test("Detector routes a .pages package to the Pages format")

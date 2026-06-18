@@ -10,11 +10,13 @@
 //
 //  Scope (v1): extracts the document's plain text (paragraphs) from the flat,
 //  single-file `.pages` ZIP — the common transport form (downloads, mail, Files
-//  exports). Rich structure (headings, styling, tables, footnotes, inline
-//  images), the legacy iWork '09 XML format, and ingesting a `.pages` *package
-//  directory* (an on-disk bundle, which the FileFetcher currently treats as a
-//  folder) are planned follow-ups; this converter raises a clear, actionable
-//  error for inputs it can't yet read rather than emitting nothing.
+//  exports) — plus table content, reconstructed as Markdown grids and appended
+//  after the body (see IWATable). Remaining rich structure (headings, styling,
+//  footnotes, inline images, inline table placement), the legacy iWork '09 XML
+//  format, and ingesting a `.pages` *package directory* (an on-disk bundle,
+//  which the FileFetcher currently treats as a folder) are planned follow-ups;
+//  this converter raises a clear, actionable error for inputs it can't yet read
+//  rather than emitting nothing.
 //
 //  Format references: obriensp/iWorkFileFormat, the SheetJS IWA notes, and
 //  Cocoanetics/SwiftText (MIT) — the in-module decode approach here is informed
@@ -46,41 +48,55 @@ public struct PagesConverter: DocumentConverter {
             throw PicoDocsError.documentTypeNotSupported
         }
 
-        // The main story lives in Document.iwa and is authoritative: if present it
-        // must decompress cleanly (corruption → fail), and its text — even if
-        // empty — determines the result, so we never scavenge stylesheet/header
-        // text from auxiliary components and pass it off as the body. Only when
-        // Document.iwa is absent do we fall back to a best-effort scan.
-        var bodyText = ""
-        if let main = components.first(where: { $0.name.hasSuffix("Document.iwa") }) {
+        // Decompress every component once. The main story (Document.iwa) is
+        // authoritative: if present it must decompress cleanly (corruption →
+        // fail) and its text — even if empty — is the body, so we never scavenge
+        // stylesheet/header text and pass it off as the body. Auxiliary
+        // components that fail to decompress are skipped leniently; they are
+        // still gathered whole for table reconstruction (tiles, datalists, and
+        // the table model live in separate Tables/*.iwa and CalculationEngine.iwa).
+        var streams: [(name: String, stream: [UInt8])] = []
+        var documentStream: [UInt8]?
+        for component in components {
             try Task.checkCancellation()
             do {
-                bodyText = IWAArchive.text(in: try Snappy.decompressIWA(main.bytes))
+                let stream = try Snappy.decompressIWA(component.bytes)
+                if component.name.hasSuffix("Document.iwa") { documentStream = stream }
+                streams.append((name: component.name, stream: stream))
             } catch {
-                throw PicoDocsError.fileCorrupted
-            }
-        } else {
-            for component in components.sorted(by: { $0.name < $1.name }) {
-                try Task.checkCancellation()
-                guard let stream = try? Snappy.decompressIWA(component.bytes) else { continue }
-                let extracted = IWAArchive.text(in: stream)
-                if !extracted.isEmpty {
-                    bodyText = extracted
-                    break
-                }
+                if component.name.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
             }
         }
 
-        let cleaned = Self.normalize(bodyText)
-        guard !cleaned.isEmpty else { throw PicoDocsError.emptyDocument }
+        // Body text: from Document.iwa if present, else the first component (by
+        // name) that yields any text.
+        let bodyText: String
+        if let documentStream {
+            bodyText = IWAArchive.text(in: documentStream)
+        } else {
+            var firstText = ""
+            for entry in streams.sorted(by: { $0.name < $1.name }) {
+                let extracted = IWAArchive.text(in: entry.stream)
+                if !extracted.isEmpty { firstText = extracted; break }
+            }
+            bodyText = firstText
+        }
 
-        let section = DocumentSection(
-            kind: .body,
-            markdown: cleaned,
-            sourcePath: "Index/Document.iwa"
-        )
+        // Tables are reconstructed from the whole component set and appended after
+        // the body as standalone sections (inline placement is a follow-up).
+        let cleaned = Self.normalize(bodyText)
+        let tables = IWATable.markdownTables(from: streams.map(\.stream))
+        guard !cleaned.isEmpty || !tables.isEmpty else { throw PicoDocsError.emptyDocument }
+
+        var sections: [DocumentSection] = []
+        if !cleaned.isEmpty {
+            sections.append(DocumentSection(kind: .body, markdown: cleaned, sourcePath: "Index/Document.iwa"))
+        }
+        for table in tables {
+            sections.append(DocumentSection(kind: .table, markdown: table, sourcePath: "Index/Tables"))
+        }
         let title = (info.filename?.isEmpty == false) ? info.filename : nil
-        return ConverterResult(title: title, sections: [section])
+        return ConverterResult(title: title, sections: sections)
     }
 
     // MARK: - IWA gathering
