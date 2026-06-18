@@ -75,8 +75,14 @@ enum IWAArchive {
     /// their text isn't passed off as the document body. Each storage's `repeated
     /// string text` runs are joined; a blank line separates distinct body storages.
     static func text(in stream: [UInt8]) -> String {
+        text(from: objects(in: stream))
+    }
+
+    /// Body text from already-parsed objects — lets a caller that already has the
+    /// objects (e.g. Keynote, which also needs the slide id) avoid re-parsing.
+    static func text(from objects: [Object]) -> String {
         var storages: [String] = []
-        for object in objects(in: stream) where object.type == textStorageType {
+        for object in objects where object.type == textStorageType {
             guard let body = bodyText(in: object.payload), !body.isEmpty else { continue }
             storages.append(body)
         }

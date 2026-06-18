@@ -55,9 +55,9 @@ public struct KeynoteConverter: DocumentConverter {
                 // corruption, not an empty slide.
                 throw PicoDocsError.fileCorrupted
             }
-            let slideID = IWAArchive.objects(in: stream)
-                .first { $0.type == Self.slideArchiveType }?.identifier ?? 0
-            slides.append((component.name, slideID, Self.normalize(IWAArchive.text(in: stream))))
+            let objects = IWAArchive.objects(in: stream)
+            let slideID = objects.first { $0.type == Self.slideArchiveType }?.identifier ?? 0
+            slides.append((component.name, slideID, Self.normalize(IWAArchive.text(from: objects))))
         }
 
         // Order by the document's slide tree (authoritative); fall back to
