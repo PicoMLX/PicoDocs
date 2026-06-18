@@ -84,6 +84,10 @@ Refer to the [example app](PicoDocsExample/) for detailed guidance.
 
 Create a PR to include your app here.
 
+## Known Limitations
+
+- **iWork table positioning**: Tables in Pages and Keynote documents are extracted and appended after the document body rather than placed inline at their original position in the text. Restoring inline table placement is planned for a future release.
+
 ## License
 
 PicoDocs is released under the MIT license.
