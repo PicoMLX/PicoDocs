@@ -66,11 +66,12 @@ enum IWATable {
 
     /// Markdown for every reconstructed table reachable from the given slide
     /// objects, in slide-then-discovery order (deduped). Used by Keynote to append
-    /// only tables that belong to real slides: a theme/master placeholder table,
-    /// whose Tile/DataList objects live in shared streams (not master-named
-    /// components), isn't reachable from any real slide and so is excluded —
-    /// filtering by the object graph rather than by component filename.
-    static func tablesReachableFromSlides(slideIDs: [UInt64], in streams: [[UInt8]]) -> [String] {
+    /// only tables that belong to real slides. `blocked` holds master/template
+    /// object ids the walk must not descend into: a real slide references its
+    /// template directly, so without that block its placeholder tables (which live
+    /// in shared streams, not master-named components) would be pulled in.
+    static func tablesReachableFromSlides(slideIDs: [UInt64], in streams: [[UInt8]],
+                                          excludingSubgraphs blocked: Set<UInt64>) -> [String] {
         let objects = buildObjects(streams)
         let tableMarkdown = reconstructTables(objects)
         guard !tableMarkdown.isEmpty else { return [] }
@@ -79,7 +80,7 @@ enum IWATable {
         var result: [String] = []
         var seen = Set<UInt64>()
         for slideID in slideIDs {
-            for tile in reachableTiles(from: slideID, objects: objects, tiles: tiles)
+            for tile in reachableTiles(from: slideID, objects: objects, tiles: tiles, blocked: blocked)
             where seen.insert(tile).inserted {
                 if let markdown = tableMarkdown[tile] { result.append(markdown) }
             }
@@ -89,11 +90,12 @@ enum IWATable {
 
     /// Bounded breadth-first walk from a root object collecting every
     /// reconstructed table's tile reachable from it (a slide → its drawables →
-    /// TableInfo → model → tile), in discovery order. Depth-bounded so the walk
-    /// stays within a slide's own content subgraph rather than fanning out through
-    /// shared objects to unrelated tables.
+    /// TableInfo → model → tile), in discovery order. References in `blocked`
+    /// (master/template objects) are not traversed, so a slide can't reach its
+    /// template's tables. Depth-bounded so the walk stays within a slide's own
+    /// content subgraph rather than fanning out through shared objects.
     private static func reachableTiles(from root: UInt64, objects: [UInt64: IWAArchive.Object],
-                                       tiles: Set<UInt64>) -> [UInt64] {
+                                       tiles: Set<UInt64>, blocked: Set<UInt64>) -> [UInt64] {
         var frontier = [root]
         var visited: Set<UInt64> = [root]
         var found: [UInt64] = []
@@ -101,7 +103,7 @@ enum IWATable {
             var next: [UInt64] = []
             for id in frontier {
                 guard let object = objects[id] else { continue }
-                for reference in object.references {
+                for reference in object.references where !blocked.contains(reference) {
                     if tiles.contains(reference), !found.contains(reference) { found.append(reference) }
                     if visited.insert(reference).inserted { next.append(reference) }
                 }
