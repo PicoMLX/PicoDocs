@@ -43,28 +43,34 @@ public struct KeynoteConverter: DocumentConverter {
             throw PicoDocsError.documentTypeNotSupported
         }
 
-        // Decompress each slide once; capture its KN.SlideArchive id (to resolve
-        // deck order from the document's slide tree) and its body text (kind == 0;
-        // presenter notes are kind 4 and so already excluded).
-        var slides: [(name: String, id: UInt64, text: String)] = []
-        for component in components where Self.isSlide(component.name) {
+        // Decompress every component once and reuse the streams throughout. A
+        // slide's stream is primary content, so its failure is corruption;
+        // auxiliary streams are skipped leniently.
+        var streams: [(name: String, stream: [UInt8])] = []
+        for component in components {
             try Task.checkCancellation()
-            let stream: [UInt8]
             do {
-                stream = try Snappy.decompressIWA(component.bytes)
+                streams.append((component.name, try Snappy.decompressIWA(component.bytes)))
             } catch {
-                // A slide's stream is primary content: a decompression failure is
-                // corruption, not an empty slide.
-                throw PicoDocsError.fileCorrupted
+                if Self.isSlide(component.name) { throw PicoDocsError.fileCorrupted }
             }
-            let objects = IWAArchive.objects(in: stream)
+        }
+
+        // Per-slide KN.SlideArchive id (to resolve deck order from the document's
+        // slide tree) and body text (kind == 0; presenter notes are kind 4 and so
+        // already excluded).
+        var slides: [(name: String, id: UInt64, text: String)] = []
+        for entry in streams where Self.isSlide(entry.name) {
+            try Task.checkCancellation()
+            let objects = IWAArchive.objects(in: entry.stream)
             let slideID = objects.first { $0.type == Self.slideArchiveType }?.identifier ?? 0
-            slides.append((component.name, slideID, Self.normalize(IWAArchive.text(from: objects))))
+            slides.append((entry.name, slideID, Self.normalize(IWAArchive.text(from: objects))))
         }
 
         // Order by the document's slide tree (authoritative); fall back to
         // slide-archive id, then filename, when it can't be resolved.
-        let deck = Self.deckOrder(components: components, slideIDs: Set(slides.map(\.id)))
+        let documentStream = streams.first { $0.name.hasSuffix("Document.iwa") }?.stream
+        let deck = Self.deckOrder(documentStream: documentStream, slideIDs: Set(slides.map(\.id)))
         let rank = Dictionary(deck.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
         let ordered = slides.sorted { lhs, rhs in
             let lr = rank[lhs.id] ?? Int.max
@@ -79,23 +85,17 @@ public struct KeynoteConverter: DocumentConverter {
             return lhs.name < rhs.name
         }
 
-        // Decompress every component once and note master/template object ids, so
-        // the table reachability walk can avoid descending into theme subgraphs.
-        var deckStreams: [[UInt8]] = []
+        // Master/template object ids, so the table reachability walk can avoid
+        // descending into theme subgraphs.
         var masterObjectIDs: Set<UInt64> = []
-        for component in components {
-            try Task.checkCancellation()
-            guard let stream = try? Snappy.decompressIWA(component.bytes) else { continue }
-            deckStreams.append(stream)
-            if Self.isMaster(component.name) {
-                for object in IWAArchive.objects(in: stream) { masterObjectIDs.insert(object.identifier) }
-            }
+        for entry in streams where Self.isMaster(entry.name) {
+            for object in IWAArchive.objects(in: entry.stream) { masterObjectIDs.insert(object.identifier) }
         }
         // Tables grouped by the slide that owns them (reachable from the slide
         // object, not from master/template subgraphs), so each renders right after
         // its slide rather than appended at the end of the deck.
         let tablesForSlide = IWATable.tablesBySlide(
-            slideIDs: ordered.map(\.id), in: deckStreams, excludingSubgraphs: masterObjectIDs
+            slideIDs: ordered.map(\.id), in: streams.map(\.stream), excludingSubgraphs: masterObjectIDs
         )
 
         var sections: [DocumentSection] = []
@@ -128,10 +128,8 @@ public struct KeynoteConverter: DocumentConverter {
         // nothing.
         if sections.isEmpty {
             var pieces: [String] = []
-            for component in components.filter({ !Self.isMaster($0.name) }).sorted(by: { $0.name < $1.name }) {
-                try Task.checkCancellation()
-                guard let stream = try? Snappy.decompressIWA(component.bytes) else { continue }
-                let text = IWAArchive.text(in: stream)
+            for entry in streams.filter({ !Self.isMaster($0.name) }).sorted(by: { $0.name < $1.name }) {
+                let text = IWAArchive.text(in: entry.stream)
                 if !text.isEmpty { pieces.append(text) }
             }
             let cleaned = Self.normalize(pieces.joined(separator: "\n\n"))
@@ -178,11 +176,9 @@ public struct KeynoteConverter: DocumentConverter {
     /// falls back to slide-id / filename order). Structural — it identifies the
     /// tree and nodes via the reference graph rather than hard-coding their
     /// message types; only the slide-archive type above is fixed.
-    private static func deckOrder(components: [Component], slideIDs: Set<UInt64>) -> [UInt64] {
-        guard !slideIDs.isEmpty,
-              let doc = components.first(where: { $0.name.hasSuffix("Document.iwa") }),
-              let stream = try? Snappy.decompressIWA(doc.bytes) else { return [] }
-        let objects = IWAArchive.objects(in: stream)
+    private static func deckOrder(documentStream: [UInt8]?, slideIDs: Set<UInt64>) -> [UInt64] {
+        guard !slideIDs.isEmpty, let documentStream else { return [] }
+        let objects = IWAArchive.objects(in: documentStream)
         // A slide-tree node references exactly one slide; map node id -> slide id.
         var nodeToSlide: [UInt64: UInt64] = [:]
         for object in objects {
