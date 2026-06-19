@@ -99,6 +99,7 @@ public struct KeynoteConverter: DocumentConverter {
         )
 
         var sections: [DocumentSection] = []
+        var emittedSlideText = false
         for (index, slide) in ordered.enumerated() {
             // slideNumber is the deck position, so skipping an empty slide leaves a
             // gap rather than renumbering the slides after it. A slide's tables are
@@ -112,6 +113,7 @@ public struct KeynoteConverter: DocumentConverter {
                     sourcePath: slide.name,
                     slideNumber: index + 1
                 ))
+                emittedSlideText = true
             }
             for markdown in slideTables {
                 sections.append(DocumentSection(
@@ -123,17 +125,18 @@ public struct KeynoteConverter: DocumentConverter {
             }
         }
 
-        // Fallback: no per-slide content found (unexpected layout) — gather body
-        // text from all non-master components as a single section rather than emit
-        // nothing.
-        if sections.isEmpty {
+        // Fallback: no per-slide *text* found (unexpected layout) — recover body
+        // text from the non-master components. Gated on whether slide text was
+        // emitted, not on `sections`, so a deck that yielded only tables still
+        // recovers its text; the recovered body leads, ahead of any table sections.
+        if !emittedSlideText {
             var pieces: [String] = []
             for entry in streams.filter({ !Self.isMaster($0.name) }).sorted(by: { $0.name < $1.name }) {
                 let text = IWAArchive.text(in: entry.stream)
                 if !text.isEmpty { pieces.append(text) }
             }
             let cleaned = Self.normalize(pieces.joined(separator: "\n\n"))
-            if !cleaned.isEmpty { sections = [DocumentSection(kind: .body, markdown: cleaned)] }
+            if !cleaned.isEmpty { sections.insert(DocumentSection(kind: .body, markdown: cleaned), at: 0) }
         }
 
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
