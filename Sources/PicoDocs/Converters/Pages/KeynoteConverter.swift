@@ -107,17 +107,18 @@ public struct KeynoteConverter: DocumentConverter {
             if !cleaned.isEmpty { sections = [DocumentSection(kind: .body, markdown: cleaned)] }
         }
 
-        // Reconstruct tables from the deck's slide and shared components (table
-        // cells live in separate Tile/DataList objects) and append them after the
-        // slides. Master/template components are excluded — as for slide text — so
-        // theme placeholder tables don't leak in. Per-slide inline placement is a
+        // Reconstruct tables and append them after the slides, in deck order.
+        // Tables are filtered by reachability from the ordered slide objects: a
+        // theme/master placeholder table (whose Tile/DataList objects live in
+        // shared streams, not master-named components) isn't reachable from any
+        // real slide, so it can't leak in. Per-slide inline placement is a
         // follow-up.
         var deckStreams: [[UInt8]] = []
-        for component in components where !Self.isMaster(component.name) {
+        for component in components {
             try Task.checkCancellation()
             if let stream = try? Snappy.decompressIWA(component.bytes) { deckStreams.append(stream) }
         }
-        for markdown in IWATable.markdownTables(from: deckStreams) {
+        for markdown in IWATable.tablesReachableFromSlides(slideIDs: ordered.map(\.id), in: deckStreams) {
             sections.append(DocumentSection(kind: .table, markdown: markdown, sourcePath: "Index/Tables"))
         }
 
