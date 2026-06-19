@@ -37,12 +37,22 @@ public enum ExportableFileType: String, Equatable, Codable, CaseIterable, Identi
         }
     }
 
-    /// Whether a built-in exporter exists for this format. iWork (Pages/Keynote)
-    /// is a research spike — writing valid iWork third-party is unsupported — so it
-    /// reports `false` and `write(...)` throws `unableToExportToRequestedFormat`.
+    /// Whether a built-in exporter exists for this format *on the current platform*.
+    /// `.rtf` is written through `NSAttributedString`, so it's only available where
+    /// AppKit/UIKit is — matching the registry, which registers the RTF exporter
+    /// under the same condition (`DocumentExporterRegistry.makeDefault`). iWork
+    /// (Pages/Keynote) is a research spike — writing valid third-party iWork is
+    /// unsupported — so it always reports `false` and `write(...)` throws
+    /// `unableToExportToRequestedFormat`.
     public var isImplemented: Bool {
         switch self {
-        case .docx, .rtf, .xlsx, .pptx: return true
+        case .docx, .xlsx, .pptx: return true
+        case .rtf:
+            #if canImport(AppKit) || canImport(UIKit)
+            return true
+            #else
+            return false
+            #endif
         case .pages, .keynote: return false
         }
     }

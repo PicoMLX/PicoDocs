@@ -122,20 +122,31 @@ public enum PicoDocsEngine {
     /// Appends a `.body` section with an inline `![alt](name)` reference for each
     /// `.image` carrier, so an image-only result renders its images instead of a
     /// blank document. `name` mirrors the exporters' image-index key (the source
-    /// path's basename, falling back to the title), so each reference resolves to
-    /// the carrier's bytes.
+    /// path's basename, falling back to the title); a carrier with neither is given
+    /// a generated `image-<n>.<ext>` name (extension from its MIME), assigned as its
+    /// `sourcePath` so the exporter's index derives the identical lookup key — so even
+    /// an unnamed, MIME-only carrier is embedded rather than silently dropped.
     private static func withSynthesizedImageReferences(_ result: ConverterResult) -> ConverterResult {
-        let refs: [DocumentSection] = result.sections.compactMap { section in
-            guard section.kind == .image else { return nil }
-            let name = (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
-            guard let name, !name.isEmpty else { return nil }
+        var sections = result.sections
+        var refs: [DocumentSection] = []
+        var generatedCount = 0
+        for index in sections.indices where sections[index].kind == .image {
+            let section = sections[index]
+            var name = (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
+            if name?.isEmpty ?? true {
+                generatedCount += 1
+                let ext = OfficeMediaType.fileExtension(forMIME: section.metadata["mimeType"] ?? "")
+                let generated = "image-\(generatedCount).\(ext)"
+                sections[index].sourcePath = generated
+                name = generated
+            }
+            guard let name, !name.isEmpty else { continue }
             let alt = section.title ?? name
-            return DocumentSection(kind: .body, markdown: "![\(alt)](\(name))")
+            refs.append(DocumentSection(kind: .body, markdown: "![\(alt)](\(name))"))
         }
         guard !refs.isEmpty else { return result }
-        var copy = result
-        copy.sections.append(contentsOf: refs)
-        return copy
+        sections.append(contentsOf: refs)
+        return ConverterResult(title: result.title, author: result.author, cover: result.cover, sections: sections)
     }
 
     /// Convenience: serialize a raw Markdown string into an office file's bytes.

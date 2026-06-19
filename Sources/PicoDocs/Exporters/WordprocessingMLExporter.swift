@@ -42,18 +42,74 @@ public struct WordprocessingMLExporter: DocumentExporter {
         return try pkg.data()
     }
 
-    // MARK: - Image index (basename -> bytes), from the .image sections
+    // MARK: - Image index, from the .image sections
 
-    private static func imageIndex(_ sections: [DocumentSection]) -> [String: Data] {
-        var index: [String: Data] = [:]
+    /// A distinct embedded image: its bytes and the unique media part filename it
+    /// will be written under (`word/media/<mediaFilename>`).
+    private struct IndexedImage {
+        let data: Data
+        let mediaFilename: String
+    }
+
+    /// Resolves an inline image reference to an embedded carrier. Keyed by full
+    /// source path *and* by basename — the basename map only when unambiguous — so
+    /// two carriers that share a basename (`charts/logo.png` vs `headers/logo.png`)
+    /// stay distinct instead of one overwriting the other.
+    private struct ImageIndex {
+        let byPath: [String: IndexedImage]
+        let byBasename: [String: IndexedImage]
+
+        func lookup(_ source: String) -> IndexedImage? {
+            if let image = byPath[source] { return image }
+            return byBasename[(source as NSString).lastPathComponent]
+        }
+    }
+
+    private static func imageIndex(_ sections: [DocumentSection]) -> ImageIndex {
+        var byPath: [String: IndexedImage] = [:]
+        var byBasename: [String: IndexedImage] = [:]
+        var basenameCounts: [String: Int] = [:]
+        var usedFilenames: Set<String> = []
+
         for section in sections where section.kind == .image {
             guard let base64 = section.metadata["base64"], !base64.isEmpty,
                   let data = Data(base64Encoded: base64) else { continue }
+
+            // The carrier's display name (basename of the source path, else title).
             let name = (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
-            guard let name, !name.isEmpty else { continue }
-            index[name] = data
+            // Pick a stem + extension; fall back to the declared MIME for the
+            // extension so a name like "logo" (or no name) still gets a type Office
+            // recognizes rather than `.bin`/octet-stream.
+            let mime = section.metadata["mimeType"]
+            var ext = (name as NSString?)?.pathExtension.lowercased() ?? ""
+            if ext.isEmpty { ext = OfficeMediaType.fileExtension(forMIME: mime ?? "") }
+            let stem = (name as NSString?)?.deletingPathExtension ?? ""
+
+            // Allocate a unique media filename (suffix on basename collisions) so
+            // distinct images never share one `word/media/<file>` part.
+            let base = stem.isEmpty ? "image\(usedFilenames.count + 1)" : stem
+            var mediaFilename = "\(base).\(ext)"
+            var n = 2
+            while usedFilenames.contains(mediaFilename) {
+                mediaFilename = "\(base)-\(n).\(ext)"
+                n += 1
+            }
+            usedFilenames.insert(mediaFilename)
+
+            let image = IndexedImage(data: data, mediaFilename: mediaFilename)
+            if let path = section.sourcePath, !path.isEmpty {
+                byPath[path] = image
+            }
+            if let name, !name.isEmpty {
+                basenameCounts[name, default: 0] += 1
+                byBasename[name] = image
+            }
         }
-        return index
+        // Drop ambiguous basenames; those references must use the full path.
+        for (name, count) in basenameCounts where count > 1 {
+            byBasename.removeValue(forKey: name)
+        }
+        return ImageIndex(byPath: byPath, byBasename: byBasename)
     }
 
     // MARK: - Builder
@@ -72,7 +128,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         /// Numbering is needed when any list (bullet or ordered) was emitted.
         var usedNumbering: Bool { usedBullet || !orderedNumIds.isEmpty }
 
-        private let images: [String: Data]
+        private let images: ImageIndex
         private var relCounter = 0
         private var numberingRelAdded = false
         private var drawingCounter = 0
@@ -81,7 +137,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
         struct Relationship { let id: String; let type: String; let target: String; let external: Bool }
 
-        init(images: [String: Data]) { self.images = images }
+        init(images: ImageIndex) { self.images = images }
 
         private func nextRelID() -> String { relCounter += 1; return "rId\(relCounter)" }
 
@@ -191,8 +247,8 @@ public struct WordprocessingMLExporter: DocumentExporter {
         /// reference isn't a known image (e.g. an external URL), so the caller falls
         /// back to alt text.
         ///
-        /// - Looks the bytes up by the reference, falling back to its basename when
-        ///   the source carries a path prefix (e.g. `word/media/pic.png`).
+        /// - Resolves the carrier via the index (full path, else unambiguous basename),
+        ///   which already assigned it a unique, correctly-typed media filename.
         /// - Packages and relates each distinct media file exactly once, reusing the
         ///   relationship for repeated references so the OOXML package can't end up
         ///   with duplicate `word/media/<file>` parts.
@@ -200,16 +256,9 @@ public struct WordprocessingMLExporter: DocumentExporter {
         ///   `WordConverter.imageAltText` reads first, so meaningful alt text survives
         ///   the round-trip instead of collapsing to the filename.
         private func imageRun(alt: String, source: String) -> String? {
-            let basename = (source as NSString).lastPathComponent
-            let lookupKey = images[source] != nil ? source : basename
-            guard let data = images[lookupKey] else { return nil }
-
-            var filename = basename.isEmpty ? source : basename
-            var ext = (filename as NSString).pathExtension.lowercased()
-            if ext.isEmpty {
-                ext = OfficeMediaType.fileExtension(forMIME: OfficeMediaType.mimeType(forExtension: ext))
-                filename += ".\(ext)"
-            }
+            guard let image = images.lookup(source) else { return nil }
+            let filename = image.mediaFilename
+            let ext = (filename as NSString).pathExtension.lowercased()
 
             // One media part + one relationship per distinct file; reuse for repeats.
             let relID: String
@@ -217,7 +266,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 relID = existing
             } else {
                 mediaExtensions.insert(ext)
-                media.append((filename, data))
+                media.append((filename, image.data))
                 relID = nextRelID()
                 relationships.append(Relationship(
                     id: relID,
@@ -231,7 +280,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             // Each drawing needs a unique non-visual id, even when reusing media.
             drawingCounter += 1
             let docPrID = drawingCounter
-            let name = OOXMLPackageWriter.escapeAttribute(filename.isEmpty ? "image" : filename)
+            let name = OOXMLPackageWriter.escapeAttribute(filename)
             let descr = alt.isEmpty ? "" : " descr=\"\(OOXMLPackageWriter.escapeAttribute(alt))\""
             // Fixed display size (EMU); WordConverter ignores extents on read.
             let cx = 4572000, cy = 3429000

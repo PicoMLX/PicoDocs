@@ -54,8 +54,19 @@ public struct XLSXExporter: DocumentExporter {
         if let csv = section.metadata["csv"], !csv.isEmpty {
             return parseCSV(csv)
         }
+        var blocks = MarkdownBlockParser.parse(section.markdown)
+        // `SpreadsheetConverter` prefixes each sheet's Markdown with `## <sheetName>`
+        // while also carrying the name in `section.sheetName`. Without this guard that
+        // redundant title would become cell A1 and push the real data down a row,
+        // corrupting an XLSX round-trip. Drop only a *leading* heading that echoes the
+        // sheet name/title; genuine in-body headings stay as single-cell rows.
+        if case .heading(_, let text)? = blocks.first,
+           let title = section.sheetName ?? section.title,
+           plain(text) == title {
+            blocks.removeFirst()
+        }
         var rows: [[String]] = []
-        for block in MarkdownBlockParser.parse(section.markdown) {
+        for block in blocks {
             switch block {
             case .table(let tableRows):
                 rows += tableRows

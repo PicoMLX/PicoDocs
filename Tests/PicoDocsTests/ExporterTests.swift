@@ -201,6 +201,72 @@ struct ExporterTests {
             try PicoDocsEngine.write(markdown: "# Hi", to: .pages)
         }
     }
+
+    @Test("RTF availability reflects the current platform")
+    func rtfImplementedMatchesPlatform() {
+        #if canImport(AppKit) || canImport(UIKit)
+        #expect(ExportableFileType.rtf.isImplemented)
+        #else
+        // No AppKit/UIKit: the RTF exporter isn't registered, so don't claim support.
+        #expect(!ExportableFileType.rtf.isImplemented)
+        #endif
+        #expect(ExportableFileType.docx.isImplemented)
+        #expect(ExportableFileType.xlsx.isImplemented)
+    }
+
+    // MARK: - Regression: spreadsheet title row, image identity, MIME extensions
+
+    @Test("XLSX doesn't turn a sheet's title heading into a data row")
+    func xlsxSkipsSheetTitleHeading() throws {
+        // Mirror SpreadsheetConverter output: a `## <name>` heading + table, with the
+        // name also carried in `sheetName` (and no lossless csv metadata).
+        let section = DocumentSection(
+            title: "People",
+            kind: .sheet,
+            markdown: """
+            ## People
+
+            | Name | Age |
+            | --- | --- |
+            | Alice | 30 |
+            """,
+            sheetName: "People"
+        )
+        let data = try PicoDocsEngine.write(ConverterResult(sections: [section]), to: .xlsx)
+        let sheet = try #require(text(data, "xl/worksheets/sheet1.xml"))
+        // A1 must be the real header, not the sheet name shifted into the grid.
+        #expect(sheet.contains("Name"))
+        #expect(!sheet.contains("People"))
+    }
+
+    @Test("DOCX keeps same-basename images from different paths distinct")
+    func docxDistinctSameBasename() throws {
+        let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        let body = DocumentSection(kind: .body, markdown: "![one](charts/logo.png)\n\n![two](headers/logo.png)")
+        let img1 = DocumentSection(
+            title: "logo.png", kind: .image, markdown: "![logo](charts/logo.png)",
+            sourcePath: "charts/logo.png", metadata: ["mimeType": "image/png", "base64": pngBase64]
+        )
+        let img2 = DocumentSection(
+            title: "logo.png", kind: .image, markdown: "![logo](headers/logo.png)",
+            sourcePath: "headers/logo.png", metadata: ["mimeType": "image/png", "base64": pngBase64]
+        )
+        let data = try PicoDocsEngine.write(ConverterResult(sections: [body, img1, img2]), to: .docx)
+        // Two distinct media parts, not one collapsed by shared basename.
+        #expect(entry(data, "word/media/logo.png") != nil)
+        #expect(entry(data, "word/media/logo-2.png") != nil)
+    }
+
+    @Test("DOCX embeds an unnamed MIME-only image with the right extension")
+    func docxUnnamedMimeOnlyImage() throws {
+        let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        // No sourcePath, no title — only bytes + MIME.
+        let image = DocumentSection(kind: .image, markdown: "", metadata: ["mimeType": "image/png", "base64": pngBase64])
+        let data = try PicoDocsEngine.write(ConverterResult(sections: [image]), to: .docx)
+        // Embedded with a PNG extension, not dropped or stored as octet-stream `.bin`.
+        #expect(entry(data, "word/media/image-1.png") != nil)
+        #expect(entry(data, "word/media/image-1.bin") == nil)
+    }
 }
 
 @Suite("Markdown inline IR")
