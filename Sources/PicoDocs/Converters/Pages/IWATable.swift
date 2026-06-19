@@ -64,26 +64,29 @@ enum IWATable {
         return byTile.keys.sorted().compactMap { byTile[$0] }
     }
 
-    /// Markdown for every reconstructed table reachable from the given slide
-    /// objects, in slide-then-discovery order (deduped). Used by Keynote to append
-    /// only tables that belong to real slides. `blocked` holds master/template
-    /// object ids the walk must not descend into: a real slide references its
-    /// template directly, so without that block its placeholder tables (which live
-    /// in shared streams, not master-named components) would be pulled in.
-    static func tablesReachableFromSlides(slideIDs: [UInt64], in streams: [[UInt8]],
-                                          excludingSubgraphs blocked: Set<UInt64>) -> [String] {
+    /// Reconstructed tables grouped by the slide that owns them: a table's tile
+    /// must be reachable from that slide object, without descending into the
+    /// master/template subgraphs in `blocked` (a real slide references its
+    /// template directly, so otherwise its placeholder tables — which live in
+    /// shared streams, not master-named components — would be pulled in). A tile is
+    /// attributed to the first slide, in the given order, that reaches it. Lets
+    /// Keynote place each table with its slide instead of appending all at the end.
+    static func tablesBySlide(slideIDs: [UInt64], in streams: [[UInt8]],
+                              excludingSubgraphs blocked: Set<UInt64>) -> [UInt64: [String]] {
         let objects = buildObjects(streams)
         let tableMarkdown = reconstructTables(objects)
-        guard !tableMarkdown.isEmpty else { return [] }
+        guard !tableMarkdown.isEmpty else { return [:] }
         let tiles = Set(tableMarkdown.keys)
 
-        var result: [String] = []
-        var seen = Set<UInt64>()
+        var result: [UInt64: [String]] = [:]
+        var claimed = Set<UInt64>()
         for slideID in slideIDs {
+            var markdowns: [String] = []
             for tile in reachableTiles(from: slideID, objects: objects, tiles: tiles, blocked: blocked)
-            where seen.insert(tile).inserted {
-                if let markdown = tableMarkdown[tile] { result.append(markdown) }
+            where claimed.insert(tile).inserted {
+                if let markdown = tableMarkdown[tile] { markdowns.append(markdown) }
             }
+            if !markdowns.isEmpty { result[slideID] = markdowns }
         }
         return result
     }

@@ -15,9 +15,9 @@
 //  slide tree. Master/template slides are excluded, and presenter notes (`kind`
 //  4) are excluded by the `kind == 0` filter — both confirmed against a real
 //  `.key` (kinds: 0=body, 1=header/footer, 4=note, 5=cell). Tables are
-//  reconstructed (see IWATable) and appended after the slides; per-slide
-//  title-vs-body structure, inline images, and per-slide table placement remain
-//  follow-ups.
+//  reconstructed (see IWATable) and placed with the slide that owns them (by
+//  reachability from the slide object); per-slide title-vs-body structure and
+//  inline images remain follow-ups.
 //
 //  NOTE: `readEntry` / `normalize` mirror PagesConverter; a shared iWork helper
 //  is a planned cleanup once both converters have settled.
@@ -43,28 +43,34 @@ public struct KeynoteConverter: DocumentConverter {
             throw PicoDocsError.documentTypeNotSupported
         }
 
-        // Decompress each slide once; capture its KN.SlideArchive id (to resolve
-        // deck order from the document's slide tree) and its body text (kind == 0;
-        // presenter notes are kind 4 and so already excluded).
-        var slides: [(name: String, id: UInt64, text: String)] = []
-        for component in components where Self.isSlide(component.name) {
+        // Decompress every component once and reuse the streams throughout. A
+        // slide's stream is primary content, so its failure is corruption;
+        // auxiliary streams are skipped leniently.
+        var streams: [(name: String, stream: [UInt8])] = []
+        for component in components {
             try Task.checkCancellation()
-            let stream: [UInt8]
             do {
-                stream = try Snappy.decompressIWA(component.bytes)
+                streams.append((component.name, try Snappy.decompressIWA(component.bytes)))
             } catch {
-                // A slide's stream is primary content: a decompression failure is
-                // corruption, not an empty slide.
-                throw PicoDocsError.fileCorrupted
+                if Self.isSlide(component.name) { throw PicoDocsError.fileCorrupted }
             }
-            let objects = IWAArchive.objects(in: stream)
+        }
+
+        // Per-slide KN.SlideArchive id (to resolve deck order from the document's
+        // slide tree) and body text (kind == 0; presenter notes are kind 4 and so
+        // already excluded).
+        var slides: [(name: String, id: UInt64, text: String)] = []
+        for entry in streams where Self.isSlide(entry.name) {
+            try Task.checkCancellation()
+            let objects = IWAArchive.objects(in: entry.stream)
             let slideID = objects.first { $0.type == Self.slideArchiveType }?.identifier ?? 0
-            slides.append((component.name, slideID, Self.normalize(IWAArchive.text(from: objects))))
+            slides.append((entry.name, slideID, Self.normalize(IWAArchive.text(from: objects))))
         }
 
         // Order by the document's slide tree (authoritative); fall back to
         // slide-archive id, then filename, when it can't be resolved.
-        let deck = Self.deckOrder(components: components, slideIDs: Set(slides.map(\.id)))
+        let documentStream = streams.first { $0.name.hasSuffix("Document.iwa") }?.stream
+        let deck = Self.deckOrder(documentStream: documentStream, slideIDs: Set(slides.map(\.id)))
         let rank = Dictionary(deck.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
         let ordered = slides.sorted { lhs, rhs in
             let lr = rank[lhs.id] ?? Int.max
@@ -79,54 +85,58 @@ public struct KeynoteConverter: DocumentConverter {
             return lhs.name < rhs.name
         }
 
+        // Master/template object ids, so the table reachability walk can avoid
+        // descending into theme subgraphs.
+        var masterObjectIDs: Set<UInt64> = []
+        for entry in streams where Self.isMaster(entry.name) {
+            for object in IWAArchive.objects(in: entry.stream) { masterObjectIDs.insert(object.identifier) }
+        }
+        // Tables grouped by the slide that owns them (reachable from the slide
+        // object, not from master/template subgraphs), so each renders right after
+        // its slide rather than appended at the end of the deck.
+        let tablesForSlide = IWATable.tablesBySlide(
+            slideIDs: ordered.map(\.id), in: streams.map(\.stream), excludingSubgraphs: masterObjectIDs
+        )
+
         var sections: [DocumentSection] = []
+        var emittedSlideText = false
         for (index, slide) in ordered.enumerated() {
             // slideNumber is the deck position, so skipping an empty slide leaves a
-            // gap rather than renumbering the slides after it.
-            guard !slide.text.isEmpty else { continue }
-            sections.append(DocumentSection(
-                kind: .slide,
-                markdown: slide.text,
-                sourcePath: slide.name,
-                slideNumber: index + 1
-            ))
+            // gap rather than renumbering the slides after it. A slide's tables are
+            // emitted right after its text, sharing the slide number.
+            let slideTables = tablesForSlide[slide.id] ?? []
+            guard !slide.text.isEmpty || !slideTables.isEmpty else { continue }
+            if !slide.text.isEmpty {
+                sections.append(DocumentSection(
+                    kind: .slide,
+                    markdown: slide.text,
+                    sourcePath: slide.name,
+                    slideNumber: index + 1
+                ))
+                emittedSlideText = true
+            }
+            for markdown in slideTables {
+                sections.append(DocumentSection(
+                    kind: .table,
+                    markdown: markdown,
+                    sourcePath: slide.name,
+                    slideNumber: index + 1
+                ))
+            }
         }
 
-        // Fallback: no per-slide text found (unexpected layout) — gather body text
-        // from all non-master components as a single section rather than emit
-        // nothing.
-        if sections.isEmpty {
+        // Fallback: no per-slide *text* found (unexpected layout) — recover body
+        // text from the non-master components. Gated on whether slide text was
+        // emitted, not on `sections`, so a deck that yielded only tables still
+        // recovers its text; the recovered body leads, ahead of any table sections.
+        if !emittedSlideText {
             var pieces: [String] = []
-            for component in components.filter({ !Self.isMaster($0.name) }).sorted(by: { $0.name < $1.name }) {
-                try Task.checkCancellation()
-                guard let stream = try? Snappy.decompressIWA(component.bytes) else { continue }
-                let text = IWAArchive.text(in: stream)
+            for entry in streams.filter({ !Self.isMaster($0.name) }).sorted(by: { $0.name < $1.name }) {
+                let text = IWAArchive.text(in: entry.stream)
                 if !text.isEmpty { pieces.append(text) }
             }
             let cleaned = Self.normalize(pieces.joined(separator: "\n\n"))
-            if !cleaned.isEmpty { sections = [DocumentSection(kind: .body, markdown: cleaned)] }
-        }
-
-        // Reconstruct tables and append them after the slides, in deck order,
-        // filtered by reachability from the ordered slide objects — without
-        // descending into master/template subgraphs (a real slide references its
-        // template, which may carry placeholder tables). Per-slide inline
-        // placement is a follow-up.
-        var deckStreams: [[UInt8]] = []
-        var masterObjectIDs: Set<UInt64> = []
-        for component in components {
-            try Task.checkCancellation()
-            guard let stream = try? Snappy.decompressIWA(component.bytes) else { continue }
-            deckStreams.append(stream)
-            if Self.isMaster(component.name) {
-                for object in IWAArchive.objects(in: stream) { masterObjectIDs.insert(object.identifier) }
-            }
-        }
-        let deckTables = IWATable.tablesReachableFromSlides(
-            slideIDs: ordered.map(\.id), in: deckStreams, excludingSubgraphs: masterObjectIDs
-        )
-        for markdown in deckTables {
-            sections.append(DocumentSection(kind: .table, markdown: markdown, sourcePath: "Index/Tables"))
+            if !cleaned.isEmpty { sections.insert(DocumentSection(kind: .body, markdown: cleaned), at: 0) }
         }
 
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
@@ -169,11 +179,9 @@ public struct KeynoteConverter: DocumentConverter {
     /// falls back to slide-id / filename order). Structural — it identifies the
     /// tree and nodes via the reference graph rather than hard-coding their
     /// message types; only the slide-archive type above is fixed.
-    private static func deckOrder(components: [Component], slideIDs: Set<UInt64>) -> [UInt64] {
-        guard !slideIDs.isEmpty,
-              let doc = components.first(where: { $0.name.hasSuffix("Document.iwa") }),
-              let stream = try? Snappy.decompressIWA(doc.bytes) else { return [] }
-        let objects = IWAArchive.objects(in: stream)
+    private static func deckOrder(documentStream: [UInt8]?, slideIDs: Set<UInt64>) -> [UInt64] {
+        guard !slideIDs.isEmpty, let documentStream else { return [] }
+        let objects = IWAArchive.objects(in: documentStream)
         // A slide-tree node references exactly one slide; map node id -> slide id.
         var nodeToSlide: [UInt64: UInt64] = [:]
         for object in objects {
