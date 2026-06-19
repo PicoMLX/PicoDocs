@@ -86,7 +86,7 @@ Create a PR to include your app here.
 
 ## Known Limitations
 
-- **iWork tables**: Tables are reconstructed as Markdown grids — placed inline at their original position in Pages, and appended after the slides in Keynote (per-slide placement is a follow-up). Text and date cells are decoded; number, duration, and formula cells currently render as empty.
+- **iWork tables**: Tables are reconstructed as Markdown grids — placed inline at their original position in Pages, and with the slide that contains them in Keynote. Text and date cells are decoded; number, duration, and formula cells currently render as empty.
 
 ## License
 

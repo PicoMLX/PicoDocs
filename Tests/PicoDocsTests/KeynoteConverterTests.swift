@@ -150,5 +150,14 @@ struct KeynoteConverterTests {
         #expect(tables.count == 2)
         #expect(tables.contains { $0.markdown.contains("| R1C1 | R1C2 | R1C3 | R1C4 |") })
         #expect(tables.contains { $0.markdown.contains("| Item 1 | 2026-06-18 |") })
+
+        // Each table is placed with the slide that owns it (slides 4 and 5),
+        // carrying that slide's number — and interleaved, not appended at the end
+        // (a slide section follows the first table section).
+        #expect(tables.map(\.slideNumber) == [4, 5])
+        let kinds = result.sections.map(\.kind)
+        if let firstTable = kinds.firstIndex(of: .table) {
+            #expect(kinds[(firstTable + 1)...].contains(.slide))
+        }
     }
 }
