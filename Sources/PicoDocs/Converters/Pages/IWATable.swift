@@ -23,10 +23,10 @@
 //
 //  Confirmed against real `.pages` and `.key` fixtures (text + date cells).
 //
-//  Scope: text and date cells; number, duration, and formula cells aren't
+//  Scope: text, date, number, and formula-result cells; duration cells aren't
 //  decoded yet and render empty. For Pages, tables are placed inline at their
-//  attachment point (see PagesConverter); for Keynote they're appended after the
-//  slides.
+//  attachment point (see PagesConverter); for Keynote, with the slide that owns
+//  them (see KeynoteConverter).
 //
 
 import Foundation
@@ -40,12 +40,15 @@ enum IWATable {
     private static let storageType: UInt64 = 2001
     private static let tableModelTypes: Set<UInt64> = [6001, 6316]   // TST.TableModelArchive
     private static let inlineListType: UInt64 = 1        // DataList.list_type for inline cell text
-    // Cell record value-type byte (record offset 1): rich text (key → f1==8 list),
-    // inline text (key → f1==1 list), and date (double, seconds since 2001-01-01,
-    // at offset +12). Number/duration/formula cells aren't decoded yet.
+    // Cell record value-type byte (record offset 1) selects how to read offset
+    // +12: rich text key (f1==8 list), inline text key (f1==1 list), a date
+    // (double, seconds since 2001-01-01), or a number / formula result (IEEE-754
+    // decimal128). Duration cells aren't decoded yet.
     private static let richTextCell: UInt8 = 0x09
     private static let inlineTextCell: UInt8 = 0x03
     private static let dateCell: UInt8 = 0x05
+    private static let numberCell: UInt8 = 0x02
+    private static let formulaCell: UInt8 = 0x0a
 
     /// One ordered piece of a converted body — a run of text or a reconstructed
     /// table, in reading order. Text is raw; the caller normalizes it.
@@ -435,9 +438,9 @@ enum IWATable {
 
     /// The rendered text of a cell record (`05 <type> …`): rich or inline text via
     /// the string maps (key is a little-endian uint32 at +12), or a date (double,
-    /// seconds since 2001-01-01, at +12). Number/duration/formula cells aren't
-    /// decoded yet and render as "". Returns "" (a present-but-empty cell) on any
-    /// unhandled type or out-of-bounds read.
+    /// seconds since 2001-01-01, at +12), or a number / formula result (decimal128
+    /// at +12). Duration cells aren't decoded yet. Returns "" (a present-but-empty
+    /// cell) on any unhandled type or out-of-bounds read.
     private static func cellText(in buffer: [UInt8], at offset: Int,
                                  rich: [UInt32: String], inline: [UInt32: String]) -> String {
         guard offset >= 0, offset + 2 <= buffer.count, buffer[offset] == 0x05 else { return "" }
@@ -451,9 +454,51 @@ enum IWATable {
         case dateCell:
             guard let seconds = readDouble(buffer, at: offset + 12) else { return "" }
             return isoDate(seconds)
+        case numberCell, formulaCell:
+            return decimalString(in: buffer, at: offset + 12)
         default:
             return ""
         }
+    }
+
+    /// A number or formula-result cell stores its value as an IEEE-754 decimal128
+    /// (16 bytes, little-endian) at offset +12. Decodes the common case
+    /// (coefficient up to 64 bits) into a plain decimal string; returns "" for the
+    /// large-coefficient form, an out-of-range exponent, or out-of-bounds.
+    private static func decimalString(in buffer: [UInt8], at offset: Int) -> String {
+        guard offset >= 0, offset + 16 <= buffer.count else { return "" }
+        let high = buffer[offset + 15]
+        guard (high >> 5) & 0x3 != 0x3 else { return "" }     // large-coefficient form
+        let exponent = ((Int(high & 0x7F) << 7) | Int(buffer[offset + 14] >> 1)) - 6176
+        guard exponent >= -128, exponent <= 128 else { return "" }
+        // Coefficient is the low 113 bits; supported when it fits in 64 bits.
+        guard buffer[offset + 14] & 1 == 0 else { return "" }
+        for k in 8 ..< 14 where buffer[offset + k] != 0 { return "" }
+        var coefficient: UInt64 = 0
+        for k in 0 ..< 8 { coefficient |= UInt64(buffer[offset + k]) << (8 * k) }
+        return formatDecimal(negative: high & 0x80 != 0, coefficient: coefficient, exponent: exponent)
+    }
+
+    /// Formats `coefficient × 10^exponent` as a plain decimal string, trimming
+    /// trailing fractional zeros (e.g. 420×10⁻² → "4.2", 35×10⁻² → "0.35").
+    private static func formatDecimal(negative: Bool, coefficient: UInt64, exponent: Int) -> String {
+        var result: String
+        if exponent >= 0 {
+            result = String(coefficient) + String(repeating: "0", count: exponent)
+        } else {
+            var digits = String(coefficient)
+            let fractionCount = -exponent
+            if digits.count <= fractionCount {
+                digits = String(repeating: "0", count: fractionCount - digits.count + 1) + digits
+            }
+            let split = digits.index(digits.endIndex, offsetBy: -fractionCount)
+            let integerPart = String(digits[..<split])
+            var fractionPart = String(digits[split...])
+            while fractionPart.hasSuffix("0") { fractionPart.removeLast() }
+            result = fractionPart.isEmpty ? integerPart : integerPart + "." + fractionPart
+        }
+        if result.isEmpty { result = "0" }
+        return (negative && result != "0") ? "-" + result : result
     }
 
     private static func readUInt32(_ buffer: [UInt8], at offset: Int) -> UInt32? {
