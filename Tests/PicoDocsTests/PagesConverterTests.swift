@@ -121,8 +121,9 @@ struct PagesConverterTests {
         let result = try await PicoDocsEngine.convert(data: data, filename: "sample.pages")
         let tables = result.sections.filter { $0.kind == .table }
 
-        // Two content tables (5×4 and 4×6); two empty/placeholder tables are skipped.
-        #expect(tables.count == 2)
+        // Three content tables (5×4, 4×6, and the dates/formula table); empty
+        // placeholder tables are skipped.
+        #expect(tables.count == 3)
 
         // Table 1: exact header row, plus a body row exercising empty cells.
         #expect(tables.contains { $0.markdown.contains("| Feature | Expected import | Sample value | Notes |") })
@@ -132,6 +133,12 @@ struct PagesConverterTests {
         #expect(tables.contains {
             $0.markdown.contains("| Column A | Column B | Column C | Column D | Column E | Column F |")
         })
+
+        // Table 3: inline-text header (the "Date" column) and decoded date cells;
+        // numeric/formula cells aren't decoded yet and render empty.
+        #expect(tables.contains { $0.markdown.contains("| Column A | Date | Column B | Column C | Column D |") })
+        #expect(tables.contains { $0.markdown.contains("| Item 1 | 2026-06-18 |") })
+        #expect(tables.contains { $0.markdown.contains("2026-06-15") })
 
         // GitHub-flavored separator row for the four-column table.
         #expect(tables.contains { $0.markdown.contains("| --- | --- | --- | --- |") })

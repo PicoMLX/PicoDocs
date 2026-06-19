@@ -121,17 +121,19 @@ struct KeynoteConverterTests {
         let result = try await PicoDocsEngine.convert(data: data, filename: "sample.key")
 
         let slides = result.sections.filter { $0.kind == .slide }
-        #expect(slides.count == 3)
-        #expect(slides.map(\.slideNumber) == [1, 2, 3])
+        #expect(slides.count == 5)
+        #expect(slides.map(\.slideNumber) == [1, 2, 3, 4, 5])
 
         // Deck order comes from Document.iwa's slide tree, NOT the filenames:
         // Slide.iwa ("The problem") is slide 2, not last. (Filename order would
-        // put it last and swap slides 2/3.)
+        // put it last and swap slides 2/3.) The two table slides follow.
         #expect(slides[0].markdown.contains("The Spoon"))
         #expect(slides[0].markdown.contains("Ronald Mannak"))
         #expect(slides[1].markdown.contains("The problem"))
         #expect(slides[1].markdown.contains("Every mug has a spoon-shaped absence"))
         #expect(slides[2].markdown.contains("The data"))
+        #expect(slides[3].markdown.contains("Table 1"))
+        #expect(slides[4].markdown.contains("Table 2"))
 
         // Presenter notes are kind 4 → excluded by the kind==0 filter; they must
         // not leak into slide text.
@@ -141,5 +143,12 @@ struct KeynoteConverterTests {
 
         // Object-replacement image placeholders are stripped.
         #expect(!markdown.unicodeScalars.contains("\u{FFFC}"))
+
+        // Tables are reconstructed and appended after the slides — text cells via
+        // the inline-text store, dates decoded from the cell record.
+        let tables = result.sections.filter { $0.kind == .table }
+        #expect(tables.count == 2)
+        #expect(tables.contains { $0.markdown.contains("| R1C1 | R1C2 | R1C3 | R1C4 |") })
+        #expect(tables.contains { $0.markdown.contains("| Item 1 | 2026-06-18 |") })
     }
 }

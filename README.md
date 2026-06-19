@@ -86,7 +86,7 @@ Create a PR to include your app here.
 
 ## Known Limitations
 
-- **iWork tables**: In Pages, tables are reconstructed and placed inline at their original position in the text (falling back to appending them after the body when their anchor can't be resolved). Non-text cells (numbers, dates, formulas) currently render as empty, and Keynote table extraction is not yet implemented.
+- **iWork tables**: Tables are reconstructed as Markdown grids — placed inline at their original position in Pages, and appended after the slides in Keynote (per-slide placement is a follow-up). Text and date cells are decoded; number, duration, and formula cells currently render as empty.
 
 ## License
 
