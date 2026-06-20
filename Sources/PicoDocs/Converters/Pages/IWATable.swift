@@ -462,31 +462,34 @@ enum IWATable {
     }
 
     /// A number or formula-result cell stores its value as an IEEE-754 decimal128
-    /// (16 bytes, little-endian) at offset +12. Decodes the common case
-    /// (coefficient up to 64 bits) into a plain decimal string; returns "" for the
-    /// large-coefficient form, an out-of-range exponent, or out-of-bounds.
+    /// (16 bytes, little-endian) at offset +12. Decodes the full 113-bit
+    /// coefficient (any precision) into a plain decimal string; returns "" only for
+    /// the rare large-coefficient encoding (combination field 0b11), an
+    /// out-of-range exponent, or out-of-bounds.
     private static func decimalString(in buffer: [UInt8], at offset: Int) -> String {
         guard offset >= 0, offset + 16 <= buffer.count else { return "" }
         let high = buffer[offset + 15]
         guard (high >> 5) & 0x3 != 0x3 else { return "" }     // large-coefficient form
         let exponent = ((Int(high & 0x7F) << 7) | Int(buffer[offset + 14] >> 1)) - 6176
         guard exponent >= -128, exponent <= 128 else { return "" }
-        // Coefficient is the low 113 bits; supported when it fits in 64 bits.
-        guard buffer[offset + 14] & 1 == 0 else { return "" }
-        for k in 8 ..< 14 where buffer[offset + k] != 0 { return "" }
-        var coefficient: UInt64 = 0
-        for k in 0 ..< 8 { coefficient |= UInt64(buffer[offset + k]) << (8 * k) }
+        // Coefficient is the low 113 bits: bytes 0-13 (112 bits) + bit 112.
+        var coefficient = Array(buffer[offset ..< offset + 14])
+        coefficient.append(buffer[offset + 14] & 1)
         return formatDecimal(negative: high & 0x80 != 0, coefficient: coefficient, exponent: exponent)
     }
 
-    /// Formats `coefficient × 10^exponent` as a plain decimal string, trimming
-    /// trailing fractional zeros (e.g. 420×10⁻² → "4.2", 35×10⁻² → "0.35").
-    private static func formatDecimal(negative: Bool, coefficient: UInt64, exponent: Int) -> String {
+    /// Formats `coefficient × 10^exponent` (coefficient as a little-endian
+    /// magnitude) as a plain decimal string, trimming trailing fractional zeros
+    /// (e.g. 420×10⁻² → "4.2", 35×10⁻² → "0.35"). A zero coefficient is always
+    /// "0", regardless of sign or exponent.
+    private static func formatDecimal(negative: Bool, coefficient: [UInt8], exponent: Int) -> String {
+        let digitsString = decimalDigits(coefficient)
+        if digitsString == "0" { return "0" }
         var result: String
         if exponent >= 0 {
-            result = String(coefficient) + String(repeating: "0", count: exponent)
+            result = digitsString + String(repeating: "0", count: exponent)
         } else {
-            var digits = String(coefficient)
+            var digits = digitsString
             let fractionCount = -exponent
             if digits.count <= fractionCount {
                 digits = String(repeating: "0", count: fractionCount - digits.count + 1) + digits
@@ -497,8 +500,24 @@ enum IWATable {
             while fractionPart.hasSuffix("0") { fractionPart.removeLast() }
             result = fractionPart.isEmpty ? integerPart : integerPart + "." + fractionPart
         }
-        if result.isEmpty { result = "0" }
-        return (negative && result != "0") ? "-" + result : result
+        return negative ? "-" + result : result
+    }
+
+    /// Decimal string of a little-endian magnitude, via repeated division by 10.
+    /// Returns "0" when the magnitude is zero.
+    private static func decimalDigits(_ littleEndianMagnitude: [UInt8]) -> String {
+        var value = littleEndianMagnitude
+        var digits = ""
+        while value.contains(where: { $0 != 0 }) {
+            var remainder = 0
+            for i in stride(from: value.count - 1, through: 0, by: -1) {
+                let current = (remainder << 8) | Int(value[i])
+                value[i] = UInt8(current / 10)
+                remainder = current % 10
+            }
+            digits = String(remainder) + digits
+        }
+        return digits.isEmpty ? "0" : digits
     }
 
     private static func readUInt32(_ buffer: [UInt8], at offset: Int) -> UInt32? {
