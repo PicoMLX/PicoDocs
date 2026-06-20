@@ -463,15 +463,14 @@ enum IWATable {
 
     /// A number or formula-result cell stores its value as an IEEE-754 decimal128
     /// (16 bytes, little-endian) at offset +12. Decodes the full 113-bit
-    /// coefficient (any precision) into a plain decimal string; returns "" only for
-    /// the rare large-coefficient encoding (combination field 0b11), an
-    /// out-of-range exponent, or out-of-bounds.
+    /// coefficient (any precision) into a decimal string — plain for everyday
+    /// magnitudes, scientific notation for extreme exponents. Returns "" only for
+    /// the rare large-coefficient encoding (combination field 0b11) or out-of-bounds.
     private static func decimalString(in buffer: [UInt8], at offset: Int) -> String {
         guard offset >= 0, offset + 16 <= buffer.count else { return "" }
         let high = buffer[offset + 15]
         guard (high >> 5) & 0x3 != 0x3 else { return "" }     // large-coefficient form
         let exponent = ((Int(high & 0x7F) << 7) | Int(buffer[offset + 14] >> 1)) - 6176
-        guard exponent >= -128, exponent <= 128 else { return "" }
         // Coefficient is the low 113 bits: bytes 0-13 (112 bits) + bit 112.
         var coefficient = Array(buffer[offset ..< offset + 14])
         coefficient.append(buffer[offset + 14] & 1)
@@ -479,28 +478,41 @@ enum IWATable {
     }
 
     /// Formats `coefficient × 10^exponent` (coefficient as a little-endian
-    /// magnitude) as a plain decimal string, trimming trailing fractional zeros
-    /// (e.g. 420×10⁻² → "4.2", 35×10⁻² → "0.35"). A zero coefficient is always
-    /// "0", regardless of sign or exponent.
+    /// magnitude): a plain decimal for everyday magnitudes — trimming trailing
+    /// fractional zeros (420×10⁻² → "4.2", 35×10⁻² → "0.35") — or scientific
+    /// notation when the magnitude is extreme (e.g. "1E-200"), so no valid value
+    /// is dropped. A zero coefficient is always "0".
     private static func formatDecimal(negative: Bool, coefficient: [UInt8], exponent: Int) -> String {
-        let digitsString = decimalDigits(coefficient)
-        if digitsString == "0" { return "0" }
+        let digits = decimalDigits(coefficient)
+        if digits == "0" { return "0" }
+        let sign = negative ? "-" : ""
+
+        // Exponent if written with a single leading digit (d.ddd × 10^adjusted).
+        let adjusted = exponent + digits.count - 1
+        guard adjusted >= -6, adjusted < 21 else {     // extreme magnitude → scientific
+            var mantissa = String(digits.first!)
+            var fraction = String(digits.dropFirst())
+            while fraction.hasSuffix("0") { fraction.removeLast() }
+            if !fraction.isEmpty { mantissa += "." + fraction }
+            return sign + mantissa + "E\(adjusted)"
+        }
+
         var result: String
         if exponent >= 0 {
-            result = digitsString + String(repeating: "0", count: exponent)
+            result = digits + String(repeating: "0", count: exponent)
         } else {
-            var digits = digitsString
+            var padded = digits
             let fractionCount = -exponent
-            if digits.count <= fractionCount {
-                digits = String(repeating: "0", count: fractionCount - digits.count + 1) + digits
+            if padded.count <= fractionCount {
+                padded = String(repeating: "0", count: fractionCount - padded.count + 1) + padded
             }
-            let split = digits.index(digits.endIndex, offsetBy: -fractionCount)
-            let integerPart = String(digits[..<split])
-            var fractionPart = String(digits[split...])
+            let split = padded.index(padded.endIndex, offsetBy: -fractionCount)
+            let integerPart = String(padded[..<split])
+            var fractionPart = String(padded[split...])
             while fractionPart.hasSuffix("0") { fractionPart.removeLast() }
             result = fractionPart.isEmpty ? integerPart : integerPart + "." + fractionPart
         }
-        return negative ? "-" + result : result
+        return sign + result
     }
 
     /// Decimal string of a little-endian magnitude, via repeated division by 10.
