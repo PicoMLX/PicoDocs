@@ -425,29 +425,43 @@ enum IWATable {
         return runs.sorted { $0.offset < $1.offset }
     }
 
-    /// The bold/italic traits of a CharacterStyle, read from its properties archive
-    /// (field 11: bold = field 1, italic = field 2). Underline (field 11 of that
-    /// archive) has no Markdown form and is dropped, matching the other converters.
-    private static func characterTraits(of styleID: UInt64,
-                                        in objects: [UInt64: IWAArchive.Object]) -> (bold: Bool, italic: Bool) {
-        guard let object = objects[styleID] else { return (false, false) }
+    /// The bold/italic traits of a CharacterStyle, resolved through its parent chain
+    /// (properties archive field 11: bold = field 1, italic = field 2). A trait the
+    /// style doesn't set itself is inherited from a named preset (e.g. "Strong" /
+    /// "Emphasis"), mirroring how `styleName` resolves names; an explicit value wins
+    /// over the parents'. Underline (field 11 of that archive) has no Markdown form
+    /// and is dropped, matching the other converters.
+    private static func characterTraits(of styleID: UInt64, in objects: [UInt64: IWAArchive.Object],
+                                        visited: Set<UInt64> = []) -> (bold: Bool, italic: Bool) {
+        guard !visited.contains(styleID), let object = objects[styleID] else { return (false, false) }
         var reader = ProtobufReader(object.payload)
         var properties: [UInt8]?
         while let field = reader.next() {
             if field.number == 11, case .length(let bytes) = field.value { properties = bytes; break }
         }
-        guard let properties else { return (false, false) }
-        var bold = false
-        var italic = false
-        var propertyReader = ProtobufReader(properties)
-        while let field = propertyReader.next() {
-            switch (field.number, field.value) {
-            case (1, .varint(let value)): bold = value != 0
-            case (2, .varint(let value)): italic = value != 0
-            default: continue
+        var bold: Bool?
+        var italic: Bool?
+        if let properties {
+            var propertyReader = ProtobufReader(properties)
+            while let field = propertyReader.next() {
+                switch (field.number, field.value) {
+                case (1, .varint(let value)): bold = value != 0
+                case (2, .varint(let value)): italic = value != 0
+                default: continue
+                }
             }
         }
-        return (bold, italic)
+        // Fill any trait this style doesn't set itself from the parent chain.
+        if bold == nil || italic == nil {
+            var seen = visited
+            seen.insert(styleID)
+            for parent in styleArchive(object).parents {
+                let inherited = characterTraits(of: parent, in: objects, visited: seen)
+                if bold == nil, inherited.bold { bold = true }
+                if italic == nil, inherited.italic { italic = true }
+            }
+        }
+        return (bold ?? false, italic ?? false)
     }
 
     /// The URL of a HyperlinkField smart field (field 2).
