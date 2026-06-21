@@ -166,6 +166,24 @@ enum IWATable {
         return placed == tiles ? blocks : nil
     }
 
+    /// The document body rendered as heading-aware Markdown *without* inline tables.
+    /// Used by PagesConverter's fallback (when `inlineBlocks` bails on table
+    /// placement) so Title/Heading styles still produce `#`s while the tables are
+    /// appended separately; attachment marks are dropped. Empty when there is no
+    /// body text, so the caller can degrade to plain extraction.
+    static func bodyMarkdown(documentStream: [UInt8], in streams: [[UInt8]]) -> String {
+        let objects = buildObjects(streams)
+        var parts: [String] = []
+        for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
+            guard let text = bodyStorageText(storage) else { continue }    // kind 0 only
+            let units = Array(text.utf16)
+            let styles = paragraphStyleRuns(in: storage)
+            let rendered = renderParagraphs(units, 0 ..< units.count, styles: styles, objects: objects)
+            if !rendered.isEmpty { parts.append(rendered) }
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
     // MARK: - Headings
 
     /// Renders a UTF-16 range as Markdown: split into paragraphs at true paragraph

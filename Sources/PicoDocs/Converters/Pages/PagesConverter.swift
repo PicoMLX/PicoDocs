@@ -96,7 +96,10 @@ public struct PagesConverter: DocumentConverter {
             // name) that yields any text.
             let bodyText: String
             if let documentStream {
-                bodyText = IWAArchive.text(in: documentStream)
+                // Render headings even on the fallback path; degrade to plain text
+                // extraction only if the style-aware renderer yields nothing.
+                let rendered = IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams)
+                bodyText = rendered.isEmpty ? IWAArchive.text(in: documentStream) : rendered
             } else {
                 var firstText = ""
                 for entry in streams.sorted(by: { $0.name < $1.name }) {
