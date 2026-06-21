@@ -127,8 +127,8 @@ enum IWATable {
     /// paragraph's ParagraphStyle), and each reconstructed table is placed inline
     /// at its ￼ (U+FFFC) attachment position. Returns nil — so the caller can fall
     /// back to appended tables — only when the ￼ markers can't be matched 1:1 to
-    /// attachment runs, so a table is never dropped. Offsets are Unicode scalar
-    /// (code-point) indices, the space iWork's run/attachment indices use.
+    /// attachment runs, so a table is never dropped. Offsets are UTF-16 code units,
+    /// the index space iWork's run/attachment character indices use.
     static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]]) -> [Block]? {
         let objects = buildObjects(streams)
         let tableMarkdown = reconstructTables(objects)
@@ -140,10 +140,10 @@ enum IWATable {
         // (field 3), paragraph-style runs (field 5), and attachment runs (field 9).
         for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
             guard let text = bodyStorageText(storage) else { continue }    // kind 0 only
-            let scalars = Array(text.unicodeScalars)
+            let units = Array(text.utf16)            // iWork run/attachment offsets are UTF-16 code units
             let attachments = attachmentRuns(in: storage)
             let styles = paragraphStyleRuns(in: storage)
-            let markers = scalars.indices.filter { scalars[$0].value == 0xFFFC }
+            let markers = units.indices.filter { units[$0] == 0xFFFC }
             guard markers.count == attachments.count else { return nil }    // can't map 1:1
 
             // Split the body only at table attachments; non-table markers (inline
@@ -153,13 +153,13 @@ enum IWATable {
             for (marker, attachment) in zip(markers, attachments) {
                 guard let tile = reachableTile(from: attachment.objectID, objects: objects, tiles: tiles),
                       let markdown = tableMarkdown[tile] else { continue }  // image: leave ￼ in the text
-                let segment = renderParagraphs(scalars, segmentStart ..< marker, styles: styles, objects: objects)
+                let segment = renderParagraphs(units, segmentStart ..< marker, styles: styles, objects: objects)
                 if !segment.isEmpty { blocks.append(.text(segment)) }
                 blocks.append(.table(markdown))
                 placed.insert(tile)
                 segmentStart = marker + 1                                   // drop the table ￼
             }
-            let tail = renderParagraphs(scalars, segmentStart ..< scalars.count, styles: styles, objects: objects)
+            let tail = renderParagraphs(units, segmentStart ..< units.count, styles: styles, objects: objects)
             if !tail.isEmpty { blocks.append(.text(tail)) }
         }
         // Commit to inline layout only if every reconstructed table found a home.
@@ -168,26 +168,20 @@ enum IWATable {
 
     // MARK: - Headings
 
-    /// Renders a scalar range as Markdown: split into paragraphs at line/paragraph
-    /// separators, collapse each paragraph's whitespace, and prefix it with `#`s
-    /// when its dominant ParagraphStyle is a heading. Paragraphs are joined by a
-    /// blank line.
-    private static func renderParagraphs(_ scalars: [Unicode.Scalar], _ range: Range<Int>,
+    /// Renders a UTF-16 range as Markdown: split into paragraphs at true paragraph
+    /// separators (not soft line breaks) and prefix each with `#`s when its dominant
+    /// ParagraphStyle is a heading. Paragraphs are joined by a blank line; interior
+    /// whitespace and soft breaks are left for `PagesConverter.normalize` to fold.
+    private static func renderParagraphs(_ units: [UInt16], _ range: Range<Int>,
                                          styles: [(offset: Int, styleID: UInt64)],
                                          objects: [UInt64: IWAArchive.Object]) -> String {
         var paragraphs: [String] = []
         var start = range.lowerBound
         var index = range.lowerBound
         while index <= range.upperBound {
-            if index == range.upperBound || isParagraphBreak(scalars[index]) {
-                let collapsed = collapseParagraph(scalars, start ..< index)
-                if !collapsed.isEmpty {
-                    let style = majorityStyle(styles, start ..< index, total: scalars.count)
-                    if let level = headingLevel(styleName(style, objects: objects)) {
-                        paragraphs.append(String(repeating: "#", count: level) + " " + collapsed)
-                    } else {
-                        paragraphs.append(collapsed)
-                    }
+            if index == range.upperBound || isParagraphSeparator(units[index]) {
+                if let paragraph = renderParagraph(units, start ..< index, styles: styles, objects: objects) {
+                    paragraphs.append(paragraph)
                 }
                 start = index + 1
             }
@@ -196,37 +190,33 @@ enum IWATable {
         return paragraphs.joined(separator: "\n\n")
     }
 
-    private static func isParagraphBreak(_ scalar: Unicode.Scalar) -> Bool {
-        switch scalar.value {
-        case 0x0A, 0x0D, 0x0B, 0x0C, 0x2028, 0x2029: return true
-        default: return false
-        }
+    /// Only true paragraph terminators split paragraphs; soft line breaks (U+2028,
+    /// U+000B, U+000C) stay inside the paragraph and become newlines via `normalize`.
+    private static func isParagraphSeparator(_ unit: UInt16) -> Bool {
+        unit == 0x0A || unit == 0x0D || unit == 0x2029
     }
 
-    /// One paragraph's text: whitespace/separator runs collapsed to single spaces,
-    /// surrounding whitespace trimmed, and control / object-replacement scalars
-    /// dropped.
-    private static func collapseParagraph(_ scalars: [Unicode.Scalar], _ range: Range<Int>) -> String {
-        var output = ""
-        var pendingSpace = false
-        for index in range {
-            let scalar = scalars[index]
-            let value = scalar.value
-            if value == 0xFFFC { continue }
-            if value == 0x20 || value == 0x09 || value == 0xA0 || isParagraphBreak(scalar) {
-                if !output.isEmpty { pendingSpace = true }
-                continue
-            }
-            if value <= 0x1F || (0x7F ... 0x9F).contains(value) { continue }
-            if pendingSpace { output += " "; pendingSpace = false }
-            output.unicodeScalars.append(scalar)
-        }
-        return output
+    /// One paragraph rendered to Markdown, or nil when it holds no text. Attachment
+    /// marks are dropped and the edges trimmed; a body paragraph keeps its interior
+    /// spacing (control/whitespace cleanup is deferred to `normalize`), while a
+    /// heading is flattened to a single, space-separated line.
+    private static func renderParagraph(_ units: [UInt16], _ range: Range<Int>,
+                                        styles: [(offset: Int, styleID: UInt64)],
+                                        objects: [UInt64: IWAArchive.Object]) -> String? {
+        var kept: [UInt16] = []
+        kept.reserveCapacity(range.count)
+        for index in range where units[index] != 0xFFFC { kept.append(units[index]) }
+        let text = String(decoding: kept, as: UTF16.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        guard let level = headingLevel(styleName(majorityStyle(styles, range, total: units.count),
+                                                 objects: objects)) else { return text }
+        let line = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        return String(repeating: "#", count: level) + " " + line
     }
 
-    /// The ParagraphStyle id covering the most scalars in `range`. Style runs are
-    /// run-length, so a paragraph whose auto-number sits in a neighbouring run is
-    /// still attributed to its dominant style.
+    /// The ParagraphStyle id covering the most of `range`. Runs are run-length (one
+    /// run can span several same-style paragraphs), and taking the dominant overlap
+    /// tolerates a run boundary that doesn't fall exactly on the paragraph edge.
     private static func majorityStyle(_ runs: [(offset: Int, styleID: UInt64)], _ range: Range<Int>,
                                       total: Int) -> UInt64? {
         guard !runs.isEmpty else { return nil }
