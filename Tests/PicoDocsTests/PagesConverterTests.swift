@@ -176,6 +176,25 @@ struct PagesConverterTests {
         }
     }
 
+    @Test("PagesConverter renders paragraph styles as Markdown headings")
+    func realPagesHeadings() async throws {
+        let data = try Fixture.data("sample", "pages")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.pages")
+        let markdown = result.markdown()
+
+        // The Title paragraph style maps to `#`, the section "Heading" style to `##`
+        // (a heading run is attributed to its paragraph even though the auto-number
+        // sits in a neighbouring run, so "2. Lists" is a heading, not "2").
+        #expect(markdown.contains("# Representative Import Fixture for Apple Pages"))
+        #expect(markdown.contains("## 1. Body text and inline formatting"))
+        #expect(markdown.contains("## 2. Lists"))
+        #expect(markdown.contains("## 6. Dates and formula"))
+
+        // Body paragraphs are not headings.
+        #expect(!markdown.contains("## This document is intentionally ordinary"))
+        #expect(!markdown.contains("## Plain paragraph before list"))
+    }
+
     @Test("Detector routes a .pages package to the Pages format")
     func detectionRoutesToPages() {
         let pages = Self.makePagesFile(paragraphs: ["Hi"])

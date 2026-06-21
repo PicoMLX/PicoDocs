@@ -3,7 +3,9 @@
 //  PicoDocs
 //
 //  Reconstructs Apple iWork (Pages/Numbers/Keynote) tables from decompressed IWA
-//  object streams into GitHub-flavored Markdown grid tables.
+//  object streams into GitHub-flavored Markdown grid tables, and (via
+//  `inlineBlocks`) renders the Pages body as paragraphs with Markdown headings,
+//  interleaving each table at its attachment point.
 //
 //  A table is assembled from three object kinds, joined through the document
 //  object graph (`MessageInfo.object_references`):
@@ -120,45 +122,197 @@ enum IWATable {
         return found
     }
 
-    /// Splits the document body into ordered text/table blocks, placing each
-    /// reconstructed table inline at its ￼ (U+FFFC) attachment position. Returns
-    /// nil — so the caller can fall back to appended tables — unless every
-    /// reconstructed table is cleanly placed (e.g. it bails on a count mismatch
-    /// between ￼ markers and attachment runs), so a table is never dropped.
+    /// Splits the document body into ordered text/table blocks: body text is
+    /// rendered paragraph-by-paragraph with Markdown headings (from each
+    /// paragraph's ParagraphStyle), and each reconstructed table is placed inline
+    /// at its ￼ (U+FFFC) attachment position. Returns nil — so the caller can fall
+    /// back to appended tables — only when the ￼ markers can't be matched 1:1 to
+    /// attachment runs, so a table is never dropped. Offsets are Unicode scalar
+    /// (code-point) indices, the space iWork's run/attachment indices use.
     static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]]) -> [Block]? {
         let objects = buildObjects(streams)
         let tableMarkdown = reconstructTables(objects)
-        // No early return on an empty table set: a table-less document still
-        // resolves to text-only blocks below, so the caller can use them directly
-        // instead of re-parsing the whole object graph in the appended fallback.
         let tiles = Set(tableMarkdown.keys)
 
         var blocks: [Block] = []
         var placed = Set<UInt64>()
         // Body storages in document (stream) order; each carries its own text
-        // (field 3) and drawable attachment runs (field 9).
+        // (field 3), paragraph-style runs (field 5), and attachment runs (field 9).
         for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
             guard let text = bodyStorageText(storage) else { continue }    // kind 0 only
-            let runs = attachmentRuns(in: storage)
-            let markers = text.indices.filter { text[$0] == "\u{FFFC}" }
-            guard markers.count == runs.count else { return nil }          // can't map 1:1
+            let scalars = Array(text.unicodeScalars)
+            let attachments = attachmentRuns(in: storage)
+            let styles = paragraphStyleRuns(in: storage)
+            let markers = scalars.indices.filter { scalars[$0].value == 0xFFFC }
+            guard markers.count == attachments.count else { return nil }    // can't map 1:1
 
-            var buffer = ""
-            var segmentStart = text.startIndex
-            for (marker, run) in zip(markers, runs) {
-                buffer += String(text[segmentStart..<marker])
-                segmentStart = text.index(after: marker)                   // always drop the ￼
-                guard let tile = reachableTile(from: run.objectID, objects: objects, tiles: tiles),
-                      let markdown = tableMarkdown[tile] else { continue }  // non-table (image): merge text
-                if !buffer.isEmpty { blocks.append(.text(buffer)); buffer = "" }
+            var segmentStart = 0
+            for (marker, attachment) in zip(markers, attachments) {
+                let segment = renderParagraphs(scalars, segmentStart ..< marker, styles: styles, objects: objects)
+                if !segment.isEmpty { blocks.append(.text(segment)) }
+                segmentStart = marker + 1                                   // always drop the ￼
+                guard let tile = reachableTile(from: attachment.objectID, objects: objects, tiles: tiles),
+                      let markdown = tableMarkdown[tile] else { continue }  // non-table (image): no block
                 blocks.append(.table(markdown))
                 placed.insert(tile)
             }
-            buffer += String(text[segmentStart...])
-            if !buffer.isEmpty { blocks.append(.text(buffer)) }
+            let tail = renderParagraphs(scalars, segmentStart ..< scalars.count, styles: styles, objects: objects)
+            if !tail.isEmpty { blocks.append(.text(tail)) }
         }
         // Commit to inline layout only if every reconstructed table found a home.
         return placed == tiles ? blocks : nil
+    }
+
+    // MARK: - Headings
+
+    /// Renders a scalar range as Markdown: split into paragraphs at line/paragraph
+    /// separators, collapse each paragraph's whitespace, and prefix it with `#`s
+    /// when its dominant ParagraphStyle is a heading. Paragraphs are joined by a
+    /// blank line.
+    private static func renderParagraphs(_ scalars: [Unicode.Scalar], _ range: Range<Int>,
+                                         styles: [(offset: Int, styleID: UInt64)],
+                                         objects: [UInt64: IWAArchive.Object]) -> String {
+        var paragraphs: [String] = []
+        var start = range.lowerBound
+        var index = range.lowerBound
+        while index <= range.upperBound {
+            if index == range.upperBound || isParagraphBreak(scalars[index]) {
+                let collapsed = collapseParagraph(scalars, start ..< index)
+                if !collapsed.isEmpty {
+                    let style = majorityStyle(styles, start ..< index, total: scalars.count)
+                    if let level = headingLevel(styleName(style, objects: objects)) {
+                        paragraphs.append(String(repeating: "#", count: level) + " " + collapsed)
+                    } else {
+                        paragraphs.append(collapsed)
+                    }
+                }
+                start = index + 1
+            }
+            index += 1
+        }
+        return paragraphs.joined(separator: "\n\n")
+    }
+
+    private static func isParagraphBreak(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x0A, 0x0D, 0x0B, 0x0C, 0x2028, 0x2029: return true
+        default: return false
+        }
+    }
+
+    /// One paragraph's text: whitespace/separator runs collapsed to single spaces,
+    /// surrounding whitespace trimmed, and control / object-replacement scalars
+    /// dropped.
+    private static func collapseParagraph(_ scalars: [Unicode.Scalar], _ range: Range<Int>) -> String {
+        var output = ""
+        var pendingSpace = false
+        for index in range {
+            let scalar = scalars[index]
+            let value = scalar.value
+            if value == 0xFFFC { continue }
+            if value == 0x20 || value == 0x09 || value == 0xA0 || isParagraphBreak(scalar) {
+                if !output.isEmpty { pendingSpace = true }
+                continue
+            }
+            if value <= 0x1F || (0x7F ... 0x9F).contains(value) { continue }
+            if pendingSpace { output += " "; pendingSpace = false }
+            output.unicodeScalars.append(scalar)
+        }
+        return output
+    }
+
+    /// The ParagraphStyle id covering the most scalars in `range`. Style runs are
+    /// run-length, so a paragraph whose auto-number sits in a neighbouring run is
+    /// still attributed to its dominant style.
+    private static func majorityStyle(_ runs: [(offset: Int, styleID: UInt64)], _ range: Range<Int>,
+                                      total: Int) -> UInt64? {
+        var best: UInt64?
+        var bestOverlap = 0
+        for (index, run) in runs.enumerated() {
+            let runEnd = index + 1 < runs.count ? runs[index + 1].offset : total
+            let overlap = min(range.upperBound, runEnd) - max(range.lowerBound, run.offset)
+            if overlap > bestOverlap { bestOverlap = overlap; best = run.styleID }
+        }
+        return best
+    }
+
+    /// A body storage's paragraph-style runs (field 5, a wrapper of repeated runs),
+    /// sorted by offset: each maps a scalar offset to a ParagraphStyle id.
+    private static func paragraphStyleRuns(in storage: IWAArchive.Object) -> [(offset: Int, styleID: UInt64)] {
+        var runs: [(offset: Int, styleID: UInt64)] = []
+        var reader = ProtobufReader(storage.payload)
+        while let field = reader.next() {
+            guard field.number == 5, case .length(let wrapper) = field.value else { continue }
+            var wrapperReader = ProtobufReader(wrapper)
+            while let entry = wrapperReader.next() {
+                guard entry.number == 1, case .length(let runBytes) = entry.value else { continue }
+                var offset: Int?
+                var styleID: UInt64?
+                var runReader = ProtobufReader(runBytes)
+                while let runField = runReader.next() {
+                    switch (runField.number, runField.value) {
+                    case (1, .varint(let value)): offset = Int(exactly: value)
+                    case (2, .length(let reference)): styleID = referencedID(in: reference)
+                    default: continue
+                    }
+                }
+                if let offset, let styleID { runs.append((offset, styleID)) }
+            }
+        }
+        return runs.sorted { $0.offset < $1.offset }
+    }
+
+    /// The display name of a ParagraphStyle, resolved through its parent chain (an
+    /// anonymous override inherits its name from a named preset like "Title").
+    private static func styleName(_ styleID: UInt64?, objects: [UInt64: IWAArchive.Object],
+                                  visited: Set<UInt64> = []) -> String? {
+        guard let styleID, !visited.contains(styleID), let object = objects[styleID] else { return nil }
+        let (name, parents) = styleArchive(object)
+        if let name { return name }
+        var seen = visited
+        seen.insert(styleID)
+        for parent in parents {
+            if let resolved = styleName(parent, objects: objects, visited: seen) { return resolved }
+        }
+        return nil
+    }
+
+    /// A style's TSS.StyleArchive (field 1): its name (sub-field 1) and parent
+    /// style references (sub-fields 3 and 5).
+    private static func styleArchive(_ object: IWAArchive.Object) -> (name: String?, parents: [UInt64]) {
+        var archive: [UInt8]?
+        var reader = ProtobufReader(object.payload)
+        while let field = reader.next() {
+            if field.number == 1, case .length(let bytes) = field.value { archive = bytes; break }
+        }
+        guard let archive else { return (nil, []) }
+        var name: String?
+        var parents: [UInt64] = []
+        var sub = ProtobufReader(archive)
+        while let field = sub.next() {
+            switch (field.number, field.value) {
+            case (1, .length(let bytes)): name = String(bytes: bytes, encoding: .utf8)
+            case (3, .length(let reference)), (5, .length(let reference)):
+                if let id = referencedID(in: reference) { parents.append(id) }
+            default: continue
+            }
+        }
+        return (name, parents)
+    }
+
+    /// Markdown heading level for a paragraph-style name: Title → 1, Subtitle → 2,
+    /// Heading N → N+1 (so "Title" outranks "Heading 1"), capped at 6. Other styles
+    /// (Body, lists, …) aren't headings.
+    private static func headingLevel(_ name: String?) -> Int? {
+        guard let name else { return nil }
+        let lower = name.lowercased()
+        if lower.hasPrefix("title") { return 1 }
+        if lower.hasPrefix("subtitle") { return 2 }
+        if lower.hasPrefix("heading") {
+            let number = Int(name.filter(\.isNumber)) ?? 1
+            return min(number + 1, 6)
+        }
+        return nil
     }
 
     // MARK: - Object graph
