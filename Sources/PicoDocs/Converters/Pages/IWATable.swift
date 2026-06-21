@@ -146,15 +146,18 @@ enum IWATable {
             let markers = scalars.indices.filter { scalars[$0].value == 0xFFFC }
             guard markers.count == attachments.count else { return nil }    // can't map 1:1
 
+            // Split the body only at table attachments; non-table markers (inline
+            // images) stay in the text and are dropped during paragraph rendering,
+            // so an image mid-paragraph doesn't break the paragraph into two blocks.
             var segmentStart = 0
             for (marker, attachment) in zip(markers, attachments) {
+                guard let tile = reachableTile(from: attachment.objectID, objects: objects, tiles: tiles),
+                      let markdown = tableMarkdown[tile] else { continue }  // image: leave ￼ in the text
                 let segment = renderParagraphs(scalars, segmentStart ..< marker, styles: styles, objects: objects)
                 if !segment.isEmpty { blocks.append(.text(segment)) }
-                segmentStart = marker + 1                                   // always drop the ￼
-                guard let tile = reachableTile(from: attachment.objectID, objects: objects, tiles: tiles),
-                      let markdown = tableMarkdown[tile] else { continue }  // non-table (image): no block
                 blocks.append(.table(markdown))
                 placed.insert(tile)
+                segmentStart = marker + 1                                   // drop the table ￼
             }
             let tail = renderParagraphs(scalars, segmentStart ..< scalars.count, styles: styles, objects: objects)
             if !tail.isEmpty { blocks.append(.text(tail)) }
@@ -226,9 +229,24 @@ enum IWATable {
     /// still attributed to its dominant style.
     private static func majorityStyle(_ runs: [(offset: Int, styleID: UInt64)], _ range: Range<Int>,
                                       total: Int) -> UInt64? {
+        guard !runs.isEmpty else { return nil }
+        // Runs are sorted and contiguous, so the runs overlapping `range` form a
+        // slice. Binary-search its start (the first run ending past range.lowerBound)
+        // and scan until a run begins at/after range.upperBound, keeping this
+        // O(log M + overlap) per paragraph rather than O(M).
+        var low = 0
+        var high = runs.count - 1
+        var first = runs.count
+        while low <= high {
+            let mid = (low + high) / 2
+            let runEnd = mid + 1 < runs.count ? runs[mid + 1].offset : total
+            if runEnd > range.lowerBound { first = mid; high = mid - 1 } else { low = mid + 1 }
+        }
         var best: UInt64?
         var bestOverlap = 0
-        for (index, run) in runs.enumerated() {
+        for index in first ..< runs.count {
+            let run = runs[index]
+            guard run.offset < range.upperBound else { break }
             let runEnd = index + 1 < runs.count ? runs[index + 1].offset : total
             let overlap = min(range.upperBound, runEnd) - max(range.lowerBound, run.offset)
             if overlap > bestOverlap { bestOverlap = overlap; best = run.styleID }
