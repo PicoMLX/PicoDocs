@@ -8,12 +8,13 @@
 //  `Index/*.iwa` (or a nested `Index.zip`); each `.iwa` is a Snappy-framed
 //  protobuf object stream whose TSWP text storages carry the body text.
 //
-//  Scope (v1): extracts the document's plain text (paragraphs) from the flat,
-//  single-file `.pages` ZIP — the common transport form (downloads, mail, Files
-//  exports) — plus table content, reconstructed as Markdown grids and placed
-//  inline at their attachment points in reading order (falling back to appending
-//  them after the body when attachments can't be mapped 1:1; see IWATable).
-//  Remaining rich structure (headings, styling, footnotes, inline images),
+//  Scope (v1): extracts the document's text from the flat, single-file `.pages`
+//  ZIP — the common transport form (downloads, mail, Files exports) — as
+//  paragraphs with Markdown heading levels mapped from their paragraph styles,
+//  plus table content reconstructed as Markdown grids and placed inline at their
+//  attachment points in reading order (falling back to appending them after the
+//  body when attachments can't be mapped 1:1; see IWATable). Remaining rich
+//  structure (inline character styling, footnotes, inline images),
 //  duration table cells (text, dates, numbers, and formula results are decoded),
 //  the legacy iWork '09 XML format, and
 //  ingesting a `.pages` *package directory* (an on-disk bundle, which the
@@ -95,7 +96,10 @@ public struct PagesConverter: DocumentConverter {
             // name) that yields any text.
             let bodyText: String
             if let documentStream {
-                bodyText = IWAArchive.text(in: documentStream)
+                // Render headings even on the fallback path; degrade to plain text
+                // extraction only if the style-aware renderer yields nothing.
+                let rendered = IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams)
+                bodyText = rendered.isEmpty ? IWAArchive.text(in: documentStream) : rendered
             } else {
                 var firstText = ""
                 for entry in streams.sorted(by: { $0.name < $1.name }) {

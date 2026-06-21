@@ -3,7 +3,9 @@
 //  PicoDocs
 //
 //  Reconstructs Apple iWork (Pages/Numbers/Keynote) tables from decompressed IWA
-//  object streams into GitHub-flavored Markdown grid tables.
+//  object streams into GitHub-flavored Markdown grid tables, and (via
+//  `inlineBlocks`) renders the Pages body as paragraphs with Markdown headings,
+//  interleaving each table at its attachment point.
 //
 //  A table is assembled from three object kinds, joined through the document
 //  object graph (`MessageInfo.object_references`):
@@ -120,45 +122,231 @@ enum IWATable {
         return found
     }
 
-    /// Splits the document body into ordered text/table blocks, placing each
-    /// reconstructed table inline at its ￼ (U+FFFC) attachment position. Returns
-    /// nil — so the caller can fall back to appended tables — unless every
-    /// reconstructed table is cleanly placed (e.g. it bails on a count mismatch
-    /// between ￼ markers and attachment runs), so a table is never dropped.
+    /// Splits the document body into ordered text/table blocks: body text is
+    /// rendered paragraph-by-paragraph with Markdown headings (from each
+    /// paragraph's ParagraphStyle), and each reconstructed table is placed inline
+    /// at its ￼ (U+FFFC) attachment position. Returns nil — so the caller can fall
+    /// back to appended tables — only when the ￼ markers can't be matched 1:1 to
+    /// attachment runs, so a table is never dropped. Offsets are UTF-16 code units,
+    /// the index space iWork's run/attachment character indices use.
     static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]]) -> [Block]? {
         let objects = buildObjects(streams)
         let tableMarkdown = reconstructTables(objects)
-        // No early return on an empty table set: a table-less document still
-        // resolves to text-only blocks below, so the caller can use them directly
-        // instead of re-parsing the whole object graph in the appended fallback.
         let tiles = Set(tableMarkdown.keys)
 
         var blocks: [Block] = []
         var placed = Set<UInt64>()
         // Body storages in document (stream) order; each carries its own text
-        // (field 3) and drawable attachment runs (field 9).
+        // (field 3), paragraph-style runs (field 5), and attachment runs (field 9).
         for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
             guard let text = bodyStorageText(storage) else { continue }    // kind 0 only
-            let runs = attachmentRuns(in: storage)
-            let markers = text.indices.filter { text[$0] == "\u{FFFC}" }
-            guard markers.count == runs.count else { return nil }          // can't map 1:1
+            let units = Array(text.utf16)            // iWork run/attachment offsets are UTF-16 code units
+            let attachments = attachmentRuns(in: storage)
+            let styles = paragraphStyleRuns(in: storage)
+            let markers = units.indices.filter { units[$0] == 0xFFFC }
+            guard markers.count == attachments.count else { return nil }    // can't map 1:1
 
-            var buffer = ""
-            var segmentStart = text.startIndex
-            for (marker, run) in zip(markers, runs) {
-                buffer += String(text[segmentStart..<marker])
-                segmentStart = text.index(after: marker)                   // always drop the ￼
-                guard let tile = reachableTile(from: run.objectID, objects: objects, tiles: tiles),
-                      let markdown = tableMarkdown[tile] else { continue }  // non-table (image): merge text
-                if !buffer.isEmpty { blocks.append(.text(buffer)); buffer = "" }
+            // Split the body only at table attachments; non-table markers (inline
+            // images) stay in the text and are dropped during paragraph rendering,
+            // so an image mid-paragraph doesn't break the paragraph into two blocks.
+            var segmentStart = 0
+            for (marker, attachment) in zip(markers, attachments) {
+                guard let tile = reachableTile(from: attachment.objectID, objects: objects, tiles: tiles),
+                      let markdown = tableMarkdown[tile] else { continue }  // image: leave ￼ in the text
+                let segment = renderParagraphs(units, segmentStart ..< marker, styles: styles, objects: objects)
+                if !segment.isEmpty { blocks.append(.text(segment)) }
                 blocks.append(.table(markdown))
                 placed.insert(tile)
+                segmentStart = marker + 1                                   // drop the table ￼
             }
-            buffer += String(text[segmentStart...])
-            if !buffer.isEmpty { blocks.append(.text(buffer)) }
+            let tail = renderParagraphs(units, segmentStart ..< units.count, styles: styles, objects: objects)
+            if !tail.isEmpty { blocks.append(.text(tail)) }
         }
         // Commit to inline layout only if every reconstructed table found a home.
         return placed == tiles ? blocks : nil
+    }
+
+    /// The document body rendered as heading-aware Markdown *without* inline tables.
+    /// Used by PagesConverter's fallback (when `inlineBlocks` bails on table
+    /// placement) so Title/Heading styles still produce `#`s while the tables are
+    /// appended separately; attachment marks are dropped. Empty when there is no
+    /// body text, so the caller can degrade to plain extraction.
+    static func bodyMarkdown(documentStream: [UInt8], in streams: [[UInt8]]) -> String {
+        let objects = buildObjects(streams)
+        var parts: [String] = []
+        for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
+            guard let text = bodyStorageText(storage) else { continue }    // kind 0 only
+            let units = Array(text.utf16)
+            let styles = paragraphStyleRuns(in: storage)
+            let rendered = renderParagraphs(units, 0 ..< units.count, styles: styles, objects: objects)
+            if !rendered.isEmpty { parts.append(rendered) }
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
+    // MARK: - Headings
+
+    /// Renders a UTF-16 range as Markdown: split into paragraphs at true paragraph
+    /// separators (not soft line breaks) and prefix each with `#`s when its dominant
+    /// ParagraphStyle is a heading. Paragraphs are joined by a blank line; interior
+    /// whitespace and soft breaks are left for `PagesConverter.normalize` to fold.
+    private static func renderParagraphs(_ units: [UInt16], _ range: Range<Int>,
+                                         styles: [(offset: Int, styleID: UInt64)],
+                                         objects: [UInt64: IWAArchive.Object]) -> String {
+        var paragraphs: [String] = []
+        var start = range.lowerBound
+        var index = range.lowerBound
+        while index <= range.upperBound {
+            if index == range.upperBound || isParagraphSeparator(units[index]) {
+                if let paragraph = renderParagraph(units, start ..< index, styles: styles, objects: objects) {
+                    paragraphs.append(paragraph)
+                }
+                start = index + 1
+            }
+            index += 1
+        }
+        return paragraphs.joined(separator: "\n\n")
+    }
+
+    /// Only true paragraph terminators split paragraphs; soft line breaks (U+2028,
+    /// U+000B, U+000C) stay inside the paragraph and become newlines via `normalize`.
+    private static func isParagraphSeparator(_ unit: UInt16) -> Bool {
+        unit == 0x0A || unit == 0x0D || unit == 0x2029
+    }
+
+    /// One paragraph rendered to Markdown, or nil when it holds no text. Attachment
+    /// marks are dropped and the edges trimmed; a body paragraph keeps its interior
+    /// spacing (control/whitespace cleanup is deferred to `normalize`), while a
+    /// heading is flattened to a single, space-separated line.
+    private static func renderParagraph(_ units: [UInt16], _ range: Range<Int>,
+                                        styles: [(offset: Int, styleID: UInt64)],
+                                        objects: [UInt64: IWAArchive.Object]) -> String? {
+        var kept: [UInt16] = []
+        kept.reserveCapacity(range.count)
+        for index in range where units[index] != 0xFFFC { kept.append(units[index]) }
+        let text = String(decoding: kept, as: UTF16.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        guard let level = headingLevel(styleName(majorityStyle(units, styles, range, total: units.count),
+                                                 objects: objects)) else { return text }
+        let line = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        return String(repeating: "#", count: level) + " " + line
+    }
+
+    /// The ParagraphStyle id covering the most *visible* units of `range`. Control
+    /// and object-replacement units (which `normalize` later strips) don't vote, so
+    /// a section-break sentinel sitting before a short heading can't outweigh the
+    /// heading's own run. Runs are sorted and contiguous, so the runs overlapping
+    /// `range` form a slice found by binary search.
+    private static func majorityStyle(_ units: [UInt16], _ runs: [(offset: Int, styleID: UInt64)],
+                                      _ range: Range<Int>, total: Int) -> UInt64? {
+        guard !runs.isEmpty else { return nil }
+        var low = 0
+        var high = runs.count - 1
+        var first = runs.count
+        while low <= high {
+            let mid = (low + high) / 2
+            let runEnd = mid + 1 < runs.count ? runs[mid + 1].offset : total
+            if runEnd > range.lowerBound { first = mid; high = mid - 1 } else { low = mid + 1 }
+        }
+        var best: UInt64?
+        var bestOverlap = 0
+        for index in first ..< runs.count {
+            let run = runs[index]
+            guard run.offset < range.upperBound else { break }
+            let runEnd = index + 1 < runs.count ? runs[index + 1].offset : total
+            var overlap = 0
+            for position in max(range.lowerBound, run.offset) ..< min(range.upperBound, runEnd)
+            where !isDroppedUnit(units[position]) { overlap += 1 }
+            if overlap > bestOverlap { bestOverlap = overlap; best = run.styleID }
+        }
+        return best
+    }
+
+    /// Units that `PagesConverter.normalize` strips from the visible text — C0/C1
+    /// controls (except tab and newline, which it keeps) and the object-replacement
+    /// placeholder — so they must not influence the heading-style vote.
+    private static func isDroppedUnit(_ unit: UInt16) -> Bool {
+        if unit == 0x09 || unit == 0x0A { return false }
+        return unit <= 0x1F || (0x7F ... 0x9F).contains(unit) || unit == 0xFFFC
+    }
+
+    /// A body storage's paragraph-style runs (field 5, a wrapper of repeated runs),
+    /// sorted by offset: each maps a scalar offset to a ParagraphStyle id.
+    private static func paragraphStyleRuns(in storage: IWAArchive.Object) -> [(offset: Int, styleID: UInt64)] {
+        var runs: [(offset: Int, styleID: UInt64)] = []
+        var reader = ProtobufReader(storage.payload)
+        while let field = reader.next() {
+            guard field.number == 5, case .length(let wrapper) = field.value else { continue }
+            var wrapperReader = ProtobufReader(wrapper)
+            while let entry = wrapperReader.next() {
+                guard entry.number == 1, case .length(let runBytes) = entry.value else { continue }
+                var offset: Int?
+                var styleID: UInt64?
+                var runReader = ProtobufReader(runBytes)
+                while let runField = runReader.next() {
+                    switch (runField.number, runField.value) {
+                    case (1, .varint(let value)): offset = Int(exactly: value)
+                    case (2, .length(let reference)): styleID = referencedID(in: reference)
+                    default: continue
+                    }
+                }
+                if let offset, let styleID { runs.append((offset, styleID)) }
+            }
+        }
+        return runs.sorted { $0.offset < $1.offset }
+    }
+
+    /// The display name of a ParagraphStyle, resolved through its parent chain (an
+    /// anonymous override inherits its name from a named preset like "Title").
+    private static func styleName(_ styleID: UInt64?, objects: [UInt64: IWAArchive.Object],
+                                  visited: Set<UInt64> = []) -> String? {
+        guard let styleID, !visited.contains(styleID), let object = objects[styleID] else { return nil }
+        let (name, parents) = styleArchive(object)
+        if let name { return name }
+        var seen = visited
+        seen.insert(styleID)
+        for parent in parents {
+            if let resolved = styleName(parent, objects: objects, visited: seen) { return resolved }
+        }
+        return nil
+    }
+
+    /// A style's TSS.StyleArchive (field 1): its name (sub-field 1) and parent
+    /// style references (sub-fields 3 and 5).
+    private static func styleArchive(_ object: IWAArchive.Object) -> (name: String?, parents: [UInt64]) {
+        var archive: [UInt8]?
+        var reader = ProtobufReader(object.payload)
+        while let field = reader.next() {
+            if field.number == 1, case .length(let bytes) = field.value { archive = bytes; break }
+        }
+        guard let archive else { return (nil, []) }
+        var name: String?
+        var parents: [UInt64] = []
+        var sub = ProtobufReader(archive)
+        while let field = sub.next() {
+            switch (field.number, field.value) {
+            case (1, .length(let bytes)): name = String(bytes: bytes, encoding: .utf8)
+            case (3, .length(let reference)), (5, .length(let reference)):
+                if let id = referencedID(in: reference) { parents.append(id) }
+            default: continue
+            }
+        }
+        return (name, parents)
+    }
+
+    /// Markdown heading level for a paragraph-style name: Title → 1, Subtitle → 2,
+    /// Heading N → N+1 (so "Title" outranks "Heading 1"), capped at 6. Other styles
+    /// (Body, lists, …) aren't headings.
+    private static func headingLevel(_ name: String?) -> Int? {
+        guard let name else { return nil }
+        let lower = name.lowercased()
+        if lower.hasPrefix("title") { return 1 }
+        if lower.hasPrefix("subtitle") { return 2 }
+        if lower.hasPrefix("heading") {
+            let number = Int(name.filter(\.isNumber)) ?? 1
+            return min(number + 1, 6)
+        }
+        return nil
     }
 
     // MARK: - Object graph
