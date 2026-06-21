@@ -188,6 +188,9 @@ struct PagesConverterTests {
         #expect(markdown.contains("# Representative Import Fixture for Apple Pages"))
         #expect(markdown.contains("## 1. Body text and inline formatting"))
         #expect(markdown.contains("## 2. Lists"))
+        // Section 5 is preceded by a U+0004 section-break sentinel (a Body-styled
+        // run); the heading must still win the style vote once it's excluded.
+        #expect(markdown.contains("## 5. Landscape section and wider table"))
         #expect(markdown.contains("## 6. Dates and formula"))
 
         // Body paragraphs are not headings.

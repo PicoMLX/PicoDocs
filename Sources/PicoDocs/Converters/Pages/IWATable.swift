@@ -226,22 +226,20 @@ enum IWATable {
         for index in range where units[index] != 0xFFFC { kept.append(units[index]) }
         let text = String(decoding: kept, as: UTF16.self).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
-        guard let level = headingLevel(styleName(majorityStyle(styles, range, total: units.count),
+        guard let level = headingLevel(styleName(majorityStyle(units, styles, range, total: units.count),
                                                  objects: objects)) else { return text }
         let line = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         return String(repeating: "#", count: level) + " " + line
     }
 
-    /// The ParagraphStyle id covering the most of `range`. Runs are run-length (one
-    /// run can span several same-style paragraphs), and taking the dominant overlap
-    /// tolerates a run boundary that doesn't fall exactly on the paragraph edge.
-    private static func majorityStyle(_ runs: [(offset: Int, styleID: UInt64)], _ range: Range<Int>,
-                                      total: Int) -> UInt64? {
+    /// The ParagraphStyle id covering the most *visible* units of `range`. Control
+    /// and object-replacement units (which `normalize` later strips) don't vote, so
+    /// a section-break sentinel sitting before a short heading can't outweigh the
+    /// heading's own run. Runs are sorted and contiguous, so the runs overlapping
+    /// `range` form a slice found by binary search.
+    private static func majorityStyle(_ units: [UInt16], _ runs: [(offset: Int, styleID: UInt64)],
+                                      _ range: Range<Int>, total: Int) -> UInt64? {
         guard !runs.isEmpty else { return nil }
-        // Runs are sorted and contiguous, so the runs overlapping `range` form a
-        // slice. Binary-search its start (the first run ending past range.lowerBound)
-        // and scan until a run begins at/after range.upperBound, keeping this
-        // O(log M + overlap) per paragraph rather than O(M).
         var low = 0
         var high = runs.count - 1
         var first = runs.count
@@ -256,10 +254,20 @@ enum IWATable {
             let run = runs[index]
             guard run.offset < range.upperBound else { break }
             let runEnd = index + 1 < runs.count ? runs[index + 1].offset : total
-            let overlap = min(range.upperBound, runEnd) - max(range.lowerBound, run.offset)
+            var overlap = 0
+            for position in max(range.lowerBound, run.offset) ..< min(range.upperBound, runEnd)
+            where !isDroppedUnit(units[position]) { overlap += 1 }
             if overlap > bestOverlap { bestOverlap = overlap; best = run.styleID }
         }
         return best
+    }
+
+    /// Units that `PagesConverter.normalize` strips from the visible text — C0/C1
+    /// controls (except tab and newline, which it keeps) and the object-replacement
+    /// placeholder — so they must not influence the heading-style vote.
+    private static func isDroppedUnit(_ unit: UInt16) -> Bool {
+        if unit == 0x09 || unit == 0x0A { return false }
+        return unit <= 0x1F || (0x7F ... 0x9F).contains(unit) || unit == 0xFFFC
     }
 
     /// A body storage's paragraph-style runs (field 5, a wrapper of repeated runs),
