@@ -14,8 +14,8 @@
 //  inline at their attachment points in reading order (falling back to appending
 //  them after the body when attachments can't be mapped 1:1; see IWATable).
 //  Remaining rich structure (headings, styling, footnotes, inline images),
-//  number/formula table cells (text and dates are decoded), the legacy iWork '09
-//  XML format, and
+//  duration table cells (text, dates, numbers, and formula results are decoded),
+//  the legacy iWork '09 XML format, and
 //  ingesting a `.pages` *package directory* (an on-disk bundle, which the
 //  FileFetcher currently treats as a folder) are planned follow-ups; this
 //  converter raises a clear, actionable error for inputs it can't yet read

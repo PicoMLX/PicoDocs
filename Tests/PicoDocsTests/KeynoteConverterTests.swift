@@ -144,12 +144,15 @@ struct KeynoteConverterTests {
         // Object-replacement image placeholders are stripped.
         #expect(!markdown.unicodeScalars.contains("\u{FFFC}"))
 
-        // Tables are reconstructed and appended after the slides — text cells via
-        // the inline-text store, dates decoded from the cell record.
+        // Tables are reconstructed and placed with their slide — text via the
+        // inline-text store, dates from the cell record, and decimal128
+        // number/formula cells (the last row sums each column: 3+4+5=12,
+        // 4.66+36.14+2.76=43.56).
         let tables = result.sections.filter { $0.kind == .table }
         #expect(tables.count == 2)
         #expect(tables.contains { $0.markdown.contains("| R1C1 | R1C2 | R1C3 | R1C4 |") })
-        #expect(tables.contains { $0.markdown.contains("| Item 1 | 2026-06-18 |") })
+        #expect(tables.contains { $0.markdown.contains("| Item 1 | 2026-06-18 | 3 | 4.66 |") })
+        #expect(tables.contains { $0.markdown.contains("| Item 4 |  | 12 | 43.56 |") })
 
         // Each table is placed with the slide that owns it (slides 4 and 5),
         // carrying that slide's number — and interleaved, not appended at the end

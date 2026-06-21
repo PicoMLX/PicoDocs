@@ -23,10 +23,10 @@
 //
 //  Confirmed against real `.pages` and `.key` fixtures (text + date cells).
 //
-//  Scope: text and date cells; number, duration, and formula cells aren't
+//  Scope: text, date, number, and formula-result cells; duration cells aren't
 //  decoded yet and render empty. For Pages, tables are placed inline at their
-//  attachment point (see PagesConverter); for Keynote they're appended after the
-//  slides.
+//  attachment point (see PagesConverter); for Keynote, with the slide that owns
+//  them (see KeynoteConverter).
 //
 
 import Foundation
@@ -40,12 +40,15 @@ enum IWATable {
     private static let storageType: UInt64 = 2001
     private static let tableModelTypes: Set<UInt64> = [6001, 6316]   // TST.TableModelArchive
     private static let inlineListType: UInt64 = 1        // DataList.list_type for inline cell text
-    // Cell record value-type byte (record offset 1): rich text (key → f1==8 list),
-    // inline text (key → f1==1 list), and date (double, seconds since 2001-01-01,
-    // at offset +12). Number/duration/formula cells aren't decoded yet.
+    // Cell record value-type byte (record offset 1) selects how to read offset
+    // +12: rich text key (f1==8 list), inline text key (f1==1 list), a date
+    // (double, seconds since 2001-01-01), or a number / formula result (IEEE-754
+    // decimal128). Duration cells aren't decoded yet.
     private static let richTextCell: UInt8 = 0x09
     private static let inlineTextCell: UInt8 = 0x03
     private static let dateCell: UInt8 = 0x05
+    private static let numberCell: UInt8 = 0x02
+    private static let formulaCell: UInt8 = 0x0a
 
     /// One ordered piece of a converted body — a run of text or a reconstructed
     /// table, in reading order. Text is raw; the caller normalizes it.
@@ -435,9 +438,9 @@ enum IWATable {
 
     /// The rendered text of a cell record (`05 <type> …`): rich or inline text via
     /// the string maps (key is a little-endian uint32 at +12), or a date (double,
-    /// seconds since 2001-01-01, at +12). Number/duration/formula cells aren't
-    /// decoded yet and render as "". Returns "" (a present-but-empty cell) on any
-    /// unhandled type or out-of-bounds read.
+    /// seconds since 2001-01-01, at +12), or a number / formula result (decimal128
+    /// at +12). Duration cells aren't decoded yet. Returns "" (a present-but-empty
+    /// cell) on any unhandled type or out-of-bounds read.
     private static func cellText(in buffer: [UInt8], at offset: Int,
                                  rich: [UInt32: String], inline: [UInt32: String]) -> String {
         guard offset >= 0, offset + 2 <= buffer.count, buffer[offset] == 0x05 else { return "" }
@@ -451,9 +454,82 @@ enum IWATable {
         case dateCell:
             guard let seconds = readDouble(buffer, at: offset + 12) else { return "" }
             return isoDate(seconds)
+        case numberCell, formulaCell:
+            return decimalString(in: buffer, at: offset + 12)
         default:
             return ""
         }
+    }
+
+    /// A number or formula-result cell stores its value as an IEEE-754 decimal128
+    /// (16 bytes, little-endian) at offset +12. Decodes the full 113-bit
+    /// coefficient (any precision) into a decimal string — plain for everyday
+    /// magnitudes, scientific notation for extreme exponents. Returns "" only for
+    /// the rare large-coefficient encoding (combination field 0b11) or out-of-bounds.
+    private static func decimalString(in buffer: [UInt8], at offset: Int) -> String {
+        guard offset >= 0, offset + 16 <= buffer.count else { return "" }
+        let high = buffer[offset + 15]
+        guard (high >> 5) & 0x3 != 0x3 else { return "" }     // large-coefficient form
+        let exponent = ((Int(high & 0x7F) << 7) | Int(buffer[offset + 14] >> 1)) - 6176
+        // Coefficient is the low 113 bits: bytes 0-13 (112 bits) + bit 112.
+        var coefficient = Array(buffer[offset ..< offset + 14])
+        coefficient.append(buffer[offset + 14] & 1)
+        return formatDecimal(negative: high & 0x80 != 0, coefficient: coefficient, exponent: exponent)
+    }
+
+    /// Formats `coefficient × 10^exponent` (coefficient as a little-endian
+    /// magnitude): a plain decimal for everyday magnitudes — trimming trailing
+    /// fractional zeros (420×10⁻² → "4.2", 35×10⁻² → "0.35") — or scientific
+    /// notation when the magnitude is extreme (e.g. "1E-200"), so no valid value
+    /// is dropped. A zero coefficient is always "0".
+    private static func formatDecimal(negative: Bool, coefficient: [UInt8], exponent: Int) -> String {
+        let digits = decimalDigits(coefficient)
+        if digits == "0" { return "0" }
+        let sign = negative ? "-" : ""
+
+        // Exponent if written with a single leading digit (d.ddd × 10^adjusted).
+        let adjusted = exponent + digits.count - 1
+        guard adjusted >= -6, adjusted < 21 else {     // extreme magnitude → scientific
+            var mantissa = String(digits.first!)
+            var fraction = String(digits.dropFirst())
+            while fraction.hasSuffix("0") { fraction.removeLast() }
+            if !fraction.isEmpty { mantissa += "." + fraction }
+            return sign + mantissa + "E\(adjusted)"
+        }
+
+        var result: String
+        if exponent >= 0 {
+            result = digits + String(repeating: "0", count: exponent)
+        } else {
+            var padded = digits
+            let fractionCount = -exponent
+            if padded.count <= fractionCount {
+                padded = String(repeating: "0", count: fractionCount - padded.count + 1) + padded
+            }
+            let split = padded.index(padded.endIndex, offsetBy: -fractionCount)
+            let integerPart = String(padded[..<split])
+            var fractionPart = String(padded[split...])
+            while fractionPart.hasSuffix("0") { fractionPart.removeLast() }
+            result = fractionPart.isEmpty ? integerPart : integerPart + "." + fractionPart
+        }
+        return sign + result
+    }
+
+    /// Decimal string of a little-endian magnitude, via repeated division by 10.
+    /// Returns "0" when the magnitude is zero.
+    private static func decimalDigits(_ littleEndianMagnitude: [UInt8]) -> String {
+        var value = littleEndianMagnitude
+        var digits = ""
+        while value.contains(where: { $0 != 0 }) {
+            var remainder = 0
+            for i in stride(from: value.count - 1, through: 0, by: -1) {
+                let current = (remainder << 8) | Int(value[i])
+                value[i] = UInt8(current / 10)
+                remainder = current % 10
+            }
+            digits = String(remainder) + digits
+        }
+        return digits.isEmpty ? "0" : digits
     }
 
     private static func readUInt32(_ buffer: [UInt8], at offset: Int) -> UInt32? {
