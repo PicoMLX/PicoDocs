@@ -216,6 +216,11 @@ struct PagesConverterTests {
 
         // Headings carry no inline emphasis even though the title's runs are bold.
         #expect(!markdown.contains("**Representative Import Fixture"))
+
+        // No stranded markup: control sentinels are skipped before emphasis/links
+        // are applied, so nothing wraps a character normalize later deletes.
+        #expect(!markdown.contains("****"))
+        #expect(!markdown.contains("[]("))
     }
 
     @Test("Detector routes a .pages package to the Pages format")

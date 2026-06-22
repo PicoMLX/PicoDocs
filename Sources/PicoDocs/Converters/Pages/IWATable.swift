@@ -268,17 +268,18 @@ enum IWATable {
 
     /// Renders a paragraph's text with inline hyperlinks and — when `emphasis` is on
     /// — bold/italic. Visible units are grouped first by hyperlink (so a link is a
-    /// single `[label](url)`), then by bold/italic within. Only the attachment
-    /// placeholder is removed here; control cleanup and soft-break folding
-    /// (U+000B/U+000C/U+2028 → newline) are left to `PagesConverter.normalize`, so a
-    /// soft break isn't swallowed mid-paragraph. Headings pass `emphasis: false`
-    /// (already emphasized) but still keep their links.
+    /// single `[label](url)`), then by bold/italic within. Soft breaks
+    /// (U+000B/U+000C/U+2028) are kept for `PagesConverter.normalize` to fold to
+    /// newlines, but the attachment placeholder and the controls `normalize` deletes
+    /// are skipped so markup never wraps a character that later vanishes (e.g. a bold
+    /// section-break sentinel leaving a stray `****`). Headings pass `emphasis: false`
+    /// (already emphasized) but keep their links.
     private static func renderInline(_ body: BodyStorage, _ range: Range<Int>,
                                      emphasis: Bool = true) -> String {
         var items: [(unit: UInt16, bold: Bool, italic: Bool, url: String?)] = []
         for index in range {
             let unit = body.units[index]
-            if unit == 0xFFFC { continue }
+            if unit == 0xFFFC || isStrippedControl(unit) { continue }
             var trait: (bold: Bool, italic: Bool)?
             if emphasis { trait = referenceID(at: index, in: body.characterStyles).flatMap { body.traits[$0] } }
             let url = referenceID(at: index, in: body.smartFields).flatMap { body.links[$0] }
@@ -385,6 +386,15 @@ enum IWATable {
     private static func isDroppedUnit(_ unit: UInt16) -> Bool {
         if unit == 0x09 || unit == 0x0A { return false }
         return unit <= 0x1F || (0x7F ... 0x9F).contains(unit) || unit == 0xFFFC
+    }
+
+    /// A control unit `PagesConverter.normalize` deletes outright, so inline
+    /// rendering skips it rather than wrap it in emphasis/link markup that would be
+    /// stranded once the control is gone (e.g. `****`). Tab and the breaks normalize
+    /// keeps or folds to a newline — U+0009, U+000A–U+000D, U+2028 — are not stripped.
+    private static func isStrippedControl(_ unit: UInt16) -> Bool {
+        if unit == 0x09 || (0x0A ... 0x0D).contains(unit) { return false }
+        return unit <= 0x1F || (0x7F ... 0x9F).contains(unit)
     }
 
     /// The reference id of the run covering `index` (the last run starting at or
