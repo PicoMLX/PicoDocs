@@ -248,18 +248,16 @@ enum IWATable {
     }
 
     /// One paragraph rendered to Markdown, or nil when it holds no text. A heading is
-    /// flattened to a single, space-separated line (no inline emphasis — it's already
-    /// a heading); a body paragraph keeps its interior spacing and gains inline
-    /// emphasis and hyperlinks.
+    /// flattened to a single, space-separated line and not emphasized (it's already a
+    /// heading) but keeps its hyperlinks; a body paragraph keeps its interior spacing
+    /// and gains inline emphasis and hyperlinks.
     private static func renderParagraph(_ body: BodyStorage, _ range: Range<Int>,
                                         objects: [UInt64: IWAArchive.Object]) -> String? {
         let style = majorityStyle(body.units, body.paragraphStyles, range, total: body.units.count)
         if let level = headingLevel(styleName(style, objects: objects)) {
-            var kept: [UInt16] = []
-            for index in range where body.units[index] != 0xFFFC { kept.append(body.units[index]) }
-            let text = String(decoding: kept, as: UTF16.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return nil }
-            let line = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+            let label = renderInline(body, range, emphasis: false)   // links kept, emphasis suppressed
+            guard !label.isEmpty else { return nil }
+            let line = label.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
             return String(repeating: "#", count: level) + " " + line
         }
         let rendered = renderInline(body, range)
@@ -268,15 +266,21 @@ enum IWATable {
 
     // MARK: - Inline emphasis & links
 
-    /// Renders one body paragraph with inline emphasis and hyperlinks. Visible units
-    /// are grouped first by hyperlink (so a link becomes a single `[label](url)`),
-    /// then by bold/italic within; dropped (control/attachment) units are skipped.
-    private static func renderInline(_ body: BodyStorage, _ range: Range<Int>) -> String {
+    /// Renders a paragraph's text with inline hyperlinks and — when `emphasis` is on
+    /// — bold/italic. Visible units are grouped first by hyperlink (so a link is a
+    /// single `[label](url)`), then by bold/italic within. Only the attachment
+    /// placeholder is removed here; control cleanup and soft-break folding
+    /// (U+000B/U+000C/U+2028 → newline) are left to `PagesConverter.normalize`, so a
+    /// soft break isn't swallowed mid-paragraph. Headings pass `emphasis: false`
+    /// (already emphasized) but still keep their links.
+    private static func renderInline(_ body: BodyStorage, _ range: Range<Int>,
+                                     emphasis: Bool = true) -> String {
         var items: [(unit: UInt16, bold: Bool, italic: Bool, url: String?)] = []
         for index in range {
             let unit = body.units[index]
-            if unit == 0xFFFC || isDroppedUnit(unit) { continue }
-            let trait = referenceID(at: index, in: body.characterStyles).flatMap { body.traits[$0] }
+            if unit == 0xFFFC { continue }
+            var trait: (bold: Bool, italic: Bool)?
+            if emphasis { trait = referenceID(at: index, in: body.characterStyles).flatMap { body.traits[$0] } }
             let url = referenceID(at: index, in: body.smartFields).flatMap { body.links[$0] }
             items.append((unit, trait?.bold ?? false, trait?.italic ?? false, url))
         }
@@ -374,9 +378,10 @@ enum IWATable {
         return best
     }
 
-    /// Units that `PagesConverter.normalize` strips from the visible text — C0/C1
-    /// controls (except tab and newline, which it keeps) and the object-replacement
-    /// placeholder — so they must not influence the style vote or inline rendering.
+    /// Units that won't survive into visible heading text — C0/C1 controls and soft
+    /// breaks (which `PagesConverter.normalize` strips or folds to newlines) and the
+    /// object-replacement placeholder — so they don't get a vote in the heading-style
+    /// tally. (Body rendering keeps soft breaks and lets `normalize` clean controls.)
     private static func isDroppedUnit(_ unit: UInt16) -> Bool {
         if unit == 0x09 || unit == 0x0A { return false }
         return unit <= 0x1F || (0x7F ... 0x9F).contains(unit) || unit == 0xFFFC
