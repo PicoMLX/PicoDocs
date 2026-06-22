@@ -5,7 +5,8 @@
 //  Reconstructs Apple iWork (Pages/Numbers/Keynote) tables from decompressed IWA
 //  object streams into GitHub-flavored Markdown grid tables, and (via
 //  `inlineBlocks`) renders the Pages body as paragraphs with Markdown headings,
-//  interleaving each table at its attachment point.
+//  inline bold/italic emphasis, and hyperlinks, interleaving each table at its
+//  attachment point.
 //
 //  A table is assembled from three object kinds, joined through the document
 //  object graph (`MessageInfo.object_references`):
@@ -40,6 +41,7 @@ enum IWATable {
     private static let stringListType: UInt64 = 8       // DataList.list_type for strings
     private static let richTextPayloadType: UInt64 = 6218
     private static let storageType: UInt64 = 2001
+    private static let hyperlinkFieldType: UInt64 = 2032   // TSWP.HyperlinkFieldArchive (smart field)
     private static let tableModelTypes: Set<UInt64> = [6001, 6316]   // TST.TableModelArchive
     private static let inlineListType: UInt64 = 1        // DataList.list_type for inline cell text
     // Cell record value-type byte (record offset 1) selects how to read offset
@@ -123,12 +125,13 @@ enum IWATable {
     }
 
     /// Splits the document body into ordered text/table blocks: body text is
-    /// rendered paragraph-by-paragraph with Markdown headings (from each
-    /// paragraph's ParagraphStyle), and each reconstructed table is placed inline
-    /// at its ￼ (U+FFFC) attachment position. Returns nil — so the caller can fall
-    /// back to appended tables — only when the ￼ markers can't be matched 1:1 to
-    /// attachment runs, so a table is never dropped. Offsets are UTF-16 code units,
-    /// the index space iWork's run/attachment character indices use.
+    /// rendered paragraph-by-paragraph with Markdown headings (from each paragraph's
+    /// ParagraphStyle) and inline emphasis/links (character styles and hyperlink
+    /// smart fields), and each reconstructed table is placed inline at its ￼
+    /// (U+FFFC) attachment position. Returns nil — so the caller can fall back to
+    /// appended tables — only when the ￼ markers can't be matched 1:1 to attachment
+    /// runs, so a table is never dropped. Offsets are UTF-16 code units, the index
+    /// space iWork's run/attachment character indices use.
     static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]]) -> [Block]? {
         let objects = buildObjects(streams)
         let tableMarkdown = reconstructTables(objects)
@@ -136,14 +139,12 @@ enum IWATable {
 
         var blocks: [Block] = []
         var placed = Set<UInt64>()
-        // Body storages in document (stream) order; each carries its own text
-        // (field 3), paragraph-style runs (field 5), and attachment runs (field 9).
+        // Body storages in document (stream) order; each carries its own text and
+        // run tables (paragraph/character styles, smart fields) and attachments.
         for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
-            guard let text = bodyStorageText(storage) else { continue }    // kind 0 only
-            let units = Array(text.utf16)            // iWork run/attachment offsets are UTF-16 code units
+            guard let body = bodyStorage(storage, objects: objects) else { continue }   // kind 0 only
             let attachments = attachmentRuns(in: storage)
-            let styles = paragraphStyleRuns(in: storage)
-            let markers = units.indices.filter { units[$0] == 0xFFFC }
+            let markers = body.units.indices.filter { body.units[$0] == 0xFFFC }
             guard markers.count == attachments.count else { return nil }    // can't map 1:1
 
             // Split the body only at table attachments; non-table markers (inline
@@ -153,13 +154,13 @@ enum IWATable {
             for (marker, attachment) in zip(markers, attachments) {
                 guard let tile = reachableTile(from: attachment.objectID, objects: objects, tiles: tiles),
                       let markdown = tableMarkdown[tile] else { continue }  // image: leave ￼ in the text
-                let segment = renderParagraphs(units, segmentStart ..< marker, styles: styles, objects: objects)
+                let segment = renderParagraphs(body, segmentStart ..< marker, objects: objects)
                 if !segment.isEmpty { blocks.append(.text(segment)) }
                 blocks.append(.table(markdown))
                 placed.insert(tile)
                 segmentStart = marker + 1                                   // drop the table ￼
             }
-            let tail = renderParagraphs(units, segmentStart ..< units.count, styles: styles, objects: objects)
+            let tail = renderParagraphs(body, segmentStart ..< body.units.count, objects: objects)
             if !tail.isEmpty { blocks.append(.text(tail)) }
         }
         // Commit to inline layout only if every reconstructed table found a home.
@@ -168,37 +169,69 @@ enum IWATable {
 
     /// The document body rendered as heading-aware Markdown *without* inline tables.
     /// Used by PagesConverter's fallback (when `inlineBlocks` bails on table
-    /// placement) so Title/Heading styles still produce `#`s while the tables are
-    /// appended separately; attachment marks are dropped. Empty when there is no
-    /// body text, so the caller can degrade to plain extraction.
+    /// placement) so styles still produce Markdown while the tables are appended
+    /// separately; attachment marks are dropped. Empty when there is no body text,
+    /// so the caller can degrade to plain extraction.
     static func bodyMarkdown(documentStream: [UInt8], in streams: [[UInt8]]) -> String {
         let objects = buildObjects(streams)
         var parts: [String] = []
         for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
-            guard let text = bodyStorageText(storage) else { continue }    // kind 0 only
-            let units = Array(text.utf16)
-            let styles = paragraphStyleRuns(in: storage)
-            let rendered = renderParagraphs(units, 0 ..< units.count, styles: styles, objects: objects)
+            guard let body = bodyStorage(storage, objects: objects) else { continue }
+            let rendered = renderParagraphs(body, 0 ..< body.units.count, objects: objects)
             if !rendered.isEmpty { parts.append(rendered) }
         }
         return parts.joined(separator: "\n\n")
     }
 
-    // MARK: - Headings
+    // MARK: - Body storage
+
+    /// One body storage prepared for rendering: its UTF-16 units plus the run tables
+    /// it carries — paragraph styles (field 5 → headings), character styles (field 8
+    /// → emphasis) and smart fields (field 11 → hyperlinks) — with character-style
+    /// traits and link URLs pre-resolved so rendering needs no further object lookups.
+    private struct BodyStorage {
+        let units: [UInt16]
+        let paragraphStyles: [(offset: Int, id: UInt64?)]
+        let characterStyles: [(offset: Int, id: UInt64?)]
+        let smartFields: [(offset: Int, id: UInt64?)]
+        let traits: [UInt64: (bold: Bool, italic: Bool)]
+        let links: [UInt64: String]
+    }
+
+    /// Builds a `BodyStorage` for a kind-0 text storage, or nil for a header/footer
+    /// (non-body) storage.
+    private static func bodyStorage(_ storage: IWAArchive.Object,
+                                    objects: [UInt64: IWAArchive.Object]) -> BodyStorage? {
+        guard let text = bodyStorageText(storage) else { return nil }       // kind 0 only
+        let characterStyles = indexedReferences(in: storage, field: 8)
+        let smartFields = indexedReferences(in: storage, field: 11)
+        var traits: [UInt64: (bold: Bool, italic: Bool)] = [:]
+        for id in Set(characterStyles.compactMap(\.id)) { traits[id] = characterTraits(of: id, in: objects) }
+        var links: [UInt64: String] = [:]
+        for id in Set(smartFields.compactMap(\.id)) where objects[id]?.type == hyperlinkFieldType {
+            if let url = hyperlinkURL(of: id, in: objects) { links[id] = url }
+        }
+        return BodyStorage(units: Array(text.utf16),
+                           paragraphStyles: indexedReferences(in: storage, field: 5),
+                           characterStyles: characterStyles, smartFields: smartFields,
+                           traits: traits, links: links)
+    }
+
+    // MARK: - Paragraph rendering
 
     /// Renders a UTF-16 range as Markdown: split into paragraphs at true paragraph
-    /// separators (not soft line breaks) and prefix each with `#`s when its dominant
-    /// ParagraphStyle is a heading. Paragraphs are joined by a blank line; interior
-    /// whitespace and soft breaks are left for `PagesConverter.normalize` to fold.
-    private static func renderParagraphs(_ units: [UInt16], _ range: Range<Int>,
-                                         styles: [(offset: Int, styleID: UInt64)],
+    /// separators (not soft line breaks) and render each — a heading prefixed with
+    /// `#`s, otherwise a body paragraph with inline emphasis/links. Paragraphs are
+    /// joined by a blank line; interior whitespace and soft breaks are left for
+    /// `PagesConverter.normalize` to fold.
+    private static func renderParagraphs(_ body: BodyStorage, _ range: Range<Int>,
                                          objects: [UInt64: IWAArchive.Object]) -> String {
         var paragraphs: [String] = []
         var start = range.lowerBound
         var index = range.lowerBound
         while index <= range.upperBound {
-            if index == range.upperBound || isParagraphSeparator(units[index]) {
-                if let paragraph = renderParagraph(units, start ..< index, styles: styles, objects: objects) {
+            if index == range.upperBound || isParagraphSeparator(body.units[index]) {
+                if let paragraph = renderParagraph(body, start ..< index, objects: objects) {
                     paragraphs.append(paragraph)
                 }
                 start = index + 1
@@ -214,30 +247,113 @@ enum IWATable {
         unit == 0x0A || unit == 0x0D || unit == 0x2029
     }
 
-    /// One paragraph rendered to Markdown, or nil when it holds no text. Attachment
-    /// marks are dropped and the edges trimmed; a body paragraph keeps its interior
-    /// spacing (control/whitespace cleanup is deferred to `normalize`), while a
-    /// heading is flattened to a single, space-separated line.
-    private static func renderParagraph(_ units: [UInt16], _ range: Range<Int>,
-                                        styles: [(offset: Int, styleID: UInt64)],
+    /// One paragraph rendered to Markdown, or nil when it holds no text. A heading is
+    /// flattened to a single, space-separated line and not emphasized (it's already a
+    /// heading) but keeps its hyperlinks; a body paragraph keeps its interior spacing
+    /// and gains inline emphasis and hyperlinks.
+    private static func renderParagraph(_ body: BodyStorage, _ range: Range<Int>,
                                         objects: [UInt64: IWAArchive.Object]) -> String? {
-        var kept: [UInt16] = []
-        kept.reserveCapacity(range.count)
-        for index in range where units[index] != 0xFFFC { kept.append(units[index]) }
-        let text = String(decoding: kept, as: UTF16.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return nil }
-        guard let level = headingLevel(styleName(majorityStyle(units, styles, range, total: units.count),
-                                                 objects: objects)) else { return text }
-        let line = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        return String(repeating: "#", count: level) + " " + line
+        let style = majorityStyle(body.units, body.paragraphStyles, range, total: body.units.count)
+        if let level = headingLevel(styleName(style, objects: objects)) {
+            let label = renderInline(body, range, emphasis: false)   // links kept, emphasis suppressed
+            guard !label.isEmpty else { return nil }
+            let line = label.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+            return String(repeating: "#", count: level) + " " + line
+        }
+        let rendered = renderInline(body, range)
+        return rendered.isEmpty ? nil : rendered
     }
+
+    // MARK: - Inline emphasis & links
+
+    /// Renders a paragraph's text with inline hyperlinks and — when `emphasis` is on
+    /// — bold/italic. Visible units are grouped first by hyperlink (so a link is a
+    /// single `[label](url)`), then by bold/italic within. Soft breaks
+    /// (U+000B/U+000C/U+2028) are kept for `PagesConverter.normalize` to fold to
+    /// newlines, but the attachment placeholder and the controls `normalize` deletes
+    /// are skipped so markup never wraps a character that later vanishes (e.g. a bold
+    /// section-break sentinel leaving a stray `****`). Headings pass `emphasis: false`
+    /// (already emphasized) but keep their links.
+    private static func renderInline(_ body: BodyStorage, _ range: Range<Int>,
+                                     emphasis: Bool = true) -> String {
+        var items: [(unit: UInt16, bold: Bool, italic: Bool, url: String?)] = []
+        for index in range {
+            let unit = body.units[index]
+            if unit == 0xFFFC || isStrippedControl(unit) { continue }
+            var trait: (bold: Bool, italic: Bool)?
+            if emphasis { trait = referenceID(at: index, in: body.characterStyles).flatMap { body.traits[$0] } }
+            let url = referenceID(at: index, in: body.smartFields).flatMap { body.links[$0] }
+            items.append((unit, trait?.bold ?? false, trait?.italic ?? false, url))
+        }
+        var output = ""
+        var i = 0
+        while i < items.count {
+            let url = items[i].url
+            var j = i
+            while j < items.count, items[j].url == url { j += 1 }
+            let inner = renderEmphasis(items[i ..< j])
+            if let url, !inner.isEmpty {
+                output += "[\(escapeLinkLabel(inner))](\(escapeLinkDestination(url)))"
+            } else {
+                output += inner
+            }
+            i = j
+        }
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Renders a run of attributed units (constant hyperlink) by grouping consecutive
+    /// units with the same bold/italic and wrapping each group with emphasis markers.
+    private static func renderEmphasis(_ items: ArraySlice<(unit: UInt16, bold: Bool, italic: Bool, url: String?)>) -> String {
+        var output = ""
+        var i = items.startIndex
+        while i < items.endIndex {
+            let bold = items[i].bold
+            let italic = items[i].italic
+            var j = i
+            while j < items.endIndex, items[j].bold == bold, items[j].italic == italic { j += 1 }
+            let text = String(decoding: items[i ..< j].map(\.unit), as: UTF16.self)
+            output += emphasize(text, bold: bold, italic: italic)
+            i = j
+        }
+        return output
+    }
+
+    /// Wraps `text` in `**`/`*` for bold/italic, keeping the markers hugging the text
+    /// (` **word** ` rather than `** word **`), matching the other converters.
+    private static func emphasize(_ text: String, bold: Bool, italic: Bool) -> String {
+        guard bold || italic else { return text }
+        let isSpace: (Character) -> Bool = { $0 == " " || $0 == "\t" }
+        let afterLeading = text.drop(while: isSpace)
+        let leading = String(text.prefix(text.count - afterLeading.count))
+        let trailingCount = afterLeading.reversed().prefix(while: isSpace).count
+        let trailing = String(afterLeading.suffix(trailingCount))
+        var core = String(afterLeading.dropLast(trailingCount))
+        guard !core.isEmpty else { return text }
+        if italic { core = "*\(core)*" }
+        if bold { core = "**\(core)**" }
+        return leading + core + trailing
+    }
+
+    private static func escapeLinkLabel(_ text: String) -> String {
+        text.replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]")
+    }
+
+    /// Spaces or parentheses break a bare inline-link destination; wrap such URLs in
+    /// `<>` (a valid CommonMark destination form).
+    private static func escapeLinkDestination(_ url: String) -> String {
+        (url.contains(" ") || url.contains("(") || url.contains(")")) ? "<\(url)>" : url
+    }
+
+    // MARK: - Style & run resolution
 
     /// The ParagraphStyle id covering the most *visible* units of `range`. Control
     /// and object-replacement units (which `normalize` later strips) don't vote, so
     /// a section-break sentinel sitting before a short heading can't outweigh the
-    /// heading's own run. Runs are sorted and contiguous, so the runs overlapping
-    /// `range` form a slice found by binary search.
-    private static func majorityStyle(_ units: [UInt16], _ runs: [(offset: Int, styleID: UInt64)],
+    /// heading's own run; runs without a style id don't vote either. Runs are sorted
+    /// and contiguous, so the runs overlapping `range` form a slice found by binary
+    /// search.
+    private static func majorityStyle(_ units: [UInt16], _ runs: [(offset: Int, id: UInt64?)],
                                       _ range: Range<Int>, total: Int) -> UInt64? {
         guard !runs.isEmpty else { return nil }
         var low = 0
@@ -253,47 +369,125 @@ enum IWATable {
         for index in first ..< runs.count {
             let run = runs[index]
             guard run.offset < range.upperBound else { break }
+            guard let id = run.id else { continue }
             let runEnd = index + 1 < runs.count ? runs[index + 1].offset : total
             var overlap = 0
             for position in max(range.lowerBound, run.offset) ..< min(range.upperBound, runEnd)
             where !isDroppedUnit(units[position]) { overlap += 1 }
-            if overlap > bestOverlap { bestOverlap = overlap; best = run.styleID }
+            if overlap > bestOverlap { bestOverlap = overlap; best = id }
         }
         return best
     }
 
-    /// Units that `PagesConverter.normalize` strips from the visible text — C0/C1
-    /// controls (except tab and newline, which it keeps) and the object-replacement
-    /// placeholder — so they must not influence the heading-style vote.
+    /// Units that won't survive into visible heading text — C0/C1 controls and soft
+    /// breaks (which `PagesConverter.normalize` strips or folds to newlines) and the
+    /// object-replacement placeholder — so they don't get a vote in the heading-style
+    /// tally. (Body rendering keeps soft breaks and lets `normalize` clean controls.)
     private static func isDroppedUnit(_ unit: UInt16) -> Bool {
         if unit == 0x09 || unit == 0x0A { return false }
         return unit <= 0x1F || (0x7F ... 0x9F).contains(unit) || unit == 0xFFFC
     }
 
-    /// A body storage's paragraph-style runs (field 5, a wrapper of repeated runs),
-    /// sorted by offset: each maps a scalar offset to a ParagraphStyle id.
-    private static func paragraphStyleRuns(in storage: IWAArchive.Object) -> [(offset: Int, styleID: UInt64)] {
-        var runs: [(offset: Int, styleID: UInt64)] = []
+    /// A control unit `PagesConverter.normalize` deletes outright, so inline
+    /// rendering skips it rather than wrap it in emphasis/link markup that would be
+    /// stranded once the control is gone (e.g. `****`). Tab and the breaks normalize
+    /// keeps or folds to a newline — U+0009, U+000A–U+000D, U+2028 — are not stripped.
+    private static func isStrippedControl(_ unit: UInt16) -> Bool {
+        if unit == 0x09 || (0x0A ... 0x0D).contains(unit) { return false }
+        return unit <= 0x1F || (0x7F ... 0x9F).contains(unit)
+    }
+
+    /// The reference id of the run covering `index` (the last run starting at or
+    /// before it), or nil if none — or the covering run carries no reference. Runs
+    /// are sorted by offset.
+    private static func referenceID(at index: Int, in runs: [(offset: Int, id: UInt64?)]) -> UInt64? {
+        var low = 0
+        var high = runs.count - 1
+        var result: UInt64?
+        while low <= high {
+            let mid = (low + high) / 2
+            if runs[mid].offset <= index { result = runs[mid].id; low = mid + 1 } else { high = mid - 1 }
+        }
+        return result
+    }
+
+    /// A storage run table (a wrapper of repeated `{1: charOffset, 2: reference}`)
+    /// for the given field, sorted by offset. A run keeps a nil id when it carries an
+    /// offset but no reference, so a boundary that *ends* a span — e.g. where a
+    /// hyperlink stops — is preserved rather than absorbed into the previous run.
+    private static func indexedReferences(in storage: IWAArchive.Object,
+                                          field: Int) -> [(offset: Int, id: UInt64?)] {
+        var runs: [(offset: Int, id: UInt64?)] = []
         var reader = ProtobufReader(storage.payload)
-        while let field = reader.next() {
-            guard field.number == 5, case .length(let wrapper) = field.value else { continue }
+        while let outer = reader.next() {
+            guard outer.number == field, case .length(let wrapper) = outer.value else { continue }
             var wrapperReader = ProtobufReader(wrapper)
             while let entry = wrapperReader.next() {
                 guard entry.number == 1, case .length(let runBytes) = entry.value else { continue }
                 var offset: Int?
-                var styleID: UInt64?
+                var id: UInt64?
                 var runReader = ProtobufReader(runBytes)
                 while let runField = runReader.next() {
                     switch (runField.number, runField.value) {
                     case (1, .varint(let value)): offset = Int(exactly: value)
-                    case (2, .length(let reference)): styleID = referencedID(in: reference)
+                    case (2, .length(let reference)): id = referencedID(in: reference)
                     default: continue
                     }
                 }
-                if let offset, let styleID { runs.append((offset, styleID)) }
+                if let offset { runs.append((offset, id)) }
             }
         }
         return runs.sorted { $0.offset < $1.offset }
+    }
+
+    /// The bold/italic traits of a CharacterStyle, resolved through its parent chain
+    /// (properties archive field 11: bold = field 1, italic = field 2). A trait the
+    /// style doesn't set itself is inherited from a named preset (e.g. "Strong" /
+    /// "Emphasis"), mirroring how `styleName` resolves names; an explicit value wins
+    /// over the parents'. Underline (field 11 of that archive) has no Markdown form
+    /// and is dropped, matching the other converters.
+    private static func characterTraits(of styleID: UInt64, in objects: [UInt64: IWAArchive.Object],
+                                        visited: Set<UInt64> = []) -> (bold: Bool, italic: Bool) {
+        guard !visited.contains(styleID), let object = objects[styleID] else { return (false, false) }
+        var reader = ProtobufReader(object.payload)
+        var properties: [UInt8]?
+        while let field = reader.next() {
+            if field.number == 11, case .length(let bytes) = field.value { properties = bytes; break }
+        }
+        var bold: Bool?
+        var italic: Bool?
+        if let properties {
+            var propertyReader = ProtobufReader(properties)
+            while let field = propertyReader.next() {
+                switch (field.number, field.value) {
+                case (1, .varint(let value)): bold = value != 0
+                case (2, .varint(let value)): italic = value != 0
+                default: continue
+                }
+            }
+        }
+        // Fill any trait this style doesn't set itself from the parent chain.
+        if bold == nil || italic == nil {
+            var seen = visited
+            seen.insert(styleID)
+            for parent in styleArchive(object).parents {
+                let inherited = characterTraits(of: parent, in: objects, visited: seen)
+                if bold == nil, inherited.bold { bold = true }
+                if italic == nil, inherited.italic { italic = true }
+            }
+        }
+        return (bold ?? false, italic ?? false)
+    }
+
+    /// The URL of a HyperlinkField smart field (field 2).
+    private static func hyperlinkURL(of fieldID: UInt64,
+                                     in objects: [UInt64: IWAArchive.Object]) -> String? {
+        guard let object = objects[fieldID] else { return nil }
+        var reader = ProtobufReader(object.payload)
+        while let field = reader.next() {
+            if field.number == 2, case .length(let bytes) = field.value { return String(bytes: bytes, encoding: .utf8) }
+        }
+        return nil
     }
 
     /// The display name of a ParagraphStyle, resolved through its parent chain (an

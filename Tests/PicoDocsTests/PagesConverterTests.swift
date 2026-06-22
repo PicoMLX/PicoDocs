@@ -198,6 +198,31 @@ struct PagesConverterTests {
         #expect(!markdown.contains("## Plain paragraph before list"))
     }
 
+    @Test("PagesConverter renders character styles and hyperlinks as inline Markdown")
+    func realPagesInlineStyling() async throws {
+        let data = try Fixture.data("sample", "pages")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.pages")
+        let markdown = result.markdown()
+
+        // Bold/italic character runs become Markdown emphasis (underline is dropped,
+        // matching the other converters); markers hug the styled text.
+        #expect(markdown.contains("**Purpose.**"))
+        #expect(markdown.contains("**bold**"))
+        #expect(markdown.contains("*italic*"))
+        #expect(markdown.contains("underlined, and code-like"))   // underline left as plain text
+
+        // Hyperlink smart fields become inline links.
+        #expect(markdown.contains("[Apple Developer Documentation](https://developer.apple.com/documentation)"))
+
+        // Headings carry no inline emphasis even though the title's runs are bold.
+        #expect(!markdown.contains("**Representative Import Fixture"))
+
+        // No stranded markup: control sentinels are skipped before emphasis/links
+        // are applied, so nothing wraps a character normalize later deletes.
+        #expect(!markdown.contains("****"))
+        #expect(!markdown.contains("[]("))
+    }
+
     @Test("Detector routes a .pages package to the Pages format")
     func detectionRoutesToPages() {
         let pages = Self.makePagesFile(paragraphs: ["Hi"])
