@@ -16,7 +16,8 @@
 //  content reconstructed as Markdown grids and placed inline at their attachment
 //  points in reading order (falling back to appending them after the body when
 //  attachments can't be mapped 1:1; see IWATable).
-//  Remaining rich structure (underline, nested-list indentation, footnotes, inline images),
+//  Remaining rich structure (underline, nested/multi-line list items, explicit
+//  list-start numbers, footnotes, inline images),
 //  duration table cells (text, dates, numbers, and formula results are decoded),
 //  the legacy iWork '09 XML format, and
 //  ingesting a `.pages` *package directory* (an on-disk bundle, which the

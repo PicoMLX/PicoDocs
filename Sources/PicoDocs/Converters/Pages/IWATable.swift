@@ -242,8 +242,9 @@ enum IWATable {
     /// whitespace and soft breaks are left for `PagesConverter.normalize` to fold.
     private static func renderParagraphs(_ body: BodyStorage, _ range: Range<Int>,
                                          objects: [UInt64: IWAArchive.Object]) -> String {
-        var parts: [(text: String, list: UInt64?)] = []   // list = list-style id, nil for non-items
-        var orderedList: UInt64?                           // style of the ordered run currently counting
+        var parts: [(text: String, tight: Bool)] = []   // tight = join to previous with one newline
+        var lastList: UInt64?      // list style of the immediately preceding paragraph, if a list item
+        var orderedList: UInt64?   // style of the ordered run currently counting
         var counter = 0
         var start = range.lowerBound
         var index = range.lowerBound
@@ -251,28 +252,31 @@ enum IWATable {
             if index == range.upperBound || isParagraphSeparator(body.units[index]) {
                 switch renderParagraph(body, start ..< index, objects: objects) {
                 case .heading(let text)?:
-                    orderedList = nil
-                    parts.append((text, nil))
+                    parts.append((text, false))
+                    lastList = nil; orderedList = nil
                 case .body(let text)?:
                     let listStyle = referenceID(at: start, in: body.listStyles)
                     switch listStyle.flatMap({ body.listMarkers[$0] }) {
                     case .bullet?:
-                        orderedList = nil
-                        parts.append(("- " + text, listStyle))
+                        parts.append(("- " + text, listStyle == lastList))
+                        lastList = listStyle; orderedList = nil
                     case .ordered?:
                         if listStyle != orderedList { counter = 0; orderedList = listStyle }
                         counter += 1
-                        parts.append(("\(counter). " + text, listStyle))
+                        parts.append(("\(counter). " + text, listStyle == lastList))
+                        lastList = listStyle
                     case nil:
-                        orderedList = nil
-                        parts.append((text, nil))
+                        parts.append((text, false))
+                        lastList = nil; orderedList = nil
                     }
                 case nil:
-                    // An empty non-list paragraph (a blank line) breaks an ordered
-                    // run, so a following same-style list restarts at 1; an empty
-                    // list item does not.
-                    let listStyle = referenceID(at: start, in: body.listStyles)
-                    if listStyle.flatMap({ body.listMarkers[$0] }) == nil { orderedList = nil }
+                    // An empty paragraph that isn't a list item breaks the run: a
+                    // following same-style list restarts its numbering and is set off
+                    // by a blank line, not tight-joined. An empty list item leaves the
+                    // run intact.
+                    if referenceID(at: start, in: body.listStyles).flatMap({ body.listMarkers[$0] }) == nil {
+                        lastList = nil; orderedList = nil
+                    }
                 }
                 start = index + 1
             }
@@ -280,10 +284,7 @@ enum IWATable {
         }
         var output = ""
         for (i, part) in parts.enumerated() {
-            if i > 0 {
-                let tight = part.list != nil && part.list == parts[i - 1].list
-                output += tight ? "\n" : "\n\n"
-            }
+            if i > 0 { output += part.tight ? "\n" : "\n\n" }
             output += part.text
         }
         return output
@@ -541,12 +542,13 @@ enum IWATable {
 
     /// The list marker a ListStyle (field 7 → TSWP.ListStyleArchive) applies at the
     /// base indent level, from the first entry of its per-level marker-type array
-    /// (field 11): 2 = bullet, 3 = ordered/number. Any other value (0 = none, image
-    /// bullets, …) yields nil, so the paragraph renders as plain body text. Nesting
-    /// levels beyond the first aren't resolved yet, so nested items render flat.
-    private static func listMarker(of listStyleID: UInt64,
-                                   in objects: [UInt64: IWAArchive.Object]) -> ListMarker? {
-        guard let object = objects[listStyleID] else { return nil }
+    /// (field 11): 2 = bullet, 3 = ordered/number; any other value (0 = none, image
+    /// bullets, …) is not a list. A style that inherits its marker array instead of
+    /// carrying its own resolves through the parent chain (as names/traits do).
+    /// Nesting levels beyond the first aren't resolved yet, so nested items render flat.
+    private static func listMarker(of listStyleID: UInt64, in objects: [UInt64: IWAArchive.Object],
+                                   visited: Set<UInt64> = []) -> ListMarker? {
+        guard !visited.contains(listStyleID), let object = objects[listStyleID] else { return nil }
         var reader = ProtobufReader(object.payload)
         while let field = reader.next() {
             guard field.number == 11 else { continue }
@@ -564,6 +566,12 @@ enum IWATable {
             case 3: return .ordered
             default: return nil
             }
+        }
+        // No marker array of its own — inherit through the parent chain.
+        var seen = visited
+        seen.insert(listStyleID)
+        for parent in styleArchive(object).parents {
+            if let marker = listMarker(of: parent, in: objects, visited: seen) { return marker }
         }
         return nil
     }
