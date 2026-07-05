@@ -268,7 +268,11 @@ enum IWATable {
                         parts.append((text, nil))
                     }
                 case nil:
-                    break
+                    // An empty non-list paragraph (a blank line) breaks an ordered
+                    // run, so a following same-style list restarts at 1; an empty
+                    // list item does not.
+                    let listStyle = referenceID(at: start, in: body.listStyles)
+                    if listStyle.flatMap({ body.listMarkers[$0] }) == nil { orderedList = nil }
                 }
                 start = index + 1
             }
@@ -545,13 +549,35 @@ enum IWATable {
         guard let object = objects[listStyleID] else { return nil }
         var reader = ProtobufReader(object.payload)
         while let field = reader.next() {
-            if field.number == 11, case .varint(let value) = field.value {
-                switch value {
-                case 2: return .bullet
-                case 3: return .ordered
-                default: return nil
-                }
+            guard field.number == 11 else { continue }
+            // Field 11 is a repeated varint; take level 0. It may be unpacked (one
+            // varint field per level) or packed (all levels in one length field).
+            let level0: UInt64?
+            switch field.value {
+            case .varint(let value): level0 = value
+            case .length(let bytes): level0 = firstPackedVarint(bytes)
+            default: level0 = nil
             }
+            guard let level0 else { continue }
+            switch level0 {
+            case 2: return .bullet
+            case 3: return .ordered
+            default: return nil
+            }
+        }
+        return nil
+    }
+
+    /// The first base-128 varint in `bytes` — reads level 0 of a *packed* repeated
+    /// field. Returns nil on a truncated or over-long (> 64-bit) varint.
+    private static func firstPackedVarint(_ bytes: [UInt8]) -> UInt64? {
+        var value: UInt64 = 0
+        var shift: UInt64 = 0
+        for byte in bytes {
+            value |= UInt64(byte & 0x7F) << shift
+            if byte & 0x80 == 0 { return value }
+            shift += 7
+            if shift >= 64 { return nil }
         }
         return nil
     }
