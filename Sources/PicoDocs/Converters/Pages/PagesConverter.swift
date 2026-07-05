@@ -10,12 +10,13 @@
 //
 //  Scope (v1): extracts the document's text from the flat, single-file `.pages`
 //  ZIP — the common transport form (downloads, mail, Files exports) — as
-//  paragraphs with Markdown heading levels mapped from their paragraph styles and
+//  paragraphs with Markdown heading levels mapped from their paragraph styles,
 //  inline bold/italic emphasis and hyperlinks from their character styles and
-//  smart fields, plus table content reconstructed as Markdown grids and placed
-//  inline at their attachment points in reading order (falling back to appending
-//  them after the body when attachments can't be mapped 1:1; see IWATable).
-//  Remaining rich structure (underline, footnotes, inline images),
+//  smart fields, and bullet/numbered lists from their list styles, plus table
+//  content reconstructed as Markdown grids and placed inline at their attachment
+//  points in reading order (falling back to appending them after the body when
+//  attachments can't be mapped 1:1; see IWATable).
+//  Remaining rich structure (underline, nested-list indentation, footnotes, inline images),
 //  duration table cells (text, dates, numbers, and formula results are decoded),
 //  the legacy iWork '09 XML format, and
 //  ingesting a `.pages` *package directory* (an on-disk bundle, which the
