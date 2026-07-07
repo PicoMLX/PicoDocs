@@ -5,8 +5,8 @@
 //  Reconstructs Apple iWork (Pages/Numbers/Keynote) tables from decompressed IWA
 //  object streams into GitHub-flavored Markdown grid tables, and (via
 //  `inlineBlocks`) renders the Pages body as paragraphs with Markdown headings,
-//  inline bold/italic emphasis, and hyperlinks, interleaving each table at its
-//  attachment point.
+//  bullet/numbered lists, inline bold/italic emphasis, and hyperlinks,
+//  interleaving each table at its attachment point.
 //
 //  A table is assembled from three object kinds, joined through the document
 //  object graph (`MessageInfo.object_references`):
@@ -187,15 +187,18 @@ enum IWATable {
 
     /// One body storage prepared for rendering: its UTF-16 units plus the run tables
     /// it carries — paragraph styles (field 5 → headings), character styles (field 8
-    /// → emphasis) and smart fields (field 11 → hyperlinks) — with character-style
-    /// traits and link URLs pre-resolved so rendering needs no further object lookups.
+    /// → emphasis), smart fields (field 11 → hyperlinks) and list styles (field 7 →
+    /// bullets/numbers) — with character-style traits, link URLs and list markers
+    /// pre-resolved so rendering needs no further object lookups.
     private struct BodyStorage {
         let units: [UInt16]
         let paragraphStyles: [(offset: Int, id: UInt64?)]
         let characterStyles: [(offset: Int, id: UInt64?)]
         let smartFields: [(offset: Int, id: UInt64?)]
+        let listStyles: [(offset: Int, id: UInt64?)]
         let traits: [UInt64: (bold: Bool, italic: Bool)]
         let links: [UInt64: String]
+        let listMarkers: [UInt64: ListMarker]
     }
 
     /// Builds a `BodyStorage` for a kind-0 text storage, or nil for a header/footer
@@ -205,40 +208,86 @@ enum IWATable {
         guard let text = bodyStorageText(storage) else { return nil }       // kind 0 only
         let characterStyles = indexedReferences(in: storage, field: 8)
         let smartFields = indexedReferences(in: storage, field: 11)
+        let listStyles = indexedReferences(in: storage, field: 7)
         var traits: [UInt64: (bold: Bool, italic: Bool)] = [:]
         for id in Set(characterStyles.compactMap(\.id)) { traits[id] = characterTraits(of: id, in: objects) }
         var links: [UInt64: String] = [:]
         for id in Set(smartFields.compactMap(\.id)) where objects[id]?.type == hyperlinkFieldType {
             if let url = hyperlinkURL(of: id, in: objects) { links[id] = url }
         }
+        var listMarkers: [UInt64: ListMarker] = [:]
+        for id in Set(listStyles.compactMap(\.id)) {
+            if let marker = listMarker(of: id, in: objects) { listMarkers[id] = marker }
+        }
         return BodyStorage(units: Array(text.utf16),
                            paragraphStyles: indexedReferences(in: storage, field: 5),
                            characterStyles: characterStyles, smartFields: smartFields,
-                           traits: traits, links: links)
+                           listStyles: listStyles, traits: traits, links: links, listMarkers: listMarkers)
     }
 
     // MARK: - Paragraph rendering
 
+    /// The Markdown list marker a ListStyle produces at the base indent level.
+    private enum ListMarker { case bullet, ordered }
+
+    /// A rendered paragraph: a heading (never takes a list marker and breaks an
+    /// ordered run) or a body paragraph (may become a list item).
+    private enum RenderedParagraph { case heading(String), body(String) }
+
     /// Renders a UTF-16 range as Markdown: split into paragraphs at true paragraph
     /// separators (not soft line breaks) and render each — a heading prefixed with
-    /// `#`s, otherwise a body paragraph with inline emphasis/links. Paragraphs are
-    /// joined by a blank line; interior whitespace and soft breaks are left for
-    /// `PagesConverter.normalize` to fold.
+    /// `#`s, a list item prefixed with `-`/`N.`, otherwise a plain body paragraph
+    /// (all with inline emphasis/links). Consecutive items of the same list render
+    /// tight (one newline); everything else is separated by a blank line. Interior
+    /// whitespace and soft breaks are left for `PagesConverter.normalize` to fold.
     private static func renderParagraphs(_ body: BodyStorage, _ range: Range<Int>,
                                          objects: [UInt64: IWAArchive.Object]) -> String {
-        var paragraphs: [String] = []
+        var parts: [(text: String, tight: Bool)] = []   // tight = join to previous with one newline
+        var lastList: UInt64?      // list style of the immediately preceding paragraph, if a list item
+        var orderedList: UInt64?   // style of the ordered run currently counting
+        var counter = 0
         var start = range.lowerBound
         var index = range.lowerBound
         while index <= range.upperBound {
             if index == range.upperBound || isParagraphSeparator(body.units[index]) {
-                if let paragraph = renderParagraph(body, start ..< index, objects: objects) {
-                    paragraphs.append(paragraph)
+                switch renderParagraph(body, start ..< index, objects: objects) {
+                case .heading(let text)?:
+                    parts.append((text, false))
+                    lastList = nil; orderedList = nil
+                case .body(let text)?:
+                    let listStyle = referenceID(at: start, in: body.listStyles)
+                    switch listStyle.flatMap({ body.listMarkers[$0] }) {
+                    case .bullet?:
+                        parts.append(("- " + text, listStyle == lastList))
+                        lastList = listStyle; orderedList = nil
+                    case .ordered?:
+                        if listStyle != orderedList { counter = 0; orderedList = listStyle }
+                        counter += 1
+                        parts.append(("\(counter). " + text, listStyle == lastList))
+                        lastList = listStyle
+                    case nil:
+                        parts.append((text, false))
+                        lastList = nil; orderedList = nil
+                    }
+                case nil:
+                    // An empty paragraph that isn't a list item breaks the run: a
+                    // following same-style list restarts its numbering and is set off
+                    // by a blank line, not tight-joined. An empty list item leaves the
+                    // run intact.
+                    if referenceID(at: start, in: body.listStyles).flatMap({ body.listMarkers[$0] }) == nil {
+                        lastList = nil; orderedList = nil
+                    }
                 }
                 start = index + 1
             }
             index += 1
         }
-        return paragraphs.joined(separator: "\n\n")
+        var output = ""
+        for (i, part) in parts.enumerated() {
+            if i > 0 { output += part.tight ? "\n" : "\n\n" }
+            output += part.text
+        }
+        return output
     }
 
     /// Only true paragraph terminators split paragraphs; soft line breaks (U+2028,
@@ -250,18 +299,19 @@ enum IWATable {
     /// One paragraph rendered to Markdown, or nil when it holds no text. A heading is
     /// flattened to a single, space-separated line and not emphasized (it's already a
     /// heading) but keeps its hyperlinks; a body paragraph keeps its interior spacing
-    /// and gains inline emphasis and hyperlinks.
+    /// and gains inline emphasis and hyperlinks. The list marker (if any) is applied
+    /// by `renderParagraphs`, which holds the ordered-list counter.
     private static func renderParagraph(_ body: BodyStorage, _ range: Range<Int>,
-                                        objects: [UInt64: IWAArchive.Object]) -> String? {
+                                        objects: [UInt64: IWAArchive.Object]) -> RenderedParagraph? {
         let style = majorityStyle(body.units, body.paragraphStyles, range, total: body.units.count)
         if let level = headingLevel(styleName(style, objects: objects)) {
             let label = renderInline(body, range, emphasis: false)   // links kept, emphasis suppressed
             guard !label.isEmpty else { return nil }
             let line = label.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-            return String(repeating: "#", count: level) + " " + line
+            return .heading(String(repeating: "#", count: level) + " " + line)
         }
         let rendered = renderInline(body, range)
-        return rendered.isEmpty ? nil : rendered
+        return rendered.isEmpty ? nil : .body(rendered)
     }
 
     // MARK: - Inline emphasis & links
@@ -486,6 +536,56 @@ enum IWATable {
         var reader = ProtobufReader(object.payload)
         while let field = reader.next() {
             if field.number == 2, case .length(let bytes) = field.value { return String(bytes: bytes, encoding: .utf8) }
+        }
+        return nil
+    }
+
+    /// The list marker a ListStyle (field 7 → TSWP.ListStyleArchive) applies at the
+    /// base indent level, from the first entry of its per-level marker-type array
+    /// (field 11): 2 = bullet, 3 = ordered/number; any other value (0 = none, image
+    /// bullets, …) is not a list. A style that inherits its marker array instead of
+    /// carrying its own resolves through the parent chain (as names/traits do).
+    /// Nesting levels beyond the first aren't resolved yet, so nested items render flat.
+    private static func listMarker(of listStyleID: UInt64, in objects: [UInt64: IWAArchive.Object],
+                                   visited: Set<UInt64> = []) -> ListMarker? {
+        guard !visited.contains(listStyleID), let object = objects[listStyleID] else { return nil }
+        var reader = ProtobufReader(object.payload)
+        while let field = reader.next() {
+            guard field.number == 11 else { continue }
+            // Field 11 is a repeated varint; take level 0. It may be unpacked (one
+            // varint field per level) or packed (all levels in one length field).
+            let level0: UInt64?
+            switch field.value {
+            case .varint(let value): level0 = value
+            case .length(let bytes): level0 = firstPackedVarint(bytes)
+            default: level0 = nil
+            }
+            guard let level0 else { continue }
+            switch level0 {
+            case 2: return .bullet
+            case 3: return .ordered
+            default: return nil
+            }
+        }
+        // No marker array of its own — inherit through the parent chain.
+        var seen = visited
+        seen.insert(listStyleID)
+        for parent in styleArchive(object).parents {
+            if let marker = listMarker(of: parent, in: objects, visited: seen) { return marker }
+        }
+        return nil
+    }
+
+    /// The first base-128 varint in `bytes` — reads level 0 of a *packed* repeated
+    /// field. Returns nil on a truncated or over-long (> 64-bit) varint.
+    private static func firstPackedVarint(_ bytes: [UInt8]) -> UInt64? {
+        var value: UInt64 = 0
+        var shift: UInt64 = 0
+        for byte in bytes {
+            value |= UInt64(byte & 0x7F) << shift
+            if byte & 0x80 == 0 { return value }
+            shift += 7
+            if shift >= 64 { return nil }
         }
         return nil
     }

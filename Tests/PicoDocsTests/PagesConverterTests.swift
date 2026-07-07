@@ -223,6 +223,25 @@ struct PagesConverterTests {
         #expect(!markdown.contains("[]("))
     }
 
+    @Test("PagesConverter renders bullet and numbered lists as Markdown")
+    func realPagesLists() async throws {
+        let data = try Fixture.data("sample", "pages")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.pages")
+        let markdown = result.markdown()
+
+        // Bullet-list paragraphs (the "List Bullet" style) render with a `-` marker.
+        #expect(markdown.contains("- First unordered item with a longer line that wraps naturally."))
+        #expect(markdown.contains("- Second unordered item"))
+
+        // Numbered-list paragraphs render with a running counter that starts at 1.
+        #expect(markdown.contains("1. First ordered item"))
+        #expect(markdown.contains("2. Second ordered item"))
+        #expect(markdown.contains("3. Third ordered item"))
+
+        // Consecutive items of one list are tight — no blank line between them.
+        #expect(markdown.contains("1. First ordered item\n2. Second ordered item\n3. Third ordered item"))
+    }
+
     @Test("Detector routes a .pages package to the Pages format")
     func detectionRoutesToPages() {
         let pages = Self.makePagesFile(paragraphs: ["Hi"])
