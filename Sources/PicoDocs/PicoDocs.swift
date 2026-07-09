@@ -90,6 +90,118 @@ public enum PicoDocsEngine {
         return try DocumentRenderer.render(result, to: format)
     }
 
+    // MARK: - Writing (Markdown / ConverterResult -> office files)
+
+    /// Serialize a structured `ConverterResult` into an office file's bytes.
+    ///
+    /// The inverse of `convert`: detection/conversion produced the canonical
+    /// `ConverterResult`; this hands it to the first registered exporter that
+    /// accepts `format`. Throws `PicoDocsError.unableToExportToRequestedFormat`
+    /// when no exporter accepts (e.g. `.pages`/`.keynote`, which are unimplemented),
+    /// and `PicoDocsError.emptyDocument` for empty input.
+    public static func write(
+        _ result: ConverterResult,
+        to format: ExportableFileType,
+        registry: DocumentExporterRegistry = .default
+    ) throws -> Data {
+        // Mirror `convert`'s post-sanitize check: an empty document is an error,
+        // *unless* it carries image sections (an image-only doc is valid output).
+        let isEmpty = result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasImages = result.sections.contains { $0.kind == .image }
+        if isEmpty, !hasImages {
+            throw PicoDocsError.emptyDocument
+        }
+        // An image-only result carries `.image` byte sections but no body referencing
+        // them; `result.markdown()` (which omits `.image` carriers) is empty, so the
+        // markdown-driven exporters would emit a blank file. Synthesize one inline
+        // reference per carrier so the bytes are actually embedded.
+        let exportable = isEmpty && hasImages ? Self.withSynthesizedImageReferences(result) : result
+        return try registry.write(exportable, format: format)
+    }
+
+    /// Appends a `.body` section with an inline `![alt](name)` reference for each
+    /// `.image` carrier, so an image-only result renders its images instead of a
+    /// blank document. `name` mirrors the exporters' image-index key (the source
+    /// path's basename, falling back to the title); a carrier with neither is given
+    /// a generated `image-<n>.<ext>` name (extension from its MIME), assigned as its
+    /// `sourcePath` so the exporter's index derives the identical lookup key — so even
+    /// an unnamed, MIME-only carrier is embedded rather than silently dropped.
+    private static func withSynthesizedImageReferences(_ result: ConverterResult) -> ConverterResult {
+        var sections = result.sections
+        var refs: [DocumentSection] = []
+        var generatedCount = 0
+        for index in sections.indices where sections[index].kind == .image {
+            let section = sections[index]
+            var name = (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
+            if name?.isEmpty ?? true {
+                generatedCount += 1
+                let ext = OfficeMediaType.fileExtension(forMIME: section.metadata["mimeType"] ?? "")
+                let generated = "image-\(generatedCount).\(ext)"
+                sections[index].sourcePath = generated
+                name = generated
+            }
+            guard let name, !name.isEmpty else { continue }
+            let alt = section.title ?? name
+            refs.append(DocumentSection(kind: .body, markdown: "![\(alt)](\(name))"))
+        }
+        guard !refs.isEmpty else { return result }
+        sections.append(contentsOf: refs)
+        return ConverterResult(title: result.title, author: result.author, cover: result.cover, sections: sections)
+    }
+
+    /// Convenience: serialize a raw Markdown string into an office file's bytes.
+    ///
+    /// The string is wrapped into a single-body `ConverterResult` (exactly as the
+    /// plain-text/RTF converters model raw input), so LLM Markdown output and a
+    /// structured result share one write path. Empty input throws
+    /// `PicoDocsError.emptyDocument`.
+    public static func write(
+        markdown: String,
+        title: String? = nil,
+        author: String? = nil,
+        to format: ExportableFileType,
+        registry: DocumentExporterRegistry = .default
+    ) throws -> Data {
+        guard !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw PicoDocsError.emptyDocument
+        }
+        let result = ConverterResult(
+            title: title,
+            author: author,
+            sections: [DocumentSection(kind: .body, markdown: markdown)]
+        )
+        return try write(result, to: format, registry: registry)
+    }
+
+    /// Read bytes in one format and write bytes in another (office -> office),
+    /// bridging `convert` and `write`.
+    public static func transcode(
+        data: Data,
+        filename: String? = nil,
+        mimeType: String? = nil,
+        url: URL? = nil,
+        charset: String.Encoding? = nil,
+        to format: ExportableFileType,
+        enhanceReadability: Bool = true,
+        enableOCR: Bool = true,
+        sanitizeUnicode: Bool = false,
+        convertRegistry: DocumentConverterRegistry = .default,
+        exportRegistry: DocumentExporterRegistry = .default
+    ) async throws -> Data {
+        let result = try await convert(
+            data: data,
+            filename: filename,
+            mimeType: mimeType,
+            url: url,
+            charset: charset,
+            enhanceReadability: enhanceReadability,
+            enableOCR: enableOCR,
+            sanitizeUnicode: sanitizeUnicode,
+            registry: convertRegistry
+        )
+        return try write(result, to: format, registry: exportRegistry)
+    }
+
     // MARK: - StreamInfo construction
 
     static func makeStreamInfo(filename: String?, mimeType: String?, url: URL?, charset: String.Encoding?, enhanceReadability: Bool = true, enableOCR: Bool = true, sanitizeUnicode: Bool = false) -> StreamInfo {
