@@ -119,34 +119,52 @@ public enum PicoDocsEngine {
         return try registry.write(exportable, format: format)
     }
 
-    /// Appends a `.body` section with an inline `![alt](name)` reference for each
-    /// `.image` carrier, so an image-only result renders its images instead of a
-    /// blank document. `name` mirrors the exporters' image-index key (the source
-    /// path's basename, falling back to the title); a carrier with neither is given
-    /// a generated `image-<n>.<ext>` name (extension from its MIME), assigned as its
-    /// `sourcePath` so the exporter's index derives the identical lookup key — so even
-    /// an unnamed, MIME-only carrier is embedded rather than silently dropped.
+    /// Appends a `.body` section with an inline `![alt](reference)` for each `.image`
+    /// carrier, so an image-only result renders its images instead of a blank
+    /// document. `reference` is the carrier's full source path — the exporters'
+    /// primary image-index key — so two carriers that share a basename
+    /// (`charts/logo.png` vs `headers/logo.png`) each resolve to their own bytes;
+    /// it falls back to the title. A carrier with neither is given a generated
+    /// `image-<n>.<ext>` name (extension from its MIME), assigned as its `sourcePath`
+    /// so the exporter's index derives the identical lookup key — so even an
+    /// unnamed, MIME-only carrier is embedded rather than silently dropped.
     private static func withSynthesizedImageReferences(_ result: ConverterResult) -> ConverterResult {
         var sections = result.sections
         var refs: [DocumentSection] = []
         var generatedCount = 0
         for index in sections.indices where sections[index].kind == .image {
             let section = sections[index]
-            var name = (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
-            if name?.isEmpty ?? true {
+            var reference = [section.sourcePath, section.title]
+                .compactMap { $0 }
+                .first { !$0.isEmpty }
+            if reference == nil {
                 generatedCount += 1
                 let ext = OfficeMediaType.fileExtension(forMIME: section.metadata["mimeType"] ?? "")
                 let generated = "image-\(generatedCount).\(ext)"
                 sections[index].sourcePath = generated
-                name = generated
+                reference = generated
             }
-            guard let name, !name.isEmpty else { continue }
-            let alt = section.title ?? name
-            refs.append(DocumentSection(kind: .body, markdown: "![\(alt)](\(name))"))
+            guard let reference else { continue }
+            let alt = section.title ?? (reference as NSString).lastPathComponent
+            refs.append(DocumentSection(
+                kind: .body,
+                markdown: "![\(Self.escapeMarkdown(alt, "\\[]"))](\(Self.escapeMarkdown(reference, "\\()")))"
+            ))
         }
         guard !refs.isEmpty else { return result }
         sections.append(contentsOf: refs)
         return ConverterResult(title: result.title, author: result.author, cover: result.cover, sections: sections)
+    }
+
+    /// Backslash-escapes each character of `special` in `text`, so a synthesized
+    /// image label/destination containing `]` or `)` survives `MarkdownInlineParser`.
+    private static func escapeMarkdown(_ text: String, _ special: String) -> String {
+        var out = ""
+        for ch in text {
+            if special.contains(ch) { out.append("\\") }
+            out.append(ch)
+        }
+        return out
     }
 
     /// Convenience: serialize a raw Markdown string into an office file's bytes.

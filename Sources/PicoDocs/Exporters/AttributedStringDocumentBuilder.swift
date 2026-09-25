@@ -123,8 +123,11 @@ enum AttributedStringDocumentBuilder {
                 render(label, into: output, size: size, bold: bold, italic: italic, link: destination)
             case .image(let alt, _):
                 output.append(NSAttributedString(string: alt, attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
-            case .footnoteReference:
-                break   // references carry no inline glyph in this projection
+            case .footnoteReference(let id):
+                // No footnote machinery in RTF output; keep the marker as literal text
+                // (as the DOCX writer does) so references and `[^id]: note`
+                // definitions stay paired.
+                output.append(NSAttributedString(string: "[^\(id)]", attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
             }
         }
     }

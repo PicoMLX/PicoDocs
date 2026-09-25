@@ -69,7 +69,9 @@ public struct PPTXExporter: DocumentExporter {
         for block in MarkdownBlockParser.parse(result.markdown()) {
             if case .heading(let level, let text) = block, level <= 2 {
                 flush()
-                title = text
+                // The title placeholder shows visible text, not Markdown syntax
+                // (`# **Q4** results` -> "Q4 results"), matching the body lines.
+                title = plain(text)
                 body = []
                 started = true
             } else {

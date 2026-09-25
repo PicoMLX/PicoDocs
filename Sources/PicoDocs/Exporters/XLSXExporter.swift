@@ -59,8 +59,11 @@ public struct XLSXExporter: DocumentExporter {
         // while also carrying the name in `section.sheetName`. Without this guard that
         // redundant title would become cell A1 and push the real data down a row,
         // corrupting an XLSX round-trip. Drop only a *leading* heading that echoes the
-        // sheet name/title; genuine in-body headings stay as single-cell rows.
-        if case .heading(_, let text)? = blocks.first,
+        // sheet name/title, and only on `.sheet` sections: a titled body/chapter
+        // (`# Intro` under title "Intro") keeps its heading row, as do genuine
+        // in-body headings.
+        if section.kind == .sheet,
+           case .heading(_, let text)? = blocks.first,
            let title = section.sheetName ?? section.title,
            plain(text) == title {
             blocks.removeFirst()
@@ -69,7 +72,9 @@ public struct XLSXExporter: DocumentExporter {
         for block in blocks {
             switch block {
             case .table(let tableRows):
-                rows += tableRows
+                // Cells carry inline Markdown (`**Total**`, `[label](url)`); write the
+                // visible value, as every other block does, not the syntax.
+                rows += tableRows.map { $0.map(plain) }
             case .heading(_, let text):
                 rows.append([plain(text)])
             case .paragraph(let text):

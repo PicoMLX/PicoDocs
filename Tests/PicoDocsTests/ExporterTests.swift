@@ -267,6 +267,71 @@ struct ExporterTests {
         #expect(entry(data, "word/media/image-1.png") != nil)
         #expect(entry(data, "word/media/image-1.bin") == nil)
     }
+
+    // MARK: - Regression: third review round
+
+    @Test("Image-only result keeps same-basename carriers from different paths distinct")
+    func docxImageOnlySameBasename() throws {
+        let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        // No body referencing them: the engine synthesizes the refs, which must keep
+        // the full paths or both lookups hit the (dropped) ambiguous basename.
+        let img1 = DocumentSection(
+            title: "logo.png", kind: .image, markdown: "",
+            sourcePath: "charts/logo.png", metadata: ["mimeType": "image/png", "base64": pngBase64]
+        )
+        let img2 = DocumentSection(
+            title: "logo.png", kind: .image, markdown: "",
+            sourcePath: "headers/logo.png", metadata: ["mimeType": "image/png", "base64": pngBase64]
+        )
+        let data = try PicoDocsEngine.write(ConverterResult(sections: [img1, img2]), to: .docx)
+        #expect(entry(data, "word/media/logo.png") != nil)
+        #expect(entry(data, "word/media/logo-2.png") != nil)
+    }
+
+    @Test("XLSX writes table cells' visible text, not inline Markdown")
+    func xlsxTableCellsArePlain() throws {
+        let markdown = """
+        | Item | Source |
+        | --- | --- |
+        | **Total** | [Spec](https://example.com/spec) |
+        """
+        let data = try PicoDocsEngine.write(markdown: markdown, to: .xlsx)
+        let sheet = try #require(text(data, "xl/worksheets/sheet1.xml"))
+        #expect(sheet.contains(">Total</t>"))
+        #expect(sheet.contains(">Spec</t>"))
+        #expect(!sheet.contains("**"))
+        #expect(!sheet.contains("example.com"))
+    }
+
+    @Test("XLSX keeps a titled body section's heading row")
+    func xlsxKeepsBodyTitleHeading() throws {
+        // Only `.sheet` sections carry the redundant `## <sheetName>` prefix; a
+        // chapter whose heading echoes its title must keep that row.
+        let section = DocumentSection(title: "Intro", kind: .body, markdown: "# Intro\n\nHello")
+        let data = try PicoDocsEngine.write(ConverterResult(sections: [section]), to: .xlsx)
+        let sheet = try #require(text(data, "xl/worksheets/sheet1.xml"))
+        #expect(sheet.contains(">Intro</t>"))
+        #expect(sheet.contains(">Hello</t>"))
+    }
+
+    @Test("PPTX slide titles show visible text, not Markdown syntax")
+    func pptxTitleIsPlain() throws {
+        let data = try PicoDocsEngine.write(markdown: "# **Q4** [results](https://example.com)\n\nUp", to: .pptx)
+        let slide = try #require(text(data, "ppt/slides/slide1.xml"))
+        #expect(slide.contains(">Q4 results</a:t>"))
+        #expect(!slide.contains("**"))
+        #expect(!slide.contains("example.com"))
+    }
+
+    #if canImport(AppKit) || canImport(UIKit)
+    @Test("RTF keeps footnote markers on references and definitions")
+    func rtfKeepsFootnoteMarkers() throws {
+        let data = try PicoDocsEngine.write(markdown: "Claim[^1].\n\n[^1]: Source.", to: .rtf)
+        let rtf = try #require(String(data: data, encoding: .utf8))
+        // Once at the reference, once on the definition line.
+        #expect(rtf.components(separatedBy: "[^1]").count == 3)
+    }
+    #endif
 }
 
 @Suite("Markdown inline IR")
