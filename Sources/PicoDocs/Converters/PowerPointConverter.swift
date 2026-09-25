@@ -44,11 +44,18 @@ public struct PowerPointConverter: DocumentConverter {
 
         var sections: [DocumentSection] = []
         var images = ImageCollector()
+        var parts = PartCache(archive: archive)
         for (index, slidePath) in Self.slidePaths(presentation, archive: archive).enumerated() {
             try Task.checkCancellation()
             guard let slide = Self.xml(archive, path: slidePath) else { continue }
             let relationships = Self.relationships(archive, forPart: slidePath)
             var context = SlideContext(archive: archive, partPath: slidePath, relationships: relationships, images: images)
+            // Layout and master supply inherited list formatting for placeholders.
+            let layoutPath = Self.relatedPart(of: slidePath, type: "/slideLayout", relationships: relationships)
+            context.layout = layoutPath.flatMap { parts.document($0) }
+            context.master = layoutPath
+                .flatMap { Self.relatedPart(of: $0, type: "/slideMaster", relationships: Self.relationships(archive, forPart: $0)) }
+                .flatMap { parts.document($0) }
             let rendered = Self.renderSlide(slide, context: &context)
             images = context.images
             let notes = Self.notes(forSlide: slidePath, relationships: relationships, archive: archive)
@@ -104,7 +111,7 @@ public struct PowerPointConverter: DocumentConverter {
                                    images: ImageCollector(), embedsImages: false)
         let paragraphs = ((try? notes.getElementsByTag("p:sp").array()) ?? [])
             .filter { placeholderType(of: $0) == "body" }
-            .flatMap { shape in textBody(of: shape).map { renderParagraphs($0, isBodyPlaceholder: false, context: &context) } ?? [] }
+            .flatMap { shape in textBody(of: shape).map { renderParagraphs($0, inherited: noInheritance, context: &context) } ?? [] }
         let text = paragraphs.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : text
     }
@@ -130,6 +137,30 @@ public struct PowerPointConverter: DocumentConverter {
         let relationships: [String: Relationship]
         var images: ImageCollector
         var embedsImages = true
+        /// The slide's layout and master parts, when resolvable.
+        var layout: Document?
+        var master: Document?
+    }
+
+    /// Parses each shared part (layouts, masters) once per deck.
+    struct PartCache {
+        let archive: Archive
+        private var documents: [String: Document?] = [:]
+
+        init(archive: Archive) { self.archive = archive }
+
+        mutating func document(_ path: String) -> Document? {
+            if let cached = documents[path] { return cached }
+            let parsed = PowerPointConverter.xml(archive, path: path)
+            documents[path] = parsed
+            return parsed
+        }
+    }
+
+    /// The part a relationship of `type` (e.g. "/slideLayout") points to.
+    static func relatedPart(of part: String, type: String, relationships: [String: Relationship]) -> String? {
+        relationships.values.first { $0.type.hasSuffix(type) }
+            .map { WordConverter.resolvePartPath($0.target, relativeTo: directory(of: part)) }
     }
 
     /// A slide's title (from its title placeholder) and its other content blocks.
@@ -155,17 +186,15 @@ public struct PowerPointConverter: DocumentConverter {
                 if let type, skippedPlaceholders.contains(type) { continue }
                 guard let body = textBody(of: shape) else { continue }
                 if type == "title" || type == "ctrTitle" {
-                    let text = renderParagraphs(body, isBodyPlaceholder: false, context: &context)
+                    let text = renderParagraphs(body, inherited: noInheritance, context: &context)
                         .joined(separator: " ")
                         .split(whereSeparator: \.isWhitespace).joined(separator: " ")
                     if title == nil, !text.isEmpty { title = text; continue }
                     if !text.isEmpty { blocks.append(text) }
                     continue
                 }
-                // Body/object placeholders inherit bullets from the master, so
-                // their paragraphs are list items unless marked `a:buNone`.
-                let isBody = isPlaceholder(shape) && (type == nil || type == "body" || type == "obj")
-                let paragraphs = renderParagraphs(body, isBodyPlaceholder: isBody, context: &context)
+                let inherited = inheritedBullets(for: shape, context: context)
+                let paragraphs = renderParagraphs(body, inherited: inherited, context: &context)
                 if !paragraphs.isEmpty { blocks.append(paragraphs.joined(separator: "\n\n")) }
             case "p:graphicframe":
                 if let table = try? shape.getElementsByTag("a:tbl").first() {
@@ -197,7 +226,92 @@ public struct PowerPointConverter: DocumentConverter {
         return type.isEmpty ? nil : type
     }
 
-    private static func isPlaceholder(_ shape: Element) -> Bool { placeholder(of: shape) != nil }
+    // MARK: - Inherited list formatting
+
+    /// How a paragraph is marked.
+    enum Bullet: Equatable {
+        case plain
+        case bullet
+        case number(startAt: Int)
+    }
+
+    /// No inherited list formatting (titles, notes, table cells).
+    static let noInheritance: [Bullet?] = Array(repeating: nil, count: 9)
+
+    /// The bullet a paragraph-properties element (`a:pPr`, `a:lvlNpPr`) sets, or
+    /// nil when it doesn't say (and the next level of inheritance decides).
+    static func bullet(in properties: Element?) -> Bullet? {
+        guard let properties else { return nil }
+        if child(of: properties, named: "a:bunone") != nil { return .plain }
+        if let number = child(of: properties, named: "a:buautonum") {
+            return .number(startAt: Int((try? number.attr("startAt")) ?? "") ?? 1)
+        }
+        if child(of: properties, named: "a:buchar") != nil || child(of: properties, named: "a:bublip") != nil {
+            return .bullet
+        }
+        return nil
+    }
+
+    /// Per-level bullets a shape's paragraphs inherit when they don't set their
+    /// own. PowerPoint resolves list formatting through the shape's `a:lstStyle`,
+    /// then — for placeholders — the matching layout placeholder, the matching
+    /// master placeholder, and the master's `p:bodyStyle`. That's how a content
+    /// placeholder gets bullets while a Section Header or caption placeholder
+    /// (whose layout sets `a:buNone`) doesn't. Without a resolvable layout and
+    /// master, body/object placeholders fall back to bullets.
+    static func inheritedBullets(for shape: Element, context: SlideContext) -> [Bullet?] {
+        var sources: [Element?] = [textBody(of: shape).flatMap { child(of: $0, named: "a:lststyle") }]
+        if let placeholder = placeholder(of: shape) {
+            let type = ((try? placeholder.attr("type")) ?? "").isEmpty ? "obj" : ((try? placeholder.attr("type")) ?? "")
+            let index = (try? placeholder.attr("idx")) ?? ""
+            let bodyLike = ["obj", "body", "subTitle"].contains(type)
+            if context.layout == nil, context.master == nil {
+                // No inheritance chain to read: content placeholders are bulleted.
+                return (0..<9).map { _ in type == "subTitle" ? nil : Bullet.bullet }
+            }
+            if let layout = context.layout {
+                sources.append(matchingPlaceholder(in: layout, type: type, index: index).flatMap(listStyle))
+            }
+            if let master = context.master {
+                sources.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "").flatMap(listStyle))
+                if bodyLike {
+                    sources.append(try? master.getElementsByTag("p:bodyStyle").first())
+                }
+            }
+        }
+        return (0..<9).map { level in
+            for source in sources {
+                if let source, let bullet = bullet(in: child(of: source, named: "a:lvl\(level + 1)ppr")) {
+                    return bullet
+                }
+            }
+            return nil
+        }
+    }
+
+    /// The placeholder shape in a layout/master matching a slide placeholder: by
+    /// `idx` when both have one, else by type (a typeless placeholder is "obj",
+    /// which a master provides as "body").
+    private static func matchingPlaceholder(in part: Document, type: String, index: String) -> Element? {
+        let shapes = (try? part.getElementsByTag("p:sp").array()) ?? []
+        func phType(_ shape: Element) -> String? {
+            guard let placeholder = placeholder(of: shape) else { return nil }
+            let type = (try? placeholder.attr("type")) ?? ""
+            return type.isEmpty ? "obj" : type
+        }
+        if !index.isEmpty, let match = shapes.first(where: { shape in
+            placeholder(of: shape).flatMap { try? $0.attr("idx") } == index
+        }) {
+            return match
+        }
+        let equivalent: Set<String> = type == "title" || type == "ctrTitle" ? ["title", "ctrTitle"]
+            : type == "obj" || type == "body" ? ["obj", "body"] : [type]
+        return shapes.first { phType($0).map(equivalent.contains) ?? false }
+    }
+
+    private static func listStyle(_ shape: Element) -> Element? {
+        textBody(of: shape).flatMap { child(of: $0, named: "a:lststyle") }
+    }
 
     private static func placeholder(of shape: Element) -> Element? {
         child(of: shape, named: "p:nvsppr").flatMap { child(of: $0, named: "p:nvpr") }.flatMap { child(of: $0, named: "p:ph") }
@@ -213,7 +327,7 @@ public struct PowerPointConverter: DocumentConverter {
     /// are joined tight into one block; a nested item is indented under its parent
     /// (by the parent marker's width), and numbered lists count per level,
     /// honoring `startAt`.
-    static func renderParagraphs(_ body: Element, isBodyPlaceholder: Bool, context: inout SlideContext) -> [String] {
+    static func renderParagraphs(_ body: Element, inherited: [Bullet?], context: inout SlideContext) -> [String] {
         var blocks: [String] = []
         var listLines: [String] = []
         var markerWidths: [Int] = []          // marker width per open level
@@ -232,17 +346,15 @@ public struct PowerPointConverter: DocumentConverter {
             guard !text.isEmpty else { continue }
 
             let marker: String?
-            if let properties, child(of: properties, named: "a:bunone") != nil {
+            switch bullet(in: properties) ?? inherited[level] ?? .plain {
+            case .plain:
                 marker = nil
-            } else if let autoNumber = properties.flatMap({ child(of: $0, named: "a:buautonum") }) {
-                let start = Int((try? autoNumber.attr("startAt")) ?? "") ?? 1
+            case .bullet:
+                marker = "- "
+            case .number(let start):
                 let number = (counters[level] ?? start - 1) + 1
                 counters[level] = number
                 marker = "\(number). "
-            } else if properties.flatMap({ child(of: $0, named: "a:buchar") }) != nil || isBodyPlaceholder {
-                marker = "- "
-            } else {
-                marker = nil
             }
 
             guard let marker else {

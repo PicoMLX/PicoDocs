@@ -102,6 +102,59 @@ struct PowerPointConverterTests {
         """)
     }
 
+    @Test("List formatting is inherited through the layout and master")
+    func inheritedListFormatting() async throws {
+        // Master: body text is bulleted at level 1 and numbered at level 2.
+        let master = """
+        <?xml version="1.0" encoding="UTF-8"?><p:sldMaster \(Self.namespaces)><p:cSld><p:spTree>\
+        \(Self.shape(placeholder: "<p:ph type=\"body\" idx=\"1\"/>", paragraphs: []))\
+        </p:spTree></p:cSld><p:txStyles><p:bodyStyle>\
+        <a:lvl1pPr><a:buChar char="•"/></a:lvl1pPr><a:lvl2pPr><a:buAutoNum type="arabicPeriod"/></a:lvl2pPr>\
+        </p:bodyStyle></p:txStyles></p:sldMaster>
+        """
+        // Layout: a section-header style body placeholder (idx 1) switches bullets
+        // off; the content placeholder (idx 2) leaves the master's in force.
+        let layout = """
+        <?xml version="1.0" encoding="UTF-8"?><p:sldLayout \(Self.namespaces)><p:cSld><p:spTree>\
+        <p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>\
+        <p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr><a:buNone/></a:lvl1pPr></a:lstStyle></p:txBody></p:sp>\
+        \(Self.shape(placeholder: "<p:ph idx=\"2\"/>", paragraphs: []))\
+        </p:spTree></p:cSld></p:sldLayout>
+        """
+        let slideShapes = Self.titleShape("Inherited")
+            + Self.shape(placeholder: "<p:ph type=\"body\" idx=\"1\"/>", paragraphs: ["<a:p><a:r><a:t>Section subtitle</a:t></a:r></a:p>"])
+            + Self.shape(placeholder: "<p:ph idx=\"2\"/>", paragraphs: [
+                "<a:p><a:r><a:t>Point</a:t></a:r></a:p>",
+                "<a:p><a:pPr lvl=\"1\"/><a:r><a:t>Sub-point</a:t></a:r></a:p>",
+                "<a:p><a:pPr lvl=\"1\"/><a:r><a:t>Another</a:t></a:r></a:p>",
+            ])
+            + Self.shape(placeholder: nil, paragraphs: ["<a:p><a:r><a:t>Text box</a:t></a:r></a:p>"])
+        let deck = Self.deck(
+            slides: [.init(file: "slide1.xml", shapes: slideShapes, relationships: [
+                ("rIdLayout", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout", "../slideLayouts/slideLayout1.xml"),
+            ])],
+            extraParts: [
+                (name: "ppt/slideLayouts/slideLayout1.xml", data: Array(layout.utf8)),
+                (name: "ppt/slideLayouts/_rels/slideLayout1.xml.rels", data: Array(Self.relationshipsXML([
+                    ("rId1", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster", "../slideMasters/slideMaster1.xml"),
+                ]).utf8)),
+                (name: "ppt/slideMasters/slideMaster1.xml", data: Array(master.utf8)),
+            ]
+        )
+        let markdown = try await PicoDocsEngine.convert(data: deck, filename: "inherited.pptx").markdown()
+        #expect(markdown == """
+        ## Inherited
+
+        Section subtitle
+
+        - Point
+          1. Sub-point
+          2. Another
+
+        Text box
+        """)
+    }
+
     @Test("Runs keep emphasis, external links, fields, and line breaks")
     func runs() async throws {
         let paragraph = """
