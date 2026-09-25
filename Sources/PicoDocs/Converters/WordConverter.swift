@@ -35,10 +35,11 @@ public struct WordConverter: DocumentConverter {
             throw PicoDocsError.emptyDocument
         }
 
-        var blocks = try Self.renderBlocks(in: body, relationships: relationships)
+        let numbering = WordListNumbering(archive: archive)
+        var blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering)
         // Text boxes (shapes with text) store their content in `w:txbxContent`
         // outside the normal block flow; extract it and append as body blocks.
-        blocks += try Self.extractTextBoxes(from: body, relationships: relationships)
+        blocks += try Self.extractTextBoxes(from: body, relationships: relationships, numbering: numbering)
         var markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Footnote/endnote text lives in separate parts; append the referenced
@@ -95,13 +96,14 @@ public struct WordConverter: DocumentConverter {
     /// Renders the block-level children of a container (the body, or a content
     /// control's content) to Markdown blocks, recursing into `w:sdt` content
     /// controls (forms/templates wrap paragraphs and tables in them).
-    static func renderBlocks(in container: Element, relationships: [String: String]) throws -> [String] {
+    static func renderBlocks(in container: Element, relationships: [String: String],
+                             numbering: WordListNumbering? = nil) throws -> [String] {
         var blocks: [String] = []
         for element in container.children().array() {
             try Task.checkCancellation()
             switch element.tagName().lowercased() {
             case "w:p":
-                if let markdown = renderParagraph(element, relationships: relationships), !markdown.isEmpty {
+                if let markdown = renderParagraph(element, relationships: relationships, numbering: numbering), !markdown.isEmpty {
                     blocks.append(markdown)
                 }
             case "w:tbl":
@@ -109,7 +111,7 @@ public struct WordConverter: DocumentConverter {
                 if !table.isEmpty { blocks.append(table) }
             case "w:sdt":
                 if let content = try? element.getElementsByTag("w:sdtContent").first() {
-                    blocks.append(contentsOf: try renderBlocks(in: content, relationships: relationships))
+                    blocks.append(contentsOf: try renderBlocks(in: content, relationships: relationships, numbering: numbering))
                 }
             default:
                 continue
@@ -123,13 +125,14 @@ public struct WordConverter: DocumentConverter {
     /// blocks. Honors markup-compatibility (`mc:AlternateContent`) semantics by
     /// rendering only one branch per AlternateContent, so a text box isn't
     /// duplicated across `mc:Choice`/`mc:Fallback` (or multiple choices).
-    static func extractTextBoxes(from body: Element, relationships: [String: String]) throws -> [String] {
+    static func extractTextBoxes(from body: Element, relationships: [String: String],
+                                 numbering: WordListNumbering? = nil) throws -> [String] {
         var blocks: [String] = []
         // Iterate the Elements sequence directly (no intermediate array copy).
         guard let textBoxes = try? body.getElementsByTag("w:txbxContent") else { return blocks }
         for txbx in textBoxes {
             if !shouldRenderTextBox(txbx) { continue }
-            blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships))
+            blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships, numbering: numbering))
         }
         return blocks
     }
@@ -188,23 +191,28 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Paragraphs
 
-    static func renderParagraph(_ paragraph: Element, relationships: [String: String]) -> String? {
+    /// A paragraph as Markdown: a heading (from its style), a list item (marker
+    /// and nesting from `numbering`; without one, any `w:numPr` is a plain bullet),
+    /// or plain text. Nil when it holds no text.
+    static func renderParagraph(_ paragraph: Element, relationships: [String: String],
+                                numbering: WordListNumbering? = nil) -> String? {
         // Read the paragraph's *own* properties: a descendant search would also
         // reach paragraphs inside a text box anchored in this one, making the
         // anchor paragraph inherit the box's heading style or list membership.
         let properties = child(of: paragraph, named: "w:ppr")
         let style = properties.flatMap { child(of: $0, named: "w:pstyle") }.flatMap { try? $0.attr("w:val") }
-        let isListItem = properties.flatMap { child(of: $0, named: "w:numpr") } != nil
+        let numPr = properties.flatMap { child(of: $0, named: "w:numpr") }
         let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return nil }
 
         if let level = headingLevel(forStyle: style) {
             return String(repeating: "#", count: level) + " " + text
         }
-        if isListItem {
-            return "- " + text
-        }
-        return text
+        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style) } ?? (numPr != nil ? "- " : nil)
+        guard let prefix else { return text }
+        // Keep a multi-line item (manual `w:br`) inside the item.
+        let continuation = "\n" + String(repeating: " ", count: prefix.count)
+        return prefix + text.replacingOccurrences(of: "\n", with: continuation)
     }
 
     static func headingLevel(forStyle style: String?) -> Int? {
