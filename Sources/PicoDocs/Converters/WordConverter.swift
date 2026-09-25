@@ -630,18 +630,10 @@ public struct WordConverter: DocumentConverter {
     }
 
     // MARK: - Archive helpers
-    // (mirror EPUBConverter's; candidates for a shared ZIP utility later.)
+    // (entry reads go through the shared, size-hardened ZIPEntryReader.)
 
     static func readEntry(_ archive: Archive, path: String) -> Data? {
-        let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        guard let entry = archive[cleanPath] else { return nil }
-        var data = Data(capacity: Int(entry.uncompressedSize))
-        do {
-            _ = try archive.extract(entry) { data.append($0) }
-        } catch {
-            return nil
-        }
-        return data
+        ZIPEntryReader.read(archive, path: path)
     }
 
     static func decodeText(_ data: Data) -> String? {
