@@ -99,3 +99,34 @@ struct ReadabilityExtractionTests {
         #expect(!md.contains("Home"))
     }
 }
+
+@Suite("Readability compatibility")
+struct ReadabilityCompatibilityTests {
+
+    @Test("Legacy htmlString API returns a Readable")
+    func legacyHTMLStringAPI() async throws {
+        let html = """
+        <html><head><title>Compatibility Article</title></head><body>
+        <nav><a href="/home">Home</a> <a href="/about">About</a></nav>
+        <article class="article-content">
+        <h1>Compatibility Article</h1>
+        <p>This compatibility paragraph gives the scorer enough real editorial
+        text to identify this article as the main content instead of the
+        navigation links around it. It deliberately uses several natural
+        language clauses so the reader-mode scorer has a stable candidate.</p>
+        <p>A second compatibility paragraph keeps the extracted content long
+        enough for the pure-Swift Readability scorer and verifies that the
+        public wrapper still returns the retained Readable model expected by
+        older PicoDocs clients.</p>
+        </article>
+        </body></html>
+        """
+
+        let readability = await Readability(htmlString: html)
+        let readable = try await readability.parse()
+
+        #expect(readable.title == "Compatibility Article")
+        #expect(readable.textContent.contains("second compatibility paragraph"))
+        #expect(!readable.textContent.contains("Home"))
+    }
+}
