@@ -426,6 +426,33 @@ struct DocumentRendererTests {
         #expect(html.contains("&quot;"))
     }
 
+    @Test("HTML rendering neutralizes script URLs in links and images")
+    func htmlScriptURLsNeutralized() throws {
+        let markdown = """
+        [a](javascript:alert) [**b**](JaVaScRiPt:alert) [c](java\tscript:alert)
+        [d](vbscript:msgbox) [e](data:text/html;base64,PHNjcmlwdD4=)
+        ![f](javascript:alert) ![g](data:image/svg+xml;base64,PHN2Zz4=)
+        [ok](https://example.com) [mail](mailto:a@example.com) [rel](docs/a:b.html) [frag](#top)
+        ![pic](chart.png)
+        """
+        let html = try DocumentRenderer.render(ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: markdown),
+        ]), to: .html)
+        #expect(!html.lowercased().contains("javascript:"))
+        #expect(!html.contains("java\tscript"))
+        #expect(!html.contains("vbscript:"))
+        #expect(!html.contains("data:text/html"))
+        // The visible text (and its emphasis) survives; only the URL is dropped.
+        #expect(html.contains("<p>a <strong>b</strong> c<br>\nd e<br>\nf <img"))
+        // Safe destinations still render as live links/images.
+        #expect(html.contains("<img src=\"data:image/svg+xml;base64,PHN2Zz4=\" alt=\"g\">"))
+        #expect(html.contains("<a href=\"https://example.com\">ok</a>"))
+        #expect(html.contains("<a href=\"mailto:a@example.com\">mail</a>"))
+        #expect(html.contains("<a href=\"docs/a:b.html\">rel</a>"))
+        #expect(html.contains("<a href=\"#top\">frag</a>"))
+        #expect(html.contains("<img src=\"chart.png\" alt=\"pic\">"))
+    }
+
     @Test("Table cells round-trip backslashes and escaped pipes")
     func tableCellBackslashEscaping() throws {
         // Cell value `a\b|c`, escaped in the table as `a\\b\|c`.
