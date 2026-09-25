@@ -179,6 +179,61 @@ struct ConverterTests {
             == "word/media/image1.png")
     }
 
+    @Test("XLSX keeps each value in its column across blank cells")
+    func xlsxSparseCells() async throws {
+        // Blank cells are absent from a worksheet row. B2, A3, D* and row 4 are
+        // empty; E1/E2 sit past an entirely empty column D.
+        func cell(_ ref: String, _ text: String) -> String {
+            "<c r=\"\(ref)\" t=\"inlineStr\"><is><t>\(text)</t></is></c>"
+        }
+        let sheet = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+        <row r="1">\(cell("A1", "Name"))\(cell("B1", "Team"))\(cell("C1", "Score"))\(cell("E1", "Note"))</row>
+        <row r="2">\(cell("A2", "Alice"))<c r="C2"><v>42</v></c>\(cell("E2", "late"))</row>
+        <row r="3">\(cell("B3", "Ops"))<c r="C3"><v>7</v></c></row>
+        <row r="5"><c r="A5" s="1"/></row>
+        </sheetData></worksheet>
+        """
+        let workbook = Self.xlsx(sheetXML: sheet)
+        let markdown = try await PicoDocsEngine.convert(data: workbook, filename: "sparse.xlsx").markdown()
+        #expect(markdown.contains("""
+        | Name | Team | Score | Note |
+        | --- | --- | --- | --- |
+        | Alice |  | 42 | late |
+        |  | Ops | 7 |  |
+        """))
+        // The empty styled row adds nothing.
+        #expect(!markdown.contains("|  |  |  |  |"))
+    }
+
+    /// A minimal single-sheet XLSX package ("Sheet1") around `sheetXML`.
+    static func xlsx(sheetXML: String) -> Data {
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>\
+        </Relationships>
+        """
+        let workbook = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">\
+        <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>
+        """
+        let workbookRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>\
+        </Relationships>
+        """
+        return PagesConverterTests.makeZip([
+            (name: "_rels/.rels", data: Array(rels.utf8)),
+            (name: "xl/workbook.xml", data: Array(workbook.utf8)),
+            (name: "xl/_rels/workbook.xml.rels", data: Array(workbookRels.utf8)),
+            (name: "xl/worksheets/sheet1.xml", data: Array(sheetXML.utf8)),
+        ])
+    }
+
     @Test("XLSX converts each sheet's cells to Markdown")
     func xlsx() async throws {
         let md = try await PicoDocsEngine.convert(data: Fixture.data("sample", "xlsx"), filename: "sample.xlsx").markdown()
