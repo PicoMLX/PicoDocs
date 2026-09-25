@@ -690,15 +690,46 @@ public enum DocumentRenderer {
             )
         }
         for (index, link) in links.enumerated() {
-            let tag = link.isImage
-                ? "<img src=\"\(escapeHTML(link.url))\" alt=\"\(escapeHTML(link.label))\">"
-                : "<a href=\"\(escapeHTML(link.url))\">\(applyEmphasisHTML(escapeHTML(link.label)))</a>"
+            let tag: String
+            if !isSafeURL(link.url, isImage: link.isImage) {
+                // A script-capable URL (`javascript:` …) would make the exported
+                // page executable when displayed; keep only the visible text.
+                tag = link.isImage ? escapeHTML(link.label) : applyEmphasisHTML(escapeHTML(link.label))
+            } else if link.isImage {
+                tag = "<img src=\"\(escapeHTML(link.url))\" alt=\"\(escapeHTML(link.label))\">"
+            } else {
+                tag = "<a href=\"\(escapeHTML(link.url))\">\(applyEmphasisHTML(escapeHTML(link.label)))</a>"
+            }
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: tag)
         }
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
         }
         return result
+    }
+
+    /// URL schemes the HTML export emits as live links. Link and image URLs come
+    /// from untrusted documents (web pages, DOCX hyperlinks, LLM output), and the
+    /// HTML export is meant to be displayed, so anything that can run script —
+    /// `javascript:`, `vbscript:`, `data:text/html`, … — must not become an `href`
+    /// or `src`.
+    private static let safeLinkSchemes: Set<String> = ["http", "https", "mailto", "tel", "ftp"]
+
+    /// Whether `url` is safe to emit as an `href` (or, for images, a `src`):
+    /// relative references and fragments (no scheme) and allowlisted schemes are;
+    /// images may also use `data:image/…`. Browsers ignore ASCII whitespace and
+    /// control characters inside a scheme (`java\tscript:`), so those are dropped
+    /// before the scheme is read.
+    static func isSafeURL(_ url: String, isImage: Bool) -> Bool {
+        let compact = String(String.UnicodeScalarView(url.unicodeScalars.filter { $0.value > 0x20 && $0.value != 0x7F }))
+        guard let colon = compact.firstIndex(of: ":") else { return true }   // relative
+        let scheme = compact[..<colon]
+        // A `:` after `/`, `?` or `#` belongs to a path, query or fragment, so the
+        // reference is relative (`docs/a:b`, `#x:y`).
+        if scheme.contains(where: { $0 == "/" || $0 == "?" || $0 == "#" }) { return true }
+        let lowered = scheme.lowercased()
+        if safeLinkSchemes.contains(lowered) { return true }
+        return isImage && lowered == "data" && compact.lowercased().hasPrefix("data:image/")
     }
 
     private static func applyEmphasisHTML(_ text: String) -> String {

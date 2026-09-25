@@ -206,18 +206,6 @@ public struct PagesConverter: DocumentConverter {
     // MARK: - ZIP helper
 
     static func readEntry(_ archive: Archive, path: String) -> Data? {
-        let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        guard let entry = archive[cleanPath] else { return nil }
-        // Cap the reservation hint: `uncompressedSize` is untrusted central-
-        // directory data, only validated during extract. Clamp in UInt64 before
-        // the Int cast so a ZIP64 size > Int.max can't trap.
-        let reserve = Int(min(UInt64(entry.uncompressedSize), 16 * 1024 * 1024))
-        var data = Data(capacity: reserve)
-        do {
-            _ = try archive.extract(entry) { data.append($0) }
-        } catch {
-            return nil
-        }
-        return data
+        ZIPEntryReader.read(archive, path: path)
     }
 }
