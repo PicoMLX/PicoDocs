@@ -179,6 +179,37 @@ struct ConverterTests {
             == "word/media/image1.png")
     }
 
+    @Test("DOCX reads paragraph, run, and cell properties from the element itself")
+    func docxOwnProperties() async throws {
+        // An anchor paragraph whose run holds a text box: the box's paragraph is a
+        // bold Heading 1 list item, and a cell holds a nested table with a gridSpan.
+        // None of that may leak onto the anchor paragraph or the outer cell.
+        let document = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" \
+        xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" \
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" \
+        xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body>
+        <w:p><w:r><w:t>Anchor text</w:t><w:drawing><wp:anchor><a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent>\
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>\
+        <w:r><w:rPr><w:b/></w:rPr><w:t>Box heading</w:t></w:r></w:p>\
+        </w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>
+        <w:tbl>\
+        <w:tr><w:tc><w:p><w:r><w:t>Outer A</w:t></w:r></w:p>\
+        <w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val="3"/></w:tcPr><w:p><w:r><w:t>Inner</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:tc>\
+        <w:tc><w:p><w:r><w:t>Outer B</w:t></w:r></w:p></w:tc></w:tr>\
+        <w:tr><w:tc><w:p><w:r><w:t>1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>2</w:t></w:r></w:p></w:tc></w:tr>\
+        </w:tbl>
+        </w:body></w:document>
+        """
+        let docx = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8))])
+        let markdown = try await PicoDocsEngine.convert(data: docx, filename: "anchor.docx").markdown()
+        let blocks = markdown.components(separatedBy: "\n\n")
+        #expect(blocks.first == "Anchor text")                       // not "# **Anchor text**"
+        #expect(blocks.contains("# **Box heading**"))                // the box keeps its own style
+        #expect(markdown.contains("| Outer A<br>Inner | Outer B |\n| --- | --- |\n| 1 | 2 |"))
+    }
+
     @Test("XLSX keeps each value in its column across blank cells")
     func xlsxSparseCells() async throws {
         // Blank cells are absent from a worksheet row. B2, A3, D* and row 4 are
