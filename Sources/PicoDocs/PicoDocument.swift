@@ -97,8 +97,10 @@ public class PicoDocument {
     
     // MARK: - Children and parent
     
-    /// Reference to the parent document if this is a child document
-    public var parent: PicoDocument?
+    /// Reference to the parent document if this is a child document. Weak: the
+    /// parent owns its `children`, so a strong back-reference would keep every
+    /// document tree alive forever.
+    public weak var parent: PicoDocument?
     
     /// Array of child documents if this document contains other documents
     public var children: [PicoDocument]?
@@ -138,10 +140,12 @@ extension PicoDocument: Equatable {
     }
 }
 
-/// Conformance to Hashable protocol
+/// Conformance to Hashable protocol. Hashes what `==` compares (`originURL`):
+/// equal documents must hash equally, or sets and dictionaries (and SwiftUI's
+/// `ForEach(id: \.self)`) treat two equal documents as distinct.
 extension PicoDocument: Hashable {
     nonisolated public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
+        hasher.combine(originURL)
     }
 }
 

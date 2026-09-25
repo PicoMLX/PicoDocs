@@ -26,6 +26,9 @@ extension PicoDocument {
             // TaskGroup parallelism is a possible later optimization (complicated
             // here by the non-Sendable progressHandler).
             if let urls, recursive {
+                // Re-fetching rebuilds the child list from the current listing
+                // instead of appending a second copy of every child.
+                await resetChildren()
                 for childURL in urls {
                     let child = await PicoDocument(url: childURL, parent: self)
                     do {
@@ -143,6 +146,12 @@ extension PicoDocument {
         self.author = result.author
         self.cover = result.cover
         self.status = .parsed
+    }
+
+    /// Detaches the current children before a re-fetch repopulates them.
+    private func resetChildren() {
+        children?.forEach { $0.parent = nil }
+        children = nil
     }
 
     /// Sets the document's status to failed with the given error.
