@@ -31,6 +31,9 @@ public extension UTType {
     // Apple Keynote (iWork '13+): package or flat single-file form.
     static let keynote = UTType(importedAs: "com.apple.iwork.keynote.key", conformingTo: .zip)
     static let keynoteSingleFile = UTType(importedAs: "com.apple.iwork.keynote.sffkey", conformingTo: .zip)
+    // Apple Numbers (iWork '13+): package or flat single-file form.
+    static let numbers = UTType(importedAs: "com.apple.iwork.numbers.numbers", conformingTo: .zip)
+    static let numbersSingleFile = UTType(importedAs: "com.apple.iwork.numbers.sffnumbers", conformingTo: .zip)
 
     /// Array of all supported documents
     static let supportedDocumentTypes: [UTType] = {
@@ -38,7 +41,7 @@ public extension UTType {
             .folder, .directory,
             .webloc,
             .doc, .docx, .xlsx,
-            .epub, .pages, .pagesSingleFile, .keynote, .keynoteSingleFile,
+            .epub, .pages, .pagesSingleFile, .keynote, .keynoteSingleFile, .numbers, .numbersSingleFile,
             .pdf, .rtf, .rtfd, .text, .flatRTFD, .plainText, .utf8PlainText, .xml,
             .spreadsheet, .commaSeparatedText,
             .internetLocation, .internetShortcut, .url, .urlBookmarkData, .html, .xhtml,
