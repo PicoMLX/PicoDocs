@@ -187,15 +187,17 @@ enum IWATable {
 
     /// One body storage prepared for rendering: its UTF-16 units plus the run tables
     /// it carries — paragraph styles (field 5 → headings), character styles (field 8
-    /// → emphasis), smart fields (field 11 → hyperlinks) and list styles (field 7 →
-    /// bullets/numbers) — with character-style traits, link URLs and list markers
-    /// pre-resolved so rendering needs no further object lookups.
+    /// → emphasis), smart fields (field 11 → hyperlinks), list styles (field 7 →
+    /// bullets/numbers) and paragraph data (field 6 → explicit list restarts) — with
+    /// character-style traits, link URLs and list markers pre-resolved so rendering
+    /// needs no further object lookups.
     private struct BodyStorage {
         let units: [UInt16]
         let paragraphStyles: [(offset: Int, id: UInt64?)]
         let characterStyles: [(offset: Int, id: UInt64?)]
         let smartFields: [(offset: Int, id: UInt64?)]
         let listStyles: [(offset: Int, id: UInt64?)]
+        let listRestarts: [(offset: Int, value: Int)]
         let traits: [UInt64: (bold: Bool, italic: Bool)]
         let links: [UInt64: String]
         let listMarkers: [UInt64: ListMarker]
@@ -222,7 +224,8 @@ enum IWATable {
         return BodyStorage(units: Array(text.utf16),
                            paragraphStyles: indexedReferences(in: storage, field: 5),
                            characterStyles: characterStyles, smartFields: smartFields,
-                           listStyles: listStyles, traits: traits, links: links, listMarkers: listMarkers)
+                           listStyles: listStyles, listRestarts: listRestarts(in: storage),
+                           traits: traits, links: links, listMarkers: listMarkers)
     }
 
     // MARK: - Paragraph rendering
@@ -258,12 +261,22 @@ enum IWATable {
                     let listStyle = referenceID(at: start, in: body.listStyles)
                     switch listStyle.flatMap({ body.listMarkers[$0] }) {
                     case .bullet?:
-                        parts.append(("- " + text, listStyle == lastList))
+                        parts.append((listItem("- ", text), listStyle == lastList))
                         lastList = listStyle; orderedList = nil
                     case .ordered?:
-                        if listStyle != orderedList { counter = 0; orderedList = listStyle }
+                        // An explicit restart ("Start at N" / a new list) wins; otherwise
+                        // a change of list style starts a fresh count, and the same
+                        // style continues it.
+                        let restart = listRestart(at: start, in: body.listRestarts)
+                        if let restart {
+                            counter = restart - 1; orderedList = listStyle
+                        } else if listStyle != orderedList {
+                            counter = 0; orderedList = listStyle
+                        }
                         counter += 1
-                        parts.append(("\(counter). " + text, listStyle == lastList))
+                        // A restarted list is its own list: set it off by a blank line
+                        // rather than tight-joining it to the previous one.
+                        parts.append((listItem("\(counter). ", text), listStyle == lastList && restart == nil))
                         lastList = listStyle
                     case nil:
                         parts.append((text, false))
@@ -294,6 +307,74 @@ enum IWATable {
     /// U+000B, U+000C) stay inside the paragraph and become newlines via `normalize`.
     private static func isParagraphSeparator(_ unit: UInt16) -> Bool {
         unit == 0x0A || unit == 0x0D || unit == 0x2029
+    }
+
+    /// A list item: `marker` + the item text, with every soft-break continuation
+    /// line indented to the marker's width so a multi-line item stays one Markdown
+    /// list item instead of spilling its later lines into a separate paragraph.
+    /// Whitespace the author typed after a soft break is dropped first, so the only
+    /// leading spaces are the indent — which `PagesConverter.normalize` keeps on list
+    /// continuation lines. Consecutive soft breaks collapse to one (a blank line
+    /// would end the item).
+    private static func listItem(_ marker: String, _ text: String) -> String {
+        let softBreaks: Set<Unicode.Scalar> = ["\u{2028}", "\u{000B}", "\u{000C}"]
+        guard text.unicodeScalars.contains(where: { softBreaks.contains($0) }) else { return marker + text }
+        let indent = String(repeating: " ", count: marker.count)
+        var scalars = String.UnicodeScalarView()
+        var atLineStart = false
+        for scalar in text.unicodeScalars {
+            if softBreaks.contains(scalar) {
+                if !atLineStart { scalars.append("\n"); atLineStart = true }
+                continue
+            }
+            if atLineStart {
+                if scalar == " " || scalar == "\t" { continue }
+                scalars.append(contentsOf: indent.unicodeScalars)
+                atLineStart = false
+            }
+            scalars.append(scalar)
+        }
+        return marker + String(scalars)
+    }
+
+    /// The explicit list-number restart for the paragraph starting at `index`, or
+    /// nil when it continues the current count. Paragraph data (storage field 6) is a
+    /// run table of `{1: charOffset, 2: list level, 3: restart}`; Pages sets the
+    /// restart on the first item of each list (and to N for "Start at N"), 0 to
+    /// continue.
+    private static func listRestart(at index: Int, in runs: [(offset: Int, value: Int)]) -> Int? {
+        var value = 0
+        for run in runs {
+            guard run.offset <= index else { break }
+            value = run.value
+        }
+        return value > 0 ? value : nil
+    }
+
+    /// The paragraph-data run table (storage field 6) as sorted `(offset, restart)`
+    /// pairs. Level (field 2) isn't read yet: nested items render flat.
+    private static func listRestarts(in storage: IWAArchive.Object) -> [(offset: Int, value: Int)] {
+        var runs: [(offset: Int, value: Int)] = []
+        var reader = ProtobufReader(storage.payload)
+        while let outer = reader.next() {
+            guard outer.number == 6, case .length(let wrapper) = outer.value else { continue }
+            var wrapperReader = ProtobufReader(wrapper)
+            while let entry = wrapperReader.next() {
+                guard entry.number == 1, case .length(let runBytes) = entry.value else { continue }
+                var offset: Int?
+                var restart = 0
+                var runReader = ProtobufReader(runBytes)
+                while let field = runReader.next() {
+                    switch (field.number, field.value) {
+                    case (1, .varint(let value)): offset = Int(exactly: value)
+                    case (3, .varint(let value)): restart = Int(exactly: value) ?? 0
+                    default: continue
+                    }
+                }
+                if let offset { runs.append((offset, restart)) }
+            }
+        }
+        return runs.sorted { $0.offset < $1.offset }
     }
 
     /// One paragraph rendered to Markdown, or nil when it holds no text. A heading is

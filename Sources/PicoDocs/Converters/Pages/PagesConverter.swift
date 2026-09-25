@@ -16,8 +16,8 @@
 //  content reconstructed as Markdown grids and placed inline at their attachment
 //  points in reading order (falling back to appending them after the body when
 //  attachments can't be mapped 1:1; see IWATable).
-//  Remaining rich structure (underline, nested/multi-line list items, explicit
-//  list-start numbers, footnotes, inline images),
+//  Remaining rich structure (underline, nested list levels, footnotes, inline
+//  images),
 //  duration table cells (text, dates, numbers, and formula results are decoded),
 //  the legacy iWork '09 XML format, and
 //  ingesting a `.pages` *package directory* (an on-disk bundle, which the
@@ -172,7 +172,10 @@ public struct PagesConverter: DocumentConverter {
     // MARK: - Text normalization
 
     /// Folds iWork's line/paragraph separators to `\n`, trims each line, and
-    /// collapses runs of blank lines so the body reads as clean paragraphs.
+    /// collapses runs of blank lines so the body reads as clean paragraphs. The one
+    /// exception to trimming: a line directly under a list item (no blank line
+    /// between) keeps its leading spaces, which `IWATable` emits as the continuation
+    /// indent of a multi-line item — trimming them would split the item.
     static func normalize(_ text: String) -> String {
         var unified = text
         for separator in ["\r\n", "\r", "\u{2028}", "\u{2029}", "\u{000B}", "\u{000C}"] {
@@ -192,17 +195,29 @@ public struct PagesConverter: DocumentConverter {
         let inlineWhitespace = CharacterSet(charactersIn: " \t")
         var out: [String] = []
         var pendingBlank = false
+        var inListItem = false   // the previous kept line is a list item or its continuation
         for rawLine in unified.components(separatedBy: "\n") {
             let line = rawLine.trimmingCharacters(in: inlineWhitespace)
             if line.isEmpty {
                 pendingBlank = true
             } else {
+                let indent = rawLine.prefix { $0 == " " }
+                let continuation = inListItem && !pendingBlank && indent.count >= 2
                 if pendingBlank && !out.isEmpty { out.append("") }
                 pendingBlank = false
-                out.append(line)
+                out.append(continuation ? String(indent) + line : line)
+                inListItem = continuation || isListItem(line)
             }
         }
         return out.joined(separator: "\n")
+    }
+
+    /// Whether a trimmed line opens a Markdown list item (`- x` or `N. x`), the
+    /// markers `IWATable` renders for Pages list styles.
+    private static func isListItem(_ line: String) -> Bool {
+        if line.hasPrefix("- ") { return true }
+        let digits = line.prefix { $0.isASCII && $0.isNumber }
+        return !digits.isEmpty && line.dropFirst(digits.count).hasPrefix(". ")
     }
 
     // MARK: - ZIP helper

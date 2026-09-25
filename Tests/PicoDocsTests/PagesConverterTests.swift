@@ -242,6 +242,46 @@ struct PagesConverterTests {
         #expect(markdown.contains("1. First ordered item\n2. Second ordered item\n3. Third ordered item"))
     }
 
+    @Test("PagesConverter honors explicit list restarts and start numbers")
+    func listRestarts() async throws {
+        // Four paragraphs in one ordered list style; paragraph data (field 6) marks
+        // where a list (re)starts. Same style throughout, so only the restart value
+        // can split the count.
+        func render(_ restarts: [(offset: Int, restart: UInt64)]) async throws -> String {
+            let pages = Self.makeListPagesFile(text: "a\nb\nc\nd", style: .ordered, restarts: restarts)
+            return try await PicoDocsEngine.convert(data: pages, filename: "lists.pages").markdown()
+        }
+        // A second adjacent list restarted at 1 is its own list, not "3. c".
+        let restarted = try await render([(0, 1), (2, 0), (4, 1), (6, 0)])
+        #expect(restarted == "1. a\n2. b\n\n1. c\n2. d")
+        // "Start at 5" keeps the author's numbering.
+        let startAt = try await render([(0, 1), (2, 0), (4, 5), (6, 0)])
+        #expect(startAt == "1. a\n2. b\n\n5. c\n6. d")
+        // No paragraph data (older/other encoders): one running count.
+        let plain = try await render([])
+        #expect(plain == "1. a\n2. b\n3. c\n4. d")
+    }
+
+    @Test("PagesConverter keeps multi-line list items as one item")
+    func multiLineListItems() async throws {
+        // A soft line break (U+2028) inside an item — plus the author's own
+        // indentation after it — must become the item's indented continuation, not
+        // a separate paragraph.
+        let bullets = Self.makeListPagesFile(text: "First line\u{2028}  second line\nNext item", style: .bullet, restarts: [])
+        let bulletMarkdown = try await PicoDocsEngine.convert(data: bullets, filename: "lists.pages").markdown()
+        #expect(bulletMarkdown == "- First line\n  second line\n- Next item")
+
+        let ordered = Self.makeListPagesFile(text: "Alpha\u{2028}beta\u{2028}\u{2028}gamma\nDelta", style: .ordered, restarts: [])
+        let orderedMarkdown = try await PicoDocsEngine.convert(data: ordered, filename: "lists.pages").markdown()
+        #expect(orderedMarkdown == "1. Alpha\n   beta\n   gamma\n2. Delta")
+
+        // The repo's own Markdown parser reads it back as two items, not item + paragraph.
+        let result = try await PicoDocsEngine.convert(data: bullets, filename: "lists.pages")
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.components(separatedBy: "<li>").count == 3)
+        #expect(!html.contains("<p>second line"))
+    }
+
     @Test("Detector routes a .pages package to the Pages format")
     func detectionRoutesToPages() {
         let pages = Self.makePagesFile(paragraphs: ["Hi"])
@@ -299,6 +339,47 @@ struct PagesConverterTests {
         stream += archiveInfo
         stream += payload
         return stream
+    }
+
+    /// A decompressed IWA stream holding several objects, each written as
+    /// `varint(ArchiveInfo length) · ArchiveInfo · payload`.
+    static func makeIWAStream(objects: [(id: UInt64, type: UInt64, payload: [UInt8])]) -> [UInt8] {
+        var stream: [UInt8] = []
+        for object in objects {
+            let messageInfo = varintField(1, object.type) + varintField(3, UInt64(object.payload.count))
+            let archiveInfo = varintField(1, object.id) + lengthField(2, messageInfo)
+            stream += varint(UInt64(archiveInfo.count)) + archiveInfo + object.payload
+        }
+        return stream
+    }
+
+    enum ListKind { case bullet, ordered }
+
+    /// A `.pages` file whose body storage (`\n`-separated paragraphs in `text`) is
+    /// entirely in one list style of `style`'s kind (ListStyle field 11 level 0:
+    /// 2 = bullet, 3 = number), with paragraph-data runs (storage field 6) carrying
+    /// each `(UTF-16 offset, restart)`.
+    static func makeListPagesFile(text: String, style: ListKind,
+                                  restarts: [(offset: Int, restart: UInt64)]) -> Data {
+        let listStyleID: UInt64 = 10
+        let listStyle = varintField(11, style == .bullet ? 2 : 3)
+        var storage = varintField(1, 0) + lengthField(3, Array(text.utf8))
+        storage += lengthField(7, lengthField(1, varintField(1, 0) + lengthField(2, varintField(1, listStyleID))))
+        if !restarts.isEmpty {
+            var table: [UInt8] = []
+            for run in restarts {
+                table += lengthField(1, varintField(1, UInt64(run.offset)) + varintField(2, 0) + varintField(3, run.restart))
+            }
+            storage += lengthField(6, table)
+        }
+        let stream = makeIWAStream(objects: [(1, 2001, storage), (listStyleID, 2023, listStyle)])
+        return makeZip([(name: "Index/Document.iwa", data: snappyFrame(stream))])
+    }
+
+    static func varintField(_ field: Int, _ value: UInt64) -> [UInt8] { tag(field: field, wire: 0) + varint(value) }
+
+    static func lengthField(_ field: Int, _ bytes: [UInt8]) -> [UInt8] {
+        tag(field: field, wire: 2) + varint(UInt64(bytes.count)) + bytes
     }
 
     /// Wraps a stream in a single Snappy literal block + one iWork frame header.
