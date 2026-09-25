@@ -58,6 +58,27 @@ struct PagesConverterTests {
         #expect(IWAArchive.text(in: stream) == "real")
     }
 
+    @Test("IWAArchive captures the identifier regardless of ArchiveInfo field order")
+    func iwaIdentifierOrderIndependent() {
+        // Protobuf fields may be serialized in any order: an ArchiveInfo that
+        // emits message_infos (field 2) BEFORE identifier (field 1) must still
+        // attach the right id (it would be 0 if we trusted field order).
+        let payload = Array("body".utf8)
+        var storage: [UInt8] = []                         // TSWP.StorageArchive { text }
+        storage += Self.tag(field: 3, wire: 2) + Self.varint(UInt64(payload.count)) + payload
+        var messageInfo: [UInt8] = []                     // MessageInfo { type=2001; length }
+        messageInfo += Self.tag(field: 1, wire: 0) + Self.varint(2001)
+        messageInfo += Self.tag(field: 3, wire: 0) + Self.varint(UInt64(storage.count))
+        var archiveInfo: [UInt8] = []                     // field 2 before field 1
+        archiveInfo += Self.tag(field: 2, wire: 2) + Self.varint(UInt64(messageInfo.count)) + messageInfo
+        archiveInfo += Self.tag(field: 1, wire: 0) + Self.varint(4242)
+        var stream: [UInt8] = []
+        stream += Self.varint(UInt64(archiveInfo.count)) + archiveInfo + storage
+
+        #expect(IWAArchive.objects(in: stream).first?.identifier == 4242)
+        #expect(IWAArchive.text(in: stream) == "body")
+    }
+
     // MARK: - End to end
 
     @Test("PagesConverter extracts body text from a synthetic .pages package")
@@ -92,6 +113,114 @@ struct PagesConverterTests {
         // Control-character artifacts (e.g. the U+0004 section-break sentinel) are
         // stripped from the output.
         #expect(!markdown.unicodeScalars.contains("\u{0004}"))
+    }
+
+    @Test("PagesConverter reconstructs tables from a real Pages fixture")
+    func realPagesTables() async throws {
+        let data = try Fixture.data("sample", "pages")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.pages")
+        let tables = result.sections.filter { $0.kind == .table }
+
+        // Three content tables (5×4, 4×6, and the dates/formula table); empty
+        // placeholder tables are skipped.
+        #expect(tables.count == 3)
+
+        // Table 1: exact header row, plus a body row exercising empty cells.
+        #expect(tables.contains { $0.markdown.contains("| Feature | Expected import | Sample value | Notes |") })
+        #expect(tables.contains { $0.markdown.contains("| Empty cell |  |  | Importer should not crash |") })
+
+        // Table 2: exact header row across all six columns.
+        #expect(tables.contains {
+            $0.markdown.contains("| Column A | Column B | Column C | Column D | Column E | Column F |")
+        })
+
+        // Table 3: inline-text header (the "Date" column), decoded date cells, and
+        // decimal128 number/formula cells — the Total row sums each column
+        // (12+8=20, 4.2+275.92=280.12), which validates the numeric decode.
+        #expect(tables.contains { $0.markdown.contains("| Column A | Date | Column B | Column C | Column D |") })
+        #expect(tables.contains { $0.markdown.contains("| Item 1 | 2026-06-18 | 12 | 0.35 | 4.2 |") })
+        #expect(tables.contains { $0.markdown.contains("| Items 2 | 2026-06-15 | 8 | 34.49 | 275.92 |") })
+        #expect(tables.contains { $0.markdown.contains("| Total |  | 20 |  | 280.12 |") })
+
+        // GitHub-flavored separator row for the four-column table.
+        #expect(tables.contains { $0.markdown.contains("| --- | --- | --- | --- |") })
+    }
+
+    @Test("PagesConverter places tables inline at their attachment points, in reading order")
+    func realPagesTablesInline() async throws {
+        let data = try Fixture.data("sample", "pages")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.pages")
+        let kinds = result.sections.map(\.kind)
+
+        // Tables are interleaved with the body, not all appended at the end: a
+        // body section follows the first table section.
+        let firstTable = kinds.firstIndex(of: .table)
+        #expect(firstTable != nil)
+        if let firstTable {
+            #expect(kinds[(firstTable + 1)...].contains(.body))
+        }
+
+        // Reading order in the rendered Markdown: intro text → Table 1 → Table 2
+        // → end marker. (In the appended fallback the end marker would precede the
+        // tables, so this also asserts the inline path is taken.)
+        let markdown = result.markdown()
+        let intro = markdown.range(of: "Representative Import Fixture for Apple Pages")
+        let table1 = markdown.range(of: "| Feature | Expected import | Sample value | Notes |")
+        let table2 = markdown.range(of: "| Column A | Column B | Column C | Column D | Column E | Column F |")
+        let endMarker = markdown.range(of: "END_OF_PAGES_IMPORT_FIXTURE")
+        #expect(intro != nil && table1 != nil && table2 != nil && endMarker != nil)
+        if let intro, let table1, let table2, let endMarker {
+            #expect(intro.lowerBound < table1.lowerBound)
+            #expect(table1.lowerBound < table2.lowerBound)
+            #expect(table2.lowerBound < endMarker.lowerBound)
+        }
+    }
+
+    @Test("PagesConverter renders paragraph styles as Markdown headings")
+    func realPagesHeadings() async throws {
+        let data = try Fixture.data("sample", "pages")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.pages")
+        let markdown = result.markdown()
+
+        // The Title paragraph style maps to `#`, the section "Heading" style to `##`
+        // (a heading run is attributed to its paragraph even though the auto-number
+        // sits in a neighbouring run, so "2. Lists" is a heading, not "2").
+        #expect(markdown.contains("# Representative Import Fixture for Apple Pages"))
+        #expect(markdown.contains("## 1. Body text and inline formatting"))
+        #expect(markdown.contains("## 2. Lists"))
+        // Section 5 is preceded by a U+0004 section-break sentinel (a Body-styled
+        // run); the heading must still win the style vote once it's excluded.
+        #expect(markdown.contains("## 5. Landscape section and wider table"))
+        #expect(markdown.contains("## 6. Dates and formula"))
+
+        // Body paragraphs are not headings.
+        #expect(!markdown.contains("## This document is intentionally ordinary"))
+        #expect(!markdown.contains("## Plain paragraph before list"))
+    }
+
+    @Test("PagesConverter renders character styles and hyperlinks as inline Markdown")
+    func realPagesInlineStyling() async throws {
+        let data = try Fixture.data("sample", "pages")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.pages")
+        let markdown = result.markdown()
+
+        // Bold/italic character runs become Markdown emphasis (underline is dropped,
+        // matching the other converters); markers hug the styled text.
+        #expect(markdown.contains("**Purpose.**"))
+        #expect(markdown.contains("**bold**"))
+        #expect(markdown.contains("*italic*"))
+        #expect(markdown.contains("underlined, and code-like"))   // underline left as plain text
+
+        // Hyperlink smart fields become inline links.
+        #expect(markdown.contains("[Apple Developer Documentation](https://developer.apple.com/documentation)"))
+
+        // Headings carry no inline emphasis even though the title's runs are bold.
+        #expect(!markdown.contains("**Representative Import Fixture"))
+
+        // No stranded markup: control sentinels are skipped before emphasis/links
+        // are applied, so nothing wraps a character normalize later deletes.
+        #expect(!markdown.contains("****"))
+        #expect(!markdown.contains("[]("))
     }
 
     @Test("Detector routes a .pages package to the Pages format")

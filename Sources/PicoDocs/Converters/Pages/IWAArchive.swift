@@ -36,6 +36,9 @@ enum IWAArchive {
         let identifier: UInt64
         let type: UInt64
         let payload: [UInt8]
+        /// Cross-object references (`MessageInfo.object_references`), in order —
+        /// used to follow the document object graph (e.g. Keynote's slide tree).
+        let references: [UInt64]
     }
 
     /// Parses every object in a decompressed IWA stream. Best-effort: on a
@@ -59,7 +62,8 @@ enum IWAArchive {
             for info in infos {
                 guard info.length <= UInt64(Int.max),
                       let payload = cursor.take(Int(info.length)) else { return objects }
-                objects.append(Object(identifier: info.identifier, type: info.type, payload: payload))
+                objects.append(Object(identifier: info.identifier, type: info.type,
+                                      payload: payload, references: info.references))
             }
         }
         return objects
@@ -71,8 +75,14 @@ enum IWAArchive {
     /// their text isn't passed off as the document body. Each storage's `repeated
     /// string text` runs are joined; a blank line separates distinct body storages.
     static func text(in stream: [UInt8]) -> String {
+        text(from: objects(in: stream))
+    }
+
+    /// Body text from already-parsed objects — lets a caller that already has the
+    /// objects (e.g. Keynote, which also needs the slide id) avoid re-parsing.
+    static func text(from objects: [Object]) -> String {
         var storages: [String] = []
-        for object in objects(in: stream) where object.type == textStorageType {
+        for object in objects where object.type == textStorageType {
             guard let body = bodyText(in: object.payload), !body.isEmpty else { continue }
             storages.append(body)
         }
@@ -85,43 +95,61 @@ enum IWAArchive {
         let identifier: UInt64
         let type: UInt64
         let length: UInt64
+        let references: [UInt64]
     }
 
     /// Reads ArchiveInfo: identifier (field 1) + each MessageInfo (field 2) into
-    /// (identifier, type, length) entries.
+    /// (identifier, type, length, references) entries. Protobuf fields may be
+    /// serialized in any order, so the MessageInfo payloads are collected first
+    /// and stamped with the identifier only after the whole ArchiveInfo has been
+    /// scanned — never assuming field 1 precedes field 2 (an archive that emitted
+    /// `message_infos` first would otherwise get identifier 0, breaking the
+    /// object-graph lookups, e.g. Keynote's slide-tree ordering).
     private static func messageInfos(in archiveBytes: [UInt8]) -> [InfoEntry] {
         var identifier: UInt64 = 0
-        var entries: [InfoEntry] = []
+        var infos: [(type: UInt64, length: UInt64, references: [UInt64])] = []
         var reader = ProtobufReader(archiveBytes)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (1, .varint(let id)):
                 identifier = id
             case (2, .length(let messageInfoBytes)):
-                if let (type, length) = parseMessageInfo(messageInfoBytes) {
-                    entries.append(InfoEntry(identifier: identifier, type: type, length: length))
-                }
+                if let info = parseMessageInfo(messageInfoBytes) { infos.append(info) }
             default:
                 continue
             }
         }
-        return entries
+        return infos.map {
+            InfoEntry(identifier: identifier, type: $0.type, length: $0.length, references: $0.references)
+        }
     }
 
-    /// MessageInfo: type (field 1) + payload length (field 3).
-    private static func parseMessageInfo(_ bytes: [UInt8]) -> (type: UInt64, length: UInt64)? {
+    /// MessageInfo: type (field 1), payload length (field 3), and object_references
+    /// (field 5 — packed or repeated uint64).
+    private static func parseMessageInfo(_ bytes: [UInt8]) -> (type: UInt64, length: UInt64, references: [UInt64])? {
         var type: UInt64?
         var length: UInt64?
+        var references: [UInt64] = []
         var reader = ProtobufReader(bytes)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (1, .varint(let t)): type = t
             case (3, .varint(let l)): length = l
+            case (5, .varint(let r)): references.append(r)                       // unpacked
+            case (5, .length(let packed)): references.append(contentsOf: unpackVarints(packed))
             default: continue
             }
         }
         guard let type, let length else { return nil }
-        return (type, length)
+        return (type, length, references)
+    }
+
+    /// Unpacks a protobuf packed-repeated varint field.
+    private static func unpackVarints(_ bytes: [UInt8]) -> [UInt64] {
+        var values: [UInt64] = []
+        var cursor = StreamCursor(bytes)
+        while let value = cursor.readVarint() { values.append(value) }
+        return values
     }
 
     /// TSWP.StorageArchive: the concatenated `repeated string text` (field 3) runs,

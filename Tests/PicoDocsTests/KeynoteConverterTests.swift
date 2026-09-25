@@ -114,4 +114,53 @@ struct KeynoteConverterTests {
             _ = try await KeynoteConverter().convert(key, info: info)
         }
     }
+
+    @Test("KeynoteConverter extracts deck-ordered slide text from a real .key, excluding presenter notes")
+    func realKeynoteFixture() async throws {
+        let data = try Fixture.data("sample", "key")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.key")
+
+        let slides = result.sections.filter { $0.kind == .slide }
+        #expect(slides.count == 5)
+        #expect(slides.map(\.slideNumber) == [1, 2, 3, 4, 5])
+
+        // Deck order comes from Document.iwa's slide tree, NOT the filenames:
+        // Slide.iwa ("The problem") is slide 2, not last. (Filename order would
+        // put it last and swap slides 2/3.) The two table slides follow.
+        #expect(slides[0].markdown.contains("The Spoon"))
+        #expect(slides[0].markdown.contains("Ronald Mannak"))
+        #expect(slides[1].markdown.contains("The problem"))
+        #expect(slides[1].markdown.contains("Every mug has a spoon-shaped absence"))
+        #expect(slides[2].markdown.contains("The data"))
+        #expect(slides[3].markdown.contains("Table 1"))
+        #expect(slides[4].markdown.contains("Table 2"))
+
+        // Presenter notes are kind 4 → excluded by the kind==0 filter; they must
+        // not leak into slide text.
+        let markdown = result.markdown()
+        #expect(!markdown.contains("Good morning. Thank you all"))
+        #expect(!markdown.contains("barista pea"))
+
+        // Object-replacement image placeholders are stripped.
+        #expect(!markdown.unicodeScalars.contains("\u{FFFC}"))
+
+        // Tables are reconstructed and placed with their slide — text via the
+        // inline-text store, dates from the cell record, and decimal128
+        // number/formula cells (the last row sums each column: 3+4+5=12,
+        // 4.66+36.14+2.76=43.56).
+        let tables = result.sections.filter { $0.kind == .table }
+        #expect(tables.count == 2)
+        #expect(tables.contains { $0.markdown.contains("| R1C1 | R1C2 | R1C3 | R1C4 |") })
+        #expect(tables.contains { $0.markdown.contains("| Item 1 | 2026-06-18 | 3 | 4.66 |") })
+        #expect(tables.contains { $0.markdown.contains("| Item 4 |  | 12 | 43.56 |") })
+
+        // Each table is placed with the slide that owns it (slides 4 and 5),
+        // carrying that slide's number — and interleaved, not appended at the end
+        // (a slide section follows the first table section).
+        #expect(tables.map(\.slideNumber) == [4, 5])
+        let kinds = result.sections.map(\.kind)
+        if let firstTable = kinds.firstIndex(of: .table) {
+            #expect(kinds[(firstTable + 1)...].contains(.slide))
+        }
+    }
 }

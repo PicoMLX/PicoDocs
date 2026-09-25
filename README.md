@@ -109,6 +109,10 @@ Refer to the [example app](PicoDocsExample/) for detailed guidance.
 
 Create a PR to include your app here.
 
+## Known Limitations
+
+- **iWork tables**: Tables are reconstructed as Markdown grids — placed inline at their original position in Pages, and with the slide that contains them in Keynote. Text, date, number, and formula-result cells are decoded; duration cells currently render as empty.
+
 ## License
 
 PicoDocs is released under the MIT license.
