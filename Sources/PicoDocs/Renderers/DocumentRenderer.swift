@@ -244,7 +244,7 @@ public enum DocumentRenderer {
         guard line.hasPrefix("[^"), let close = line.firstIndex(of: "]") else { return nil }
         let idStart = line.index(line.startIndex, offsetBy: 2)
         guard idStart < close else { return nil }
-        let id = String(line[idStart..<close])
+        let id = decodedFootnoteID(String(line[idStart..<close]))
         let afterClose = line.index(after: close)
         guard !id.isEmpty, afterClose < line.endIndex, line[afterClose] == ":" else { return nil }
         var text = String(line[line.index(after: afterClose)...])
@@ -288,12 +288,12 @@ public enum DocumentRenderer {
             // Mirror inlineHTML/stripInline: code spans and links become
             // placeholders, so a `[^id]` inside them isn't treated as a reference.
             let (afterCode, _) = extractCodeSpans(text)
-            let (protected, _) = protectEscapes(afterCode)
+            let (protected, escaped) = protectEscapes(afterCode)
             let (afterLinks, _) = extractLinks(protected)
             var cursor = afterLinks.startIndex
             while let open = afterLinks.range(of: "[^", range: cursor..<afterLinks.endIndex) {
                 guard let close = afterLinks.range(of: "]", range: open.upperBound..<afterLinks.endIndex) else { break }
-                register(String(afterLinks[open.upperBound..<close.lowerBound]))
+                register(restoreEscapes(String(afterLinks[open.upperBound..<close.lowerBound]), escaped: escaped, html: false))
                 cursor = close.upperBound
             }
         }
@@ -665,13 +665,7 @@ public enum DocumentRenderer {
         // (code blocks never reach inlineHTML). The id is HTML-escaped for attribute
         // safety and references carry no `id`, so repeated references don't produce
         // duplicate element ids. The escaped id also matches the escaped body text.
-        for (id, number) in footnoteNumbers {
-            let escapedId = escapeHTML(id)
-            result = result.replacingOccurrences(
-                of: "[^\(escapedId)]",
-                with: "<sup class=\"footnote-ref\"><a href=\"#fn-\(escapedId)\">\(number)</a></sup>"
-            )
-        }
+        result = renderFootnoteReferences(result, escaped: escaped, numbers: footnoteNumbers, html: true)
         for (index, link) in links.enumerated() {
             let tag: String
             if !isSafeURL(link.url, isImage: link.isImage) {
@@ -685,10 +679,11 @@ public enum DocumentRenderer {
             }
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: tag)
         }
+        result = restoreEscapes(result, escaped: escaped, html: true)
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
         }
-        return restoreEscapes(result, escaped: escaped, html: true)
+        return result
     }
 
     /// URL schemes the HTML export emits as live links. Link and image URLs come
@@ -732,16 +727,15 @@ public enum DocumentRenderer {
         var result = applyEmphasisStrip(afterLinks)
         // Footnote references become `[N]` here (code spans already extracted, so
         // markers inside code are preserved; code blocks never reach stripInline).
-        for (id, number) in footnoteNumbers {
-            result = result.replacingOccurrences(of: "[^\(id)]", with: "[\(number)]")
-        }
+        result = renderFootnoteReferences(result, escaped: escaped, numbers: footnoteNumbers, html: false)
         for (index, link) in links.enumerated() {
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: applyEmphasisStrip(link.label))
         }
+        result = restoreEscapes(result, escaped: escaped, html: false)
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: span)
         }
-        return restoreEscapes(result, escaped: escaped, html: false)
+        return result
     }
 
     private static func applyEmphasisStrip(_ text: String) -> String {
@@ -752,12 +746,38 @@ public enum DocumentRenderer {
         return result
     }
 
+    private static func decodedFootnoteID(_ id: String) -> String {
+        let (protected, escaped) = protectEscapes(id)
+        return restoreEscapes(protected, escaped: escaped, html: false)
+    }
+
+    private static func renderFootnoteReferences(_ text: String, escaped: [String], numbers: [String: Int], html: Bool) -> String {
+        let ns = text as NSString
+        let regex = try! NSRegularExpression(pattern: "\\[\\^([^\\]]+)\\]")
+        let lookup = Dictionary(numbers.map { (html ? escapeHTML($0.key) : $0.key, $0.value) }, uniquingKeysWith: { first, _ in first })
+        var output = "", offset = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            output += ns.substring(with: NSRange(location: offset, length: match.range.location - offset))
+            let protectedID = ns.substring(with: match.range(at: 1))
+            let id = restoreEscapes(protectedID, escaped: escaped, html: html)
+            if let number = lookup[id] {
+                output += html ? "<sup class=\"footnote-ref\"><a href=\"#fn-\(protectedID)\">\(number)</a></sup>" : "[\(number)]"
+            } else { output += ns.substring(with: match.range) }
+            offset = NSMaxRange(match.range)
+        }
+        return output + ns.substring(from: offset)
+    }
+
     private static func protectEscapes(_ text: String) -> (String, [String]) {
         var out = "", escaped: [String] = []
         var index = text.startIndex
         while index < text.endIndex {
             let next = text.index(after: index)
-            if text[index] == "\\", next < text.endIndex,
+            if text[index] == "\u{E006}" || text[index] == "\u{E007}" {
+                escaped.append(String(text[index]))
+                out += "\u{E006}\(escaped.count - 1)\u{E007}"
+                index = next
+            } else if text[index] == "\\", next < text.endIndex,
                #"\`*_{}[]<>()#+-.!|"#.contains(text[next]) {
                 escaped.append(String(text[next]))
                 out += "\u{E006}\(escaped.count - 1)\u{E007}"

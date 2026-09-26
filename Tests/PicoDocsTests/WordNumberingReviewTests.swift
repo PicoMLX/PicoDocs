@@ -5,6 +5,34 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func WordCodeBackslashesShareContextAcrossRuns() async throws {
+        for runs in [#"<w:r><w:t>`C:\tmp`</w:t></w:r>"#, #"<w:r><w:t>`C:</w:t></w:r><w:r><w:t>\tmp`</w:t></w:r>"#, #"<w:r><w:t>``C:</w:t></w:r><w:r><w:t>\tmp``</w:t></w:r>"#] {
+            let document = "<w:document \(ns)><w:body><w:p>\(runs)</w:p></w:body></w:document>"
+            let result = try await PicoDocsEngine.convert(data:PagesConverterTests.makeZip([(name:"word/document.xml",data:Array(document.utf8))]),filename:"code.docx")
+            #expect(try DocumentRenderer.render(result,to:.plaintext) == #"C:\tmp"#)
+            #expect(try DocumentRenderer.render(result,to:.html).contains(#"<code>C:\tmp</code>"#))
+        }
+    }
+
+    @Test func sourceEscapeSentinelsRemainLiteralInProseAndCode() throws {
+        let token = "\u{E006}0\u{E007}"
+        let note = ConverterResult(sections:[.init(markdown:"Body[^" + token + "]\n\n[^" + token + "]: Note")])
+        #expect(try DocumentRenderer.render(note,to:.html).contains("footnote-ref"))
+        #expect(try DocumentRenderer.render(note,to:.plaintext).contains("Body[1]"))
+        let result = ConverterResult(sections:[.init(markdown:token + " \\* `" + token + "`")])
+        #expect(try DocumentRenderer.render(result,to:.plaintext) == token + " * " + token)
+        let html = try DocumentRenderer.render(result,to:.html)
+        #expect(html.contains(token + " * <code>" + token + "</code>"))
+    }
+
+    @Test func fullWidthDecimalLabelsRemainVisible() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"10\"/><w:numFmt w:val=\"decimalFullWidth\"/><w:lvlText w:val=\"%1.\"/><w:suff w:val=\"space\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        let document = "<w:document \(ns)><w:body><w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>Item</w:t></w:r></w:p></w:body></w:document>"
+        let result = try await PicoDocsEngine.convert(data:PagesConverterTests.makeZip([(name:"word/document.xml",data:Array(document.utf8)),(name:"word/numbering.xml",data:Array(numbering.utf8))]),filename:"fullwidth.docx")
+        #expect(result.markdown().contains("１０. Item"))
+        for format in [ExportFileType.html,.plaintext] { #expect(try DocumentRenderer.render(result,to:format).contains("１０. Item")) }
+    }
+
     @Test func RTFPairedEscapesAndStyleBoundariesStayLiteral() async throws {
         for literal in [#"\*literal\*"#, #"\`code\`"#, #"\\\*literal\\\*"#] {
             let rtf = #"{\rtf1\ansi "# + literal.replacingOccurrences(of:"\\",with:"\\\\") + "}"

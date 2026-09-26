@@ -305,6 +305,11 @@ final class WordListNumbering {
             else { suffix = [1: "st", 2: "nd", 3: "rd"][abs(value % 10)] ?? "th" }
             return String(value) + suffix
         }
+        if format == "decimalFullWidth" {
+            return String(String(value).unicodeScalars.map { scalar in
+                (48...57).contains(scalar.value) ? Character(UnicodeScalar(scalar.value + 0xFEE0)!) : Character(scalar)
+            })
+        }
         if format == "decimalZero", (0...9).contains(value) { return "0" + String(value) }
         guard value > 0 else { return String(value) }
         if format == "lowerLetter" || format == "upperLetter" {

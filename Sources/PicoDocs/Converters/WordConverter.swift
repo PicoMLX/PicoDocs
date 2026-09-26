@@ -243,16 +243,48 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Inline content (runs, hyperlinks)
 
+    /// Code delimiters can span Word runs, so escape using paragraph-wide source
+    /// context before adding generated emphasis or hyperlink syntax.
+    private final class InlineEscapes {
+        let counts: [Int]
+        var offset = 0
+        init(_ element: Element) { counts = MarkdownLiteral.backslashEscapeCounts(Self.source(element)) }
+        private static func source(_ element: Element) -> String {
+            switch element.tagName().lowercased() {
+            case "w:ppr", "w:rpr", "w:drawing", "w:pict": return ""
+            case "w:t": return element.getChildNodes().compactMap { ($0 as? TextNode)?.getWholeText() }.joined()
+            case "w:tab": return "\t"
+            case "w:br", "w:cr": return "  \n"
+            default: return element.children().array().map(source).joined()
+            }
+        }
+        func escape(_ text: String) -> String {
+            var units: [UInt16] = []
+            for unit in text.utf16 {
+                units.append(unit)
+                if counts.indices.contains(offset), counts[offset] > 0 {
+                    units += Array(repeating: 0x5C, count: counts[offset])
+                }
+                offset += 1
+            }
+            return String(decoding: units, as: UTF16.self)
+        }
+    }
+
     static func renderInline(_ container: Element, relationships: [String: String]) -> String {
+        renderInline(container, relationships: relationships, escapes: InlineEscapes(container))
+    }
+
+    private static func renderInline(_ container: Element, relationships: [String: String], escapes: InlineEscapes) -> String {
         var out = ""
         for child in container.children().array() {
             switch child.tagName().lowercased() {
             case "w:ppr":
                 continue // paragraph properties, not content
             case "w:r":
-                out += renderRun(child, relationships: relationships)
+                out += renderRun(child, relationships: relationships, escapes: escapes)
             case "w:hyperlink":
-                let inner = renderInline(child, relationships: relationships)
+                let inner = renderInline(child, relationships: relationships, escapes: escapes)
                 let relId = (try? child.attr("r:id")) ?? ""
                 if let url = relationships[relId], !url.isEmpty, !inner.isEmpty {
                     if isImageOnlyMarkdown(inner) {
@@ -276,13 +308,17 @@ public struct WordConverter: DocumentConverter {
                 }
             default:
                 // smartTag / ins / proofErr / other wrappers: recurse for nested runs.
-                out += renderInline(child, relationships: relationships)
+                out += renderInline(child, relationships: relationships, escapes: escapes)
             }
         }
         return out
     }
 
     static func renderRun(_ run: Element, relationships: [String: String]) -> String {
+        renderRun(run, relationships: relationships, escapes: InlineEscapes(run))
+    }
+
+    private static func renderRun(_ run: Element, relationships: [String: String], escapes: InlineEscapes) -> String {
         // The run's own `w:rPr` only — not one from a text box drawn inside it.
         let properties = child(of: run, named: "w:rpr")
         let bold = isFormattingEnabled(properties, tag: "w:b")
@@ -310,13 +346,13 @@ public struct WordConverter: DocumentConverter {
                     if let textNode = child as? TextNode {
                         // Literal source backslashes must survive canonical
                         // Markdown escape decoding in downstream renderers.
-                        textBuffer += textNode.getWholeText().replacingOccurrences(of: "\\", with: "\\\\")
+                        textBuffer += escapes.escape(textNode.getWholeText())
                     }
                 }
             case "w:tab":
-                textBuffer += "\t"
+                textBuffer += escapes.escape("\t")
             case "w:br", "w:cr":
-                textBuffer += "  \n"
+                textBuffer += escapes.escape("  \n")
             case "w:drawing", "w:pict":
                 flushText()
                 out += imageMarkdown(in: node, relationships: relationships)   // not wrapped in emphasis
