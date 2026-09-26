@@ -45,7 +45,7 @@ struct MarkdownList {
                 if list.items.isEmpty || current.indent < contentIndent {
                     guard (current.number != nil) == list.ordered else { break }
                     // An explicit restart following a blank line opens a new list.
-                    if blank, !list.items.isEmpty, (!list.ordered || current.number == first.number) { break }
+                    if blank, !list.items.isEmpty { break }
                     index = next + 1
                     list.items.append(Item(number: current.number, text: current.text))
                     contentIndent = current.contentIndent
@@ -67,11 +67,11 @@ struct MarkdownList {
     }
 
     private var displayedNumbers: [Int?] {
-        var previousSource: Int?, previousDisplay: Int?
+        var previousDisplay: Int?
         return items.map { item in
             guard let number = item.number else { return nil }
-            let displayed = number == previousSource ? previousDisplay.map { min($0, Int.max - 1) + 1 } ?? number : number
-            previousSource = number; previousDisplay = displayed
+            let displayed = previousDisplay.map { number <= $0 ? min($0, Int.max - 1) + 1 : number } ?? number
+            previousDisplay = displayed
             return displayed
         }
     }

@@ -57,7 +57,7 @@ enum HTMLToMarkdown {
     private static func render(_ node: Node, into out: inout String, preserveWhitespace: Bool = false) {
         if let text = node as? TextNode {
             let whole = text.getWholeText()
-            out += preserveWhitespace ? whole : collapseWhitespace(whole).replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "\\<").replacingOccurrences(of: ">", with: "\\>")
+            out += preserveWhitespace ? whole : collapseWhitespace(whole).map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
             return
         }
         guard let element = node as? Element else { return }

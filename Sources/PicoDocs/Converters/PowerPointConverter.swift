@@ -45,6 +45,7 @@ public struct PowerPointConverter: DocumentConverter {
             throw PicoDocsError.fileCorrupted
         }
 
+        let defaultTextStyle = presentation.children().first().flatMap { Self.child(of: $0, named: "p:defaulttextstyle") }
         var sections: [DocumentSection] = []
         var images = ImageCollector()
         var parts = PartCache(archive: archive)
@@ -53,7 +54,7 @@ public struct PowerPointConverter: DocumentConverter {
             guard let slide = Self.xml(archive, path: slidePath), slide.children().first()?.tagName().lowercased() == "p:sld" else { try archive.check(); throw PicoDocsError.fileCorrupted }
             let relationships = Self.relationships(archive, forPart: slidePath)
             var context = SlideContext(archive: archive, partPath: slidePath, relationships: relationships, images: images)
-            context.defaultTextStyle = try? presentation.getElementsByTag("p:defaultTextStyle").first()
+            context.defaultTextStyle = defaultTextStyle
             // Layout and master supply inherited list formatting for placeholders.
             let layoutPath = Self.relatedPart(of: slidePath, type: "/slideLayout", relationships: relationships)
             context.layout = layoutPath.flatMap { parts.document($0, root: "p:sldlayout") }
@@ -190,6 +191,13 @@ public struct PowerPointConverter: DocumentConverter {
                 archive.fail(PicoDocsError.fileCorrupted)
                 return nil
             }
+            if ["p:sldlayout", "p:sldmaster", "p:notesmaster", "p:handoutmaster"].contains(root) {
+                guard let element = parsed.children().first(),
+                      let common = PowerPointConverter.child(of: element, named: "p:csld"),
+                      PowerPointConverter.child(of: common, named: "p:sptree") != nil else {
+                    archive.fail(PicoDocsError.fileCorrupted); return nil
+                }
+            }
             return parsed
         }
     }
@@ -268,20 +276,33 @@ public struct PowerPointConverter: DocumentConverter {
             case "p:grpsp":
                 renderShapes(in: shape, title: &title, blocks: &blocks, context: &context)
             case "mc:alternatecontent":
-                // One branch only: the first `mc:Choice`, else the `mc:Fallback`.
-                let branches = shape.children().array()
-                if let branch = branches.first(where: {
-                    guard $0.tagName().lowercased() == "mc:choice" else { return false }
-                    let requires = ((try? $0.attr("Requires")) ?? "").split(separator: " ")
-                    return !requires.isEmpty && requires.allSatisfy { ["p", "a", "r"].contains(String($0)) }
-                })
-                    ?? branches.first(where: { $0.tagName().lowercased() == "mc:fallback" }) {
+                if let branch = selectedAlternateBranch(shape) {
                     renderShapes(in: branch, title: &title, blocks: &blocks, context: &context)
                 }
             default:
                 continue
             }
         }
+    }
+
+    private static func selectedAlternateBranch(_ element: Element) -> Element? {
+        let branches = element.children().array()
+        return branches.first {
+            guard $0.tagName().lowercased() == "mc:choice" else { return false }
+            let requires = ((try? $0.attr("Requires")) ?? "").split(separator: " ")
+            return !requires.isEmpty && requires.allSatisfy { ["p", "a", "r"].contains(String($0)) }
+        } ?? branches.first { $0.tagName().lowercased() == "mc:fallback" }
+    }
+
+    private static func pictureBlip(in element: Element) -> Element? {
+        if element.tagName().lowercased() == "a:blip" { return element }
+        if element.tagName().lowercased() == "mc:alternatecontent" {
+            return selectedAlternateBranch(element).flatMap { pictureBlip(in: $0) }
+        }
+        for child in element.children().array() {
+            if let blip = pictureBlip(in: child) { return blip }
+        }
+        return nil
     }
 
     /// The `type` of a shape's placeholder (`p:nvSpPr/p:nvPr/p:ph`); nil when the
@@ -454,7 +475,8 @@ public struct PowerPointConverter: DocumentConverter {
                     return []
                 }
                 let explicitStart = properties.flatMap { child(of: $0, named: "a:buautonum") }.flatMap { try? $0.attr("startAt") }.flatMap(Int.init)
-                if schemes[level] != scheme || (explicitStart != nil && starts[level] != start) { counters[level] = nil }
+                if schemes[level] != scheme { counters[level] = nil; starts[level] = nil }
+                if explicitStart != nil && starts[level] != start { counters[level] = nil }
                 if starts[level] == nil || explicitStart != nil { starts[level] = start }
                 schemes[level] = scheme
                 let number = counters[level].map { $0 + 1 } ?? start
@@ -674,9 +696,9 @@ public struct PowerPointConverter: DocumentConverter {
     /// An inline image reference for a picture (alt text from its `descr`, else
     /// `name`), registering its bytes as an `.image` section.
     static func pictureMarkdown(_ picture: Element, context: inout SlideContext) -> String? {
-        guard let blip = try? picture.getElementsByTag("a:blip").first(),
+        guard let fill = child(of: picture, named: "p:blipfill"), let blip = pictureBlip(in: fill),
               let id = try? blip.attr("r:embed"), !id.isEmpty else { return nil }
-        guard let relation = context.relationships[id], !relation.external else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
+        guard let relation = context.relationships[id], !relation.external, relation.type.hasSuffix("/image") else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
         let target = relation.target
         let mediaPath = WordConverter.resolvePartPath(target, relativeTo: directory(of: context.partPath))
         let filename = (mediaPath as NSString).lastPathComponent
@@ -777,6 +799,7 @@ public struct PowerPointConverter: DocumentConverter {
         for element in document.children().first()?.children().array() ?? [] where element.tagName().lowercased() == "relationship" {
             guard let id = try? element.attr("Id"), let target = try? element.attr("Target"),
                   !id.isEmpty, !target.isEmpty else { continue }
+            guard map[id] == nil else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
             map[id] = Relationship(type: (try? element.attr("Type")) ?? "", target: target, external: ((try? element.attr("TargetMode")) ?? "").lowercased() == "external")
         }
         archive.relationshipMaps[part] = map

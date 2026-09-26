@@ -76,6 +76,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
     ]
 
     static func normalize(_ data: Data, maximumOutputBytes: Int = 64 * 1024 * 1024) -> String? {
+        guard !containsDoctype(data) else { return nil }
         let parser = XMLParser(data: data)
         let delegate = PowerPointXML()
         delegate.maximumOutputBytes = maximumOutputBytes
@@ -83,6 +84,34 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         parser.shouldResolveExternalEntities = false
         guard parser.parse(), !delegate.hasError, !Task.isCancelled else { return nil }
         return delegate.output
+    }
+
+    /// Inspect the XML prolog without expanding entities. Ignoring NUL padding
+    /// recognizes ASCII declaration tokens in UTF-8, UTF-16 and UTF-32 inputs.
+    /// Comments, processing instructions and CDATA cannot introduce a DTD.
+    private static func containsDoctype(_ data: Data) -> Bool {
+        var tail: [UInt8] = []
+        let declaration = Array("<!DOCTYPE".utf8), comment = Array("<!--".utf8)
+        let cdata = Array("<![CDATA[".utf8), processing = Array("<?".utf8)
+        var ending: [UInt8]?
+        for byte in data where byte != 0 {
+            tail.append(byte)
+            if tail.count > 9 { tail.removeFirst() }
+            if let terminator = ending {
+                if tail.suffix(terminator.count).elementsEqual(terminator) { ending = nil; tail.removeAll(keepingCapacity: true) }
+            } else if tail.suffix(comment.count).elementsEqual(comment) { ending = Array("-->".utf8) }
+            else if tail.suffix(cdata.count).elementsEqual(cdata) { ending = Array("]]>".utf8) }
+            else if tail.suffix(processing.count).elementsEqual(processing) { ending = Array("?>".utf8) }
+            else if tail.elementsEqual(declaration) { return true }
+        }
+        return false
+    }
+
+    func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) {
+        hasError = true; parser.abortParsing()
+    }
+    func parser(_ parser: XMLParser, foundExternalEntityDeclarationWithName name: String, publicID: String?, systemID: String?) {
+        hasError = true; parser.abortParsing()
     }
 
     private func name(_ raw: String, scope: [String: String], attribute: Bool = false) -> String {

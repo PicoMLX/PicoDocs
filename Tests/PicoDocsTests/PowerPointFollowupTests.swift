@@ -4,6 +4,72 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func HTMLTableTextKeepsLiteralInlinePunctuation() async throws {
+        let source = "<table><tr><td>Value</td></tr><tr><td>*stars* `code` [label](target) <strong>Bold</strong></td></tr></table>"
+        let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "literal.html")
+        for format in [ExportFileType.plaintext, .csv] {
+            #expect(try DocumentRenderer.render(result, to: format).contains("*stars* `code` [label](target) Bold"))
+        }
+    }
+
+    @Test func mixedOrderedMarkersAdvanceAndLooseListsKeepBoundaries() throws {
+        let result = ConverterResult(sections: [.init(markdown: "1. First\n1. Second\n2. Third\n10. Gap\n\n11. Separate")])
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == "1. First\n2. Second\n3. Third\n10. Gap\n\n11. Separate")
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.components(separatedBy: "<ol").count - 1 == 2)
+        #expect(!html.contains(#"value="2""#))
+    }
+
+    @Test func numberingSchemeChangesClearStartTracking() async throws {
+        typealias B = PowerPointConverterTests
+        let specs = [("arabicPeriod", " startAt=\"5\""), ("alphaLcPeriod", ""), ("alphaLcPeriod", " startAt=\"5\"")]
+        let paragraphs = specs.enumerated().map { index, pair in
+            "<a:p><a:pPr><a:buAutoNum type=\"\(pair.0)\"\(pair.1)/></a:pPr><a:r><a:t>Item \(index)</a:t></a:r></a:p>"
+        }
+        let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file:"s.xml",shapes:B.shape(placeholder:nil,paragraphs:paragraphs))]), filename:"schemes.pptx")
+        #expect(result.markdown().contains("- e. Item 2"))
+    }
+
+    @Test func XMLRejectsDTDsAcrossEncodingsAndRetainsLiteralMentions() {
+        for source in ["<!DOCTYPE x [<!ENTITY a 'text'>]><x>&a;</x>", "<!DOCTYPE x SYSTEM 'https://invalid.example/x'><x/>", "<!DOCTYPE x><x/>"] {
+            for encoding in [String.Encoding.utf8, .utf16LittleEndian, .utf16BigEndian, .utf32LittleEndian] {
+                #expect(PowerPointXML.normalize(source.data(using: encoding)!) == nil)
+            }
+        }
+        #expect(PowerPointXML.normalize(Data("<!-- <!DOCTYPE ignored> --><x><![CDATA[<!DOCTYPE literal>]]></x>".utf8)) == "<x>&lt;!DOCTYPE literal&gt;</x>")
+    }
+
+    @Test func cachedLayoutAndMasterTreesAndDuplicateRelationshipsAreValidated() throws {
+        typealias B = PowerPointConverterTests
+        for root in ["sldLayout", "sldMaster", "notesMaster"] {
+            let data = PagesConverterTests.makeZip([(name:"part.xml",data:Array("<p:\(root) \(B.namespaces)/>".utf8))])
+            let package = PowerPointPackage(archive: try #require(Archive(data:data,accessMode:.read)))
+            var cache = PowerPointConverter.PartCache(archive:package)
+            #expect(cache.document("part.xml",root:"p:" + root.lowercased()) == nil)
+            #expect(throws:PicoDocsError.fileCorrupted) { try package.check() }
+        }
+        let rels = B.relationshipsXML([("same","http://schemas.openxmlformats.org/officeDocument/2006/relationships/image","a.png"),("same","http://schemas.openxmlformats.org/officeDocument/2006/relationships/image","b.png")])
+        let package = PowerPointPackage(archive:try #require(Archive(data:PagesConverterTests.makeZip([(name:"ppt/slides/_rels/s.xml.rels",data:Array(rels.utf8))]),accessMode:.read)))
+        #expect(PowerPointConverter.relationships(package,forPart:"ppt/slides/s.xml").isEmpty)
+        #expect(throws:PicoDocsError.fileCorrupted) { try package.check() }
+    }
+
+    @Test func pictureRelationshipsAndAlternateBranchesAreValidated() async throws {
+        typealias B = PowerPointConverterTests
+        let fill = "<mc:AlternateContent><mc:Choice Requires=\"p14\"><a:blip r:embed=\"wrong\"/></mc:Choice><mc:Fallback><a:blip r:embed=\"image\"/></mc:Fallback></mc:AlternateContent>"
+        let picture = "<p:pic><p:nvPicPr><p:cNvPr descr=\"Photo\"/></p:nvPicPr><p:blipFill>" + fill + "</p:blipFill></p:pic>"
+        let type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+        for imageType in ["image", "slide"] {
+            let data = B.deck(slides:[.init(file:"s.xml",shapes:B.titleShape("Slide") + picture,relationships:[("image",type + imageType,"../media/good.png")])],extraParts:[("ppt/media/good.png",[1,2,3])])
+            if imageType == "image" {
+                let result = try await PicoDocsEngine.convert(data:data,filename:"fallback.pptx")
+                #expect(result.sections.contains { $0.kind == .image && $0.metadata["base64"] == "AQID" })
+            } else {
+                await #expect(throws:PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data:data,filename:"bad-type.pptx") }
+            }
+        }
+    }
+
     @Test func normalizedXMLHasAnOutputBudget() {
         let quotes = "<root>" + String(repeating: "\"", count: 100) + "</root>"
         #expect(PowerPointXML.normalize(Data(quotes.utf8), maximumOutputBytes: 113) == quotes)
@@ -129,7 +195,7 @@ struct PowerPointFollowupTests {
     @Test func notesStyleSuppliesBulletsAndRunDefaults() throws {
         typealias B = PowerPointConverterTests
         let notes = "<p:notes \(B.namespaces)><p:cSld><p:spTree>" + B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: ["<a:p><a:r><a:t>Note</a:t></a:r></a:p>"]) + "</p:spTree></p:cSld></p:notes>"
-        let master = "<p:notesMaster \(B.namespaces)>" + #"<p:notesStyle><a:lvl1pPr><a:buAutoNum type="arabicPeriod" startAt="3"/><a:defRPr b="1" i="1"/></a:lvl1pPr></p:notesStyle></p:notesMaster>"#
+        let master = "<p:notesMaster \(B.namespaces)><p:cSld><p:spTree/></p:cSld>" + #"<p:notesStyle><a:lvl1pPr><a:buAutoNum type="arabicPeriod" startAt="3"/><a:defRPr b="1" i="1"/></a:lvl1pPr></p:notesStyle></p:notesMaster>"#
         let rels = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster", "../notesMasters/m.xml")])
         let entries = [(name: "ppt/notesSlides/n.xml", data: Array(notes.utf8)), (name: "ppt/notesSlides/_rels/n.xml.rels", data: Array(rels.utf8)), (name: "ppt/notesMasters/m.xml", data: Array(master.utf8))]
         let package = PowerPointPackage(archive: try #require(Archive(data: PagesConverterTests.makeZip(entries), accessMode: .read)))
@@ -321,7 +387,7 @@ struct PowerPointFollowupTests {
         let layoutShape = B.shape(placeholder: #"<p:ph type="body" idx="1"/>"#, paragraphs: [])
             .replacingOccurrences(of: "<a:bodyPr/>", with: #"<a:bodyPr/><a:lstStyle><a:lvl1pPr><a:buNone/><a:defRPr b="1"/></a:lvl1pPr></a:lstStyle>"#)
         let layout = "<p:sldLayout \(B.namespaces)><p:cSld><p:spTree>\(layoutShape)</p:spTree></p:cSld></p:sldLayout>"
-        let master = "<p:sldMaster \(B.namespaces)><p:txStyles><p:bodyStyle><a:lvl1pPr><a:defRPr i=\"1\"/></a:lvl1pPr></p:bodyStyle></p:txStyles></p:sldMaster>"
+        let master = "<p:sldMaster \(B.namespaces)><p:cSld><p:spTree/></p:cSld><p:txStyles><p:bodyStyle><a:lvl1pPr><a:defRPr i=\"1\"/></a:lvl1pPr></p:bodyStyle></p:txStyles></p:sldMaster>"
         let rels = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster", "../slideMasters/master.xml")])
         let data = B.deck(slides: [.init(file: "s.xml", shapes: shape, relationships: [relation])], extraParts: [
             ("ppt/slideLayouts/layout.xml", Array(layout.utf8)), ("ppt/slideLayouts/_rels/layout.xml.rels", Array(rels.utf8)), ("ppt/slideMasters/master.xml", Array(master.utf8))])
