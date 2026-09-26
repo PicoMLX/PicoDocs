@@ -30,8 +30,9 @@ public struct PPTXExporter: DocumentExporter {
         let effectiveSlides = slides.isEmpty ? [Slide(title: "", body: [])] : slides
 
         var pkg = try OOXMLPackageWriter()
-        try pkg.addXML("[Content_Types].xml", Self.contentTypes(slideCount: count))
-        try pkg.addXML("_rels/.rels", Self.rootRels)
+        try pkg.addCoreProperties(result)
+        try pkg.addXML("[Content_Types].xml", OOXMLPackageWriter.withCoreContentType(Self.contentTypes(slideCount: count)))
+        try pkg.addXML("_rels/.rels", OOXMLPackageWriter.withCoreRelationship(Self.rootRels))
         try pkg.addXML("ppt/presentation.xml", Self.presentationXML(slideCount: count))
         try pkg.addXML("ppt/_rels/presentation.xml.rels", Self.presentationRels(slideCount: count))
         try pkg.addXML("ppt/slideMasters/slideMaster1.xml", PPTXTemplates.slideMaster)
@@ -115,7 +116,7 @@ public struct PPTXExporter: DocumentExporter {
             case .blockquote(let quoteLines):
                 for line in quoteLines { lines.append(plain(line)) }
             case .table(let rows):
-                for row in rows { lines.append(row.map { plain($0) }.joined(separator: "\t")) }
+                for row in rows { lines.append(row.map { plain($0.replacingOccurrences(of: "<br>", with: "\n")) }.joined(separator: "\t")) }
             case .rule:
                 continue
             }

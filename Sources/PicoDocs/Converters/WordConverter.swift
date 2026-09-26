@@ -190,6 +190,11 @@ public struct WordConverter: DocumentConverter {
 
     static func renderParagraph(_ paragraph: Element, relationships: [String: String]) -> String? {
         let style = try? paragraph.getElementsByTag("w:pStyle").first()?.attr("w:val")
+        if style == "PicoCodeBlock" {
+            let code = codeText(paragraph)
+            let fence = String(repeating: "`", count: max(3, (code.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0) + 1))
+            return fence + "\n" + code + "\n" + fence
+        }
         let isListItem = (try? paragraph.getElementsByTag("w:numPr").first()) != nil
         let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return nil }
@@ -258,6 +263,12 @@ public struct WordConverter: DocumentConverter {
 
     static func renderRun(_ run: Element, relationships: [String: String]) -> String {
         let properties = try? run.getElementsByTag("w:rPr").first()
+        if (try? properties?.getElementsByTag("w:rStyle").first()?.attr("w:val")) == "PicoCode" {
+            let code = codeText(run)
+            let delimiter = String(repeating: "`", count: max(1, (code.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0) + 1))
+            let pad = code.hasPrefix("`") || code.hasSuffix("`") || (code.hasPrefix(" ") && code.hasSuffix(" ")) ? " " : ""
+            return delimiter + pad + code + pad + delimiter
+        }
         let bold = isFormattingEnabled(properties, tag: "w:b")
         let italic = isFormattingEnabled(properties, tag: "w:i")
 
@@ -302,6 +313,20 @@ public struct WordConverter: DocumentConverter {
         }
         flushText()
         return out
+    }
+
+    private static func codeText(_ element: Element) -> String {
+        var text = ""
+        for child in element.children().array() {
+            switch child.tagName().lowercased() {
+            case "w:t": text += child.getChildNodes().compactMap { ($0 as? TextNode)?.getWholeText() }.joined()
+            case "w:br", "w:cr": text += "\n"
+            case "w:tab": text += "\t"
+            case "w:rpr", "w:ppr": continue
+            default: text += codeText(child)
+            }
+        }
+        return text
     }
 
     /// True when a run-property toggle (`w:b`/`w:i`) is present and not explicitly
@@ -530,7 +555,7 @@ public struct WordConverter: DocumentConverter {
     /// strict failure.
     static func imageMarkdown(in drawing: Element, relationships: [String: String]) -> String {
         guard let target = imageTarget(in: drawing, relationships: relationships) else { return "" }
-        let filename = (target as NSString).lastPathComponent
+        let filename = ((target.removingPercentEncoding ?? target) as NSString).lastPathComponent
         return "![\(escapeLinkLabel(imageAltText(in: drawing)))](\(escapeLinkDestination(filename)))"
     }
 
@@ -572,7 +597,7 @@ public struct WordConverter: DocumentConverter {
             seen.insert(mediaPath)
 
             guard let bytes = readEntry(archive, path: mediaPath), !bytes.isEmpty else { continue }
-            let filename = (target as NSString).lastPathComponent
+            let filename = ((target.removingPercentEncoding ?? target) as NSString).lastPathComponent
             sections.append(DocumentSection(
                 title: filename,
                 kind: .image,

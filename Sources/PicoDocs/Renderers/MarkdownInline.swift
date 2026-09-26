@@ -36,6 +36,20 @@ enum MarkdownInlineParser {
     /// for `*`/`**`/`***` emphasis.
     static func parse(_ text: String) -> [MarkdownInline] {
         let chars = Array(text)
+        // Cache the next unescaped label closer once instead of rescanning the
+        // suffix for every unmatched opener in partially generated Markdown.
+        var escapedPositions = Set<Int>()
+        var cursor = 0
+        while cursor < chars.count {
+            if chars[cursor] == "\\", cursor + 1 < chars.count { escapedPositions.insert(cursor + 1); cursor += 2 }
+            else { cursor += 1 }
+        }
+        var nextBracket = Array<Int?>(repeating: nil, count: chars.count + 1)
+        if !chars.isEmpty {
+            for index in stride(from: chars.count - 1, through: 0, by: -1) {
+                nextBracket[index] = chars[index] == "]" && !escapedPositions.contains(index) ? index : nextBracket[index + 1]
+            }
+        }
         var nodes: [MarkdownInline] = []
         var run = ""
         var i = 0
@@ -50,6 +64,10 @@ enum MarkdownInlineParser {
         while i < chars.count {
             let c = chars[i]
 
+            if c == "\\", i + 1 < chars.count, #"\`*_{}[]<>()#+-.!|"#.contains(chars[i + 1]) {
+                run.append(c); run.append(chars[i + 1]); i += 2; continue
+            }
+
             // Inline code span: `...` (literal, no nested formatting).
             if c == "`", let close = firstIndex(of: "`", in: chars, from: i + 1) {
                 flush()
@@ -60,7 +78,7 @@ enum MarkdownInlineParser {
 
             // Image: ![alt](dest)
             if c == "!", i + 1 < chars.count, chars[i + 1] == "[",
-               let parsed = parseLinkOrImage(chars, from: i, isImage: true) {
+               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: nextBracket[min(i + 2, chars.count)]) {
                 flush()
                 nodes.append(parsed.node)
                 i = parsed.next
@@ -70,7 +88,7 @@ enum MarkdownInlineParser {
             if c == "[" {
                 // Footnote reference: [^id]
                 if i + 1 < chars.count, chars[i + 1] == "^",
-                   let close = firstIndex(of: "]", in: chars, from: i + 2) {
+                   let close = nextBracket[min(i + 2, chars.count)] {
                     let id = String(chars[(i + 2)..<close])
                     if !id.isEmpty {
                         flush()
@@ -80,7 +98,7 @@ enum MarkdownInlineParser {
                     }
                 }
                 // Link: [label](dest)
-                if let parsed = parseLinkOrImage(chars, from: i, isImage: false) {
+                if let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: nextBracket[min(i + 1, chars.count)]) {
                     flush()
                     nodes.append(parsed.node)
                     i = parsed.next
@@ -101,13 +119,13 @@ enum MarkdownInlineParser {
     /// link, the `!` for an image). Supports CommonMark angle-bracket destinations
     /// `(<url with spaces>)` that `WordConverter` emits. Returns the node and the
     /// index just past the closing `)`, or nil if the syntax doesn't match.
-    private static func parseLinkOrImage(_ chars: [Character], from: Int, isImage: Bool) -> (node: MarkdownInline, next: Int)? {
+    private static func parseLinkOrImage(_ chars: [Character], from: Int, isImage: Bool, labelEnd: Int?) -> (node: MarkdownInline, next: Int)? {
         let bracket = isImage ? from + 1 : from
         guard bracket < chars.count, chars[bracket] == "[" else { return nil }
         // Find the label's closing `]`, skipping backslash-escaped delimiters:
         // `WordConverter` escapes `[`/`]` inside labels and alt text, so a visible
         // `]` arrives as `\]` and must not terminate the label early.
-        guard let labelEnd = indexOfUnescaped("]", in: chars, from: bracket + 1) else { return nil }
+        guard let labelEnd else { return nil }
         let parenOpen = labelEnd + 1
         guard parenOpen < chars.count, chars[parenOpen] == "(" else { return nil }
 
@@ -127,9 +145,9 @@ enum MarkdownInlineParser {
             dest = unescape(String(chars[destStart..<parenClose]))
             cursor = parenClose
         }
-        let labelText = unescape(String(chars[(bracket + 1)..<labelEnd]))
+        let labelText = String(chars[(bracket + 1)..<labelEnd])
         let node: MarkdownInline = isImage
-            ? .image(alt: labelText, source: dest)
+            ? .image(alt: unescape(labelText), source: dest)
             : .link(label: parse(labelText), destination: dest)
         return (node, cursor + 1)   // past the ")"
     }
@@ -184,6 +202,44 @@ enum MarkdownInlineParser {
         pattern: #"\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|\*(.+?)\*"#)
 
     static func parseEmphasis(_ text: String) -> [MarkdownInline] {
+        var protected = "", escapes: [String] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            if text[index] == "\\", next < text.endIndex, #"\`*_{}[]<>()#+-.!|"#.contains(text[next]) {
+                escapes.append(String(text[next]))
+                protected += "\u{E010}\(escapes.count - 1)\u{E011}"
+                index = text.index(after: next)
+            } else { protected.append(text[index]); index = next }
+        }
+        let nodes = parseEmphasisProtected(protected)
+        guard !escapes.isEmpty else { return nodes }
+        func restore(_ text: String) -> String {
+            let ns = text as NSString
+            var result = "", offset = 0
+            for match in escapeRegex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                result += ns.substring(with: NSRange(location: offset, length: match.range.location - offset))
+                if let index = Int(ns.substring(with: match.range(at: 1))), escapes.indices.contains(index) { result += escapes[index] }
+                else { result += ns.substring(with: match.range) }
+                offset = NSMaxRange(match.range)
+            }
+            result += ns.substring(from: offset)
+            return result
+        }
+        func restoreNode(_ node: MarkdownInline) -> MarkdownInline {
+            switch node {
+            case .text(let text): return .text(restore(text))
+            case .strong(let children): return .strong(children.map(restoreNode))
+            case .emphasis(let children): return .emphasis(children.map(restoreNode))
+            default: return node
+            }
+        }
+        return nodes.map(restoreNode)
+    }
+
+    private static let escapeRegex = try! NSRegularExpression(pattern: "\u{E010}([0-9]+)\u{E011}")
+
+    private static func parseEmphasisProtected(_ text: String) -> [MarkdownInline] {
         let ns = text as NSString
         var nodes: [MarkdownInline] = []
         var offset = 0
@@ -192,7 +248,7 @@ enum MarkdownInlineParser {
                 nodes.append(.text(ns.substring(with: NSRange(location: offset, length: match.range.location - offset))))
             }
             for group in 1...3 where match.range(at: group).location != NSNotFound {
-                let children = parseEmphasis(ns.substring(with: match.range(at: group)))
+                let children = parseEmphasisProtected(ns.substring(with: match.range(at: group)))
                 switch group {
                 case 1: nodes.append(.strong([.emphasis(children)]))
                 case 2: nodes.append(.strong(children))
@@ -228,7 +284,7 @@ extension MarkdownInline {
         case .strong(let children), .emphasis(let children): return children.plainText
         case .link(let label, _): return label.plainText
         case .image(let alt, _): return alt
-        case .footnoteReference: return ""
+        case .footnoteReference(let id): return "[^\(id)]"
         }
     }
 }

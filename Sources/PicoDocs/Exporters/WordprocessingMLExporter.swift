@@ -29,8 +29,10 @@ public struct WordprocessingMLExporter: DocumentExporter {
         builder.finishRelationships()
 
         var pkg = try OOXMLPackageWriter()
-        try pkg.addXML("[Content_Types].xml", Self.contentTypes(mediaExtensions: builder.mediaExtensions, hasNumbering: builder.usedNumbering))
-        try pkg.addXML("_rels/.rels", Self.rootRels)
+        try pkg.addCoreProperties(result)
+        try pkg.addXML("[Content_Types].xml", OOXMLPackageWriter.withCoreContentType(Self.contentTypes(mediaExtensions: builder.mediaExtensions, hasNumbering: builder.usedNumbering)))
+        try pkg.addXML("_rels/.rels", OOXMLPackageWriter.withCoreRelationship(Self.rootRels))
+        try pkg.addXML("word/styles.xml", Self.stylesXML)
         try pkg.addXML("word/document.xml", Self.documentXML(body: builder.body))
         try pkg.addXML("word/_rels/document.xml.rels", Self.documentRels(builder.relationships))
         if builder.usedNumbering {
@@ -82,7 +84,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             // recognizes rather than `.bin`/octet-stream.
             let mime = section.metadata["mimeType"]
             var ext = (name as NSString?)?.pathExtension.lowercased() ?? ""
-            if ext.isEmpty { ext = OfficeMediaType.fileExtension(forMIME: mime ?? "") }
+            if ext.isEmpty || ext == "xml" || ext == "rels" { ext = OfficeMediaType.fileExtension(forMIME: mime ?? "") }
             let stem = (name as NSString?)?.deletingPathExtension ?? ""
 
             // Allocate a unique media filename (suffix on basename collisions) so
@@ -158,7 +160,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                     if i > 0 { content += "<w:r><w:br/></w:r>" }
                     content += textRun(line, bold: false, italic: false, monospace: true)
                 }
-                body += paragraph(pPr: "", content: content)
+                body += paragraph(pPr: "<w:pPr><w:pStyle w:val=\"PicoCodeBlock\"/></w:pPr>", content: content)
 
             case .blockquote(let lines):
                 let pPr = "<w:pPr><w:pStyle w:val=\"Quote\"/></w:pPr>"
@@ -196,6 +198,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
         /// Allocates the numbering relationship once, after the body is built.
         func finishRelationships() {
+            relationships.append(Relationship(id: nextRelID(), type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles", target: "styles.xml", external: false))
             guard usedNumbering, !numberingRelAdded else { return }
             numberingRelAdded = true
             relationships.append(Relationship(
@@ -364,7 +367,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             var inner = ""
             if bold { inner += "<w:b/>" }
             if italic { inner += "<w:i/>" }
-            if monospace { inner += "<w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/>" }
+            if monospace { inner += "<w:rStyle w:val=\"PicoCode\"/><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/>" }
             return inner.isEmpty ? "" : "<w:rPr>\(inner)</w:rPr>"
         }
     }
@@ -382,10 +385,11 @@ public struct WordprocessingMLExporter: DocumentExporter {
         <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\
         <Default Extension="xml" ContentType="application/xml"/>
         """
-        for ext in mediaExtensions.sorted() {
+        for ext in mediaExtensions.sorted() where ext != "xml" && ext != "rels" {
             defaults += "<Default Extension=\"\(OOXMLPackageWriter.escapeAttribute(ext))\" ContentType=\"\(OfficeMediaType.mimeType(forExtension: ext))\"/>"
         }
         var overrides = "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>"
+        overrides += "<Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>"
         if hasNumbering {
             overrides += "<Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/>"
         }
@@ -410,11 +414,29 @@ public struct WordprocessingMLExporter: DocumentExporter {
         var rels = ""
         for rel in relationships {
             let mode = rel.external ? " TargetMode=\"External\"" : ""
-            rels += "<Relationship Id=\"\(rel.id)\" Type=\"\(rel.type)\" Target=\"\(OOXMLPackageWriter.escapeAttribute(rel.target))\"\(mode)/>"
+            let target = rel.external ? Self.relationshipURI(rel.target) : rel.target
+            rels += "<Relationship Id=\"\(rel.id)\" Type=\"\(rel.type)\" Target=\"\(OOXMLPackageWriter.escapeAttribute(target))\"\(mode)/>"
         }
         return OOXMLPackageWriter.xmlDeclaration + """
         <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\(rels)</Relationships>
         """
+    }
+
+    private static func relationshipURI(_ target: String) -> String {
+        let allowed = CharacterSet.urlFragmentAllowed.union(.urlQueryAllowed).union(.urlPathAllowed)
+            .union(CharacterSet(charactersIn: ":/?#[]@!$&'()*+,;=%"))
+        return target.addingPercentEncoding(withAllowedCharacters: allowed) ?? target
+    }
+
+    private static var stylesXML: String {
+        var styles = "<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/></w:style>"
+        for level in 1...6 {
+            styles += "<w:style w:type=\"paragraph\" w:styleId=\"Heading\(level)\"><w:name w:val=\"heading \(level)\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:keepNext/><w:spacing w:before=\"240\" w:after=\"120\"/><w:outlineLvl w:val=\"\(level - 1)\"/></w:pPr><w:rPr><w:b/><w:sz w:val=\"\(40 - level * 2)\"/></w:rPr></w:style>"
+        }
+        styles += "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:ind w:left=\"720\" w:right=\"720\"/></w:pPr><w:rPr><w:i/></w:rPr></w:style>"
+        styles += "<w:style w:type=\"paragraph\" w:styleId=\"PicoCodeBlock\"><w:name w:val=\"Code Block\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr><w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/></w:rPr></w:style>"
+        styles += "<w:style w:type=\"character\" w:styleId=\"PicoCode\"><w:name w:val=\"Inline Code\"/><w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/></w:rPr></w:style>"
+        return OOXMLPackageWriter.xmlDeclaration + "<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\(styles)</w:styles>"
     }
 
     /// Builds `numbering.xml` for the lists that were actually emitted. Bullets map

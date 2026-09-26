@@ -26,7 +26,7 @@ public struct XLSXExporter: DocumentExporter {
         var usedNames = Set<String>()
         for section in result.sections where section.kind != .image {
             let rows = Self.rows(for: section)
-            guard !rows.isEmpty else { continue }
+            try Self.validateDimensions(rows: rows.count, columns: rows.map(\.count).max() ?? 0)
             let name = Self.uniqueSheetName(section, index: sheets.count + 1, used: &usedNames)
             sheets.append((name, rows))
         }
@@ -38,14 +38,21 @@ public struct XLSXExporter: DocumentExporter {
         }
 
         var pkg = try OOXMLPackageWriter()
-        try pkg.addXML("[Content_Types].xml", Self.contentTypes(sheetCount: sheets.count))
-        try pkg.addXML("_rels/.rels", Self.rootRels)
+        try pkg.addCoreProperties(result)
+        try pkg.addXML("[Content_Types].xml", OOXMLPackageWriter.withCoreContentType(Self.contentTypes(sheetCount: sheets.count)))
+        try pkg.addXML("_rels/.rels", OOXMLPackageWriter.withCoreRelationship(Self.rootRels))
         try pkg.addXML("xl/workbook.xml", Self.workbookXML(sheets: sheets))
         try pkg.addXML("xl/_rels/workbook.xml.rels", Self.workbookRels(sheetCount: sheets.count))
         for (i, sheet) in sheets.enumerated() {
             try pkg.addXML("xl/worksheets/sheet\(i + 1).xml", Self.worksheetXML(rows: sheet.rows))
         }
         return try pkg.data()
+    }
+
+    static func validateDimensions(rows: Int, columns: Int) throws {
+        guard rows <= 1_048_576, columns <= 16_384 else {
+            throw ExporterError.serializationFailed("Worksheet exceeds SpreadsheetML row or column limits")
+        }
     }
 
     // MARK: - Rows

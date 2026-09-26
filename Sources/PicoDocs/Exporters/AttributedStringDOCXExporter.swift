@@ -29,10 +29,13 @@ public struct AttributedStringDOCXExporter: DocumentExporter {
         guard format == .docx else { throw ExporterError.notAccepted }
         #if canImport(AppKit)
         let attributed = AttributedStringDocumentBuilder.attributedString(from: result)
+        var properties: [NSAttributedString.DocumentAttributeKey: Any] = [.documentType: NSAttributedString.DocumentType.officeOpenXML]
+        if let title = result.title { properties[.title] = title }
+        if let author = result.author { properties[.author] = author }
         do {
             return try attributed.data(
                 from: NSRange(location: 0, length: attributed.length),
-                documentAttributes: [.documentType: NSAttributedString.DocumentType.officeOpenXML]
+                documentAttributes: properties
             )
         } catch {
             throw ExporterError.serializationFailed("DOCX (officeOpenXML) serialization failed: \(error.localizedDescription)")

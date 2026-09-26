@@ -91,7 +91,7 @@ enum AttributedStringDocumentBuilder {
 
         case .table(let rows):
             for row in rows {
-                output.append(inline(row.joined(separator: "\t")))
+                output.append(inline(row.map { $0.replacingOccurrences(of: "<br>", with: "\n") }.joined(separator: "\t")))
                 output.append(NSAttributedString(string: "\n"))
             }
 

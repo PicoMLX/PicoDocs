@@ -22,10 +22,13 @@ public struct AttributedStringRTFExporter: DocumentExporter {
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .rtf else { throw ExporterError.notAccepted }
         let attributed = AttributedStringDocumentBuilder.attributedString(from: result)
+        var properties: [NSAttributedString.DocumentAttributeKey: Any] = [.documentType: NSAttributedString.DocumentType.rtf]
+        if let title = result.title { properties[.title] = title }
+        if let author = result.author { properties[.author] = author }
         do {
             return try attributed.data(
                 from: NSRange(location: 0, length: attributed.length),
-                documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+                documentAttributes: properties
             )
         } catch {
             throw ExporterError.serializationFailed("RTF serialization failed: \(error.localizedDescription)")

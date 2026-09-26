@@ -61,6 +61,20 @@ struct OOXMLPackageWriter {
         return data
     }
 
+    mutating func addCoreProperties(_ result: ConverterResult) throws {
+        let title = result.title.map { "<dc:title>\(Self.escape($0))</dc:title>" } ?? ""
+        let author = result.author.map { "<dc:creator>\(Self.escape($0))</dc:creator>" } ?? ""
+        try addXML("docProps/core.xml", Self.xmlDeclaration + "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\(title)\(author)</cp:coreProperties>")
+    }
+
+    static func withCoreContentType(_ xml: String) -> String {
+        xml.replacingOccurrences(of: "</Types>", with: "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/></Types>")
+    }
+
+    static func withCoreRelationship(_ xml: String) -> String {
+        xml.replacingOccurrences(of: "</Relationships>", with: "<Relationship Id=\"coreProperties\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/></Relationships>")
+    }
+
     // MARK: - XML helpers
 
     /// XML standalone declaration used at the top of every part.
