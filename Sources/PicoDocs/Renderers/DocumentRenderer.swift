@@ -409,7 +409,7 @@ public enum DocumentRenderer {
                 // (second row), so all-dash data rows elsewhere are preserved.
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.decodeBreaks(MarkdownTableCell.unescape($0)) }
+                    let cells = parseTableRow(lines[i]).map { stripInline(MarkdownTableCell.decodeBreaks($0)) }
                     if !(rowIndex == 1 && isTableSeparatorRow(cells)) {
                         rows.append(cells.map { csvField($0) }.joined(separator: ","))
                     }
@@ -472,7 +472,7 @@ public enum DocumentRenderer {
                 var rows: [[String]] = []
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.decodeBreaks(MarkdownTableCell.unescape($0)) }
+                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.decodeBreaks($0) }
                     // The header/body separator is conventionally the second row;
                     // only drop an all-dash row there, so real data rows that
                     // happen to be all dashes elsewhere are kept.
@@ -687,10 +687,11 @@ public enum DocumentRenderer {
             }
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: tag)
         }
+        result = restoreEscapes(result, escaped: escaped, html: true)
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
         }
-        return restoreEscapes(result, escaped: escaped, html: true)
+        return result
     }
 
     /// URL schemes the HTML export emits as live links. Link and image URLs come
@@ -740,10 +741,11 @@ public enum DocumentRenderer {
         for (index, link) in links.enumerated() {
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: applyEmphasisStrip(link.label))
         }
+        result = restoreEscapes(result, escaped: escaped, html: false)
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: span)
         }
-        return restoreEscapes(result, escaped: escaped, html: false)
+        return result
     }
 
     private static func applyEmphasisStrip(_ text: String) -> String {
@@ -759,7 +761,11 @@ public enum DocumentRenderer {
         var index = text.startIndex
         while index < text.endIndex {
             let next = text.index(after: index)
-            if text[index] == "\\", next < text.endIndex,
+            if text[index] == "\u{E006}" || text[index] == "\u{E007}" {
+                escaped.append(String(text[index]))
+                out += "\u{E006}\(escaped.count - 1)\u{E007}"
+                index = next
+            } else if text[index] == "\\", next < text.endIndex,
                #"\`*_{}[]<>()#+-.!|"#.contains(text[next]) {
                 escaped.append(String(text[next]))
                 out += "\u{E006}\(escaped.count - 1)\u{E007}"

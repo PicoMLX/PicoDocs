@@ -37,15 +37,17 @@ final class PowerPointPackage {
             }
             var bytes = Data()
             bytes.reserveCapacity(Int(min(entry.uncompressedSize, 1024 * 1024)))
-            _ = try archive.extract(entry) { chunk in
+            let checksum = try archive.extract(entry) { chunk in
                 try Task.checkCancellation()
                 guard chunk.count <= self.entryLimit - bytes.count, chunk.count <= self.remaining,
                       !chunk.isEmpty || entry.uncompressedSize == 0 else { throw PicoDocsError.fileCorrupted }
                 self.remaining -= chunk.count
                 bytes.append(chunk)
             }
+            guard checksum == entry.checksum, UInt64(bytes.count) == entry.uncompressedSize else { throw PicoDocsError.fileCorrupted }
             return bytes
-        } catch { failure = error; return nil }
+        } catch let error as CancellationError { failure = error; return nil }
+        catch { fail(PicoDocsError.fileCorrupted); return nil }
     }
 }
 

@@ -4,6 +4,52 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func defaultParagraphStyleAndExplicitLinkOverride() async throws {
+        typealias B = PowerPointConverterTests
+        let shape = B.shape(placeholder: nil, paragraphs: [
+            #"<a:p><a:r><a:rPr><a:hlinkClick r:id="jump"/></a:rPr><a:t>Internal override</a:t></a:r></a:p>"#])
+            .replacingOccurrences(of: "<a:bodyPr/>", with: #"<a:bodyPr/><a:lstStyle><a:defPPr><a:buChar char="•"/><a:defRPr b="1" i="1"/></a:defPPr></a:lstStyle>"#)
+            .replacingOccurrences(of: #"<p:cNvPr id="2" name="Shape"/>"#, with: #"<p:cNvPr id="2" name="Shape"><a:hlinkClick r:id="outer"/></p:cNvPr>"#)
+        let title = B.shape(placeholder: #"<p:ph type="title"/>"#, paragraphs: [#"<a:p><a:r><a:t>Plan</a:t></a:r><a:br/><a:r><a:t>Draft</a:t></a:r></a:p>"#])
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: title + shape, relationships: [
+            ("outer", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "https://example.com\" TargetMode=\"External"),
+            ("jump", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide", "s.xml")])])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "defaults.pptx")
+        #expect(result.sections.first?.title == "Plan Draft")
+        #expect(result.markdown().contains("- ***Internal override***"))
+        #expect(!result.markdown().contains("https://example.com"))
+    }
+
+    @Test func invalidRelationshipsNotesMastersAndCRC() async throws {
+        typealias B = PowerPointConverterTests
+        let malformed = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title"))], extraParts: [("ppt/slides/_rels/s.xml.rels", Array("<bad".utf8))])
+        await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: malformed, filename: "bad.pptx") }
+        let notes = "<p:notes \(B.namespaces)>" + B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: ["<a:p><a:r><a:t>Note</a:t></a:r></a:p>"]) + "</p:notes>"
+        let notesRels = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster", "../notesMasters/missing.xml")])
+        let missing = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title"), relationships: [("notes", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide", "../notesSlides/n.xml")])], extraParts: [("ppt/notesSlides/n.xml", Array(notes.utf8)), ("ppt/notesSlides/_rels/n.xml.rels", Array(notesRels.utf8))])
+        await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: missing, filename: "missing.pptx") }
+        var corrupt = PagesConverterTests.makeZip([(name: "part", data: Array("UNIQUEPAYLOAD".utf8))])
+        let range = try #require(corrupt.range(of: Data("UNIQUEPAYLOAD".utf8)))
+        corrupt[range.lowerBound] = 0
+        let package = PowerPointPackage(archive: try #require(Archive(data: corrupt, accessMode: .read)))
+        #expect(package.read("part") == nil)
+        #expect(throws: PicoDocsError.fileCorrupted) { try package.check() }
+    }
+
+    @Test func literalEscapeTokensAndTableBreakText() async throws {
+        let literal = "\u{E006}0\u{E007}"
+        let result = ConverterResult(sections: [.init(markdown: literal + " \\* `" + literal + "`")])
+        for format in [ExportFileType.html, .plaintext] {
+            let text = try DocumentRenderer.render(result, to: format)
+            #expect(text.components(separatedBy: literal).count == 3)
+        }
+        let xml = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>\&lt;br&gt;</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
+        let word = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(xml.utf8))]), filename: "literal.docx")
+        #expect(try DocumentRenderer.render(word, to: .plaintext).contains(#"\<br>"#))
+        #expect(try DocumentRenderer.render(word, to: .html).contains(#"\&lt;br&gt;"#))
+        #expect(try DocumentRenderer.render(word, to: .csv).contains(#"\<br>"#))
+    }
+
     @Test func declaredLayoutsAndInheritedRunDefaults() async throws {
         typealias B = PowerPointConverterTests
         let relation = ("layout", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout", "../slideLayouts/layout.xml")

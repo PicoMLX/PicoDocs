@@ -118,7 +118,12 @@ public struct PowerPointConverter: DocumentConverter {
                                    relationships: Self.relationships(archive, forPart: notesPath),
                                    images: ImageCollector(), embedsImages: false)
         let notesRels = Self.relationships(archive, forPart: notesPath)
-        context.master = Self.relatedPart(of: notesPath, type: "/notesMaster", relationships: notesRels).flatMap { xml(archive, path: $0) }
+        if let master = notesRels.values.first(where: { $0.type.hasSuffix("/notesMaster") }) {
+            guard !master.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+            let path = WordConverter.resolvePartPath(master.target, relativeTo: directory(of: notesPath))
+            guard let document = xml(archive, path: path) else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+            context.master = document
+        }
         let paragraphs = ((try? notes.getElementsByTag("p:sp").array()) ?? [])
             .filter { placeholderType(of: $0) == "body" }
             .flatMap { shape in
@@ -216,7 +221,10 @@ public struct PowerPointConverter: DocumentConverter {
                     if title == nil, !text.isEmpty {
                         title = text
                         context.plainTitle = ((try? body.getElementsByTag("a:p").array()) ?? []).map { paragraph in
-                            ((try? paragraph.getElementsByTag("a:t").array()) ?? []).map(wholeText).joined()
+                            paragraph.children().array().map { node in
+                                if node.tagName().lowercased() == "a:br" { return " " }
+                                return ((try? node.getElementsByTag("a:t").array()) ?? []).map(wholeText).joined()
+                            }.joined()
                         }.joined(separator: " ").split(whereSeparator: \.isWhitespace).joined(separator: " ")
                         continue
                     }
@@ -319,7 +327,7 @@ public struct PowerPointConverter: DocumentConverter {
         }
         return (0..<9).map { level in
             for source in sources {
-                if let source, let bullet = bullet(in: child(of: source, named: "a:lvl\(level + 1)ppr")) {
+                if let source, let bullet = bullet(in: child(of: source, named: "a:lvl\(level + 1)ppr")) ?? bullet(in: child(of: source, named: "a:defppr")) {
                     return bullet
                 }
             }
@@ -343,7 +351,11 @@ public struct PowerPointConverter: DocumentConverter {
             }
         }
         return (0..<9).map { level in
-            styles.compactMap { $0.flatMap { child(of: $0, named: "a:lvl\(level + 1)ppr") }.flatMap { child(of: $0, named: "a:defrpr") } }
+            styles.flatMap { source -> [Element] in
+                guard let source else { return [] }
+                return [child(of: source, named: "a:lvl\(level + 1)ppr"), child(of: source, named: "a:defppr")]
+                    .compactMap { $0.flatMap { child(of: $0, named: "a:defrpr") } }
+            }
         }
     }
 
@@ -465,12 +477,11 @@ public struct PowerPointConverter: DocumentConverter {
                 let properties = child(of: node, named: "a:rpr")
                 let text = escapeMarkdown(child(of: node, named: "a:t").map(wholeText) ?? "")
                 guard !text.isEmpty else { continue }
-                let link = properties
-                    .flatMap { child(of: $0, named: "a:hlinkclick") }
-                    .flatMap { try? $0.attr("r:id") }
+                let click = properties.flatMap { child(of: $0, named: "a:hlinkclick") }
+                let link = click.flatMap { try? $0.attr("r:id") }
                     .flatMap { context.relationships[$0] }
                     .flatMap { $0.external && DocumentRenderer.isSafeURL($0.target, isImage: false) ? $0.target : nil }
-                runs.append(Run(text: text, bold: isOn(properties, "b", defaults: defaults), italic: isOn(properties, "i", defaults: defaults), link: link ?? context.defaultLink))
+                runs.append(Run(text: text, bold: isOn(properties, "b", defaults: defaults), italic: isOn(properties, "i", defaults: defaults), link: click == nil ? context.defaultLink : link))
             case "a:br":
                 runs.append(Run(text: "\n", bold: false, italic: false, link: nil))
             default:
@@ -713,7 +724,10 @@ public struct PowerPointConverter: DocumentConverter {
     /// A part's relationships (`<dir>/_rels/<file>.rels`), keyed by id.
     static func relationships(_ archive: PowerPointPackage, forPart part: String) -> [String: Relationship] {
         let relsPath = "\(directory(of: part))/_rels/\((part as NSString).lastPathComponent).rels"
-        guard let document = xml(archive, path: relsPath) else { return [:] }
+        guard let document = xml(archive, path: relsPath) else {
+            if archive.archive[relsPath] != nil { archive.fail(PicoDocsError.fileCorrupted) }
+            return [:]
+        }
         var map: [String: Relationship] = [:]
         for element in (try? document.getElementsByTag("Relationship").array()) ?? [] {
             guard let id = try? element.attr("Id"), let target = try? element.attr("Target"),
