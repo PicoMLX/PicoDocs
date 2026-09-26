@@ -150,17 +150,26 @@ enum IWATable {
             // Split the body only at table attachments; non-table markers (inline
             // images) stay in the text and are dropped during paragraph rendering,
             // so an image mid-paragraph doesn't break the paragraph into two blocks.
+            // List numbering carries across the table splits, so an ordered list an
+            // inline table interrupts keeps counting as it does without the split.
+            // Each later segment opens with the rest of the paragraph the table sat
+            // in, which was already numbered before the split.
             var segmentStart = 0
+            var lists = ListState()
+            var continuesParagraph = false
             for (marker, attachment) in zip(markers, attachments) {
                 guard let tile = reachableTile(from: attachment.objectID, objects: objects, tiles: tiles),
                       let markdown = tableMarkdown[tile] else { continue }  // image: leave ￼ in the text
-                let segment = renderParagraphs(body, segmentStart ..< marker, objects: objects)
+                let segment = renderParagraphs(body, segmentStart ..< marker, objects: objects,
+                                               lists: &lists, continuesParagraph: continuesParagraph)
                 if !segment.isEmpty { blocks.append(.text(segment)) }
                 blocks.append(.table(markdown))
                 placed.insert(tile)
                 segmentStart = marker + 1                                   // drop the table ￼
+                continuesParagraph = true
             }
-            let tail = renderParagraphs(body, segmentStart ..< body.units.count, objects: objects)
+            let tail = renderParagraphs(body, segmentStart ..< body.units.count, objects: objects,
+                                        lists: &lists, continuesParagraph: continuesParagraph)
             if !tail.isEmpty { blocks.append(.text(tail)) }
         }
         // Commit to inline layout only if every reconstructed table found a home.
@@ -177,7 +186,9 @@ enum IWATable {
         var parts: [String] = []
         for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
             guard let body = bodyStorage(storage, objects: objects) else { continue }
-            let rendered = renderParagraphs(body, 0 ..< body.units.count, objects: objects)
+            var lists = ListState()
+            let rendered = renderParagraphs(body, 0 ..< body.units.count, objects: objects,
+                                            lists: &lists, continuesParagraph: false)
             if !rendered.isEmpty { parts.append(rendered) }
         }
         return parts.joined(separator: "\n\n")
@@ -237,58 +248,73 @@ enum IWATable {
     /// ordered run) or a body paragraph (may become a list item).
     private enum RenderedParagraph { case heading(String), body(String) }
 
+    /// List numbering and joining state for one body storage. `inlineBlocks`
+    /// threads it through the segments it renders between inline tables.
+    private struct ListState {
+        var lastList: UInt64?      // list style of the immediately preceding paragraph, if a list item
+        var orderedList: UInt64?   // style of the ordered run currently counting
+        var counter = 0
+    }
+
     /// Renders a UTF-16 range as Markdown: split into paragraphs at true paragraph
     /// separators (not soft line breaks) and render each — a heading prefixed with
     /// `#`s, a list item prefixed with `-`/`N.`, otherwise a plain body paragraph
     /// (all with inline emphasis/links). Consecutive items of the same list render
     /// tight (one newline); everything else is separated by a blank line. Interior
     /// whitespace and soft breaks are left for `PagesConverter.normalize` to fold.
+    /// With `continuesParagraph`, the range opens mid-paragraph (just after an
+    /// inline table), so that first fragment is plain text: it neither takes a
+    /// marker nor counts again.
     private static func renderParagraphs(_ body: BodyStorage, _ range: Range<Int>,
-                                         objects: [UInt64: IWAArchive.Object]) -> String {
+                                         objects: [UInt64: IWAArchive.Object],
+                                         lists: inout ListState, continuesParagraph: Bool) -> String {
         var parts: [(text: String, tight: Bool)] = []   // tight = join to previous with one newline
-        var lastList: UInt64?      // list style of the immediately preceding paragraph, if a list item
-        var orderedList: UInt64?   // style of the ordered run currently counting
-        var counter = 0
+        // Empty list items (a bare marker, still numbered) wait here until their list
+        // continues with a nonempty item, so an interior blank item keeps its place
+        // while trailing ones don't leave dangling markers.
+        var pendingEmpty: [(text: String, tight: Bool)] = []
         var start = range.lowerBound
         var index = range.lowerBound
+        var fragment = continuesParagraph
         while index <= range.upperBound {
-            if index == range.upperBound || isParagraphSeparator(body.units[index]) {
+            if fragment, index == range.upperBound || isParagraphSeparator(body.units[index]) {
+                fragment = false
+                switch renderParagraph(body, start ..< index, objects: objects) {
+                case .heading(let text)?, .body(let text)?: parts.append((text, false))
+                case nil: break
+                }
+                start = index + 1
+            } else if index == range.upperBound || isParagraphSeparator(body.units[index]) {
+                let listStyle = referenceID(at: start, in: body.listStyles)
+                let listKind = listStyle.flatMap { body.listMarkers[$0] }
                 switch renderParagraph(body, start ..< index, objects: objects) {
                 case .heading(let text)?:
                     parts.append((text, false))
-                    lastList = nil; orderedList = nil
+                    pendingEmpty = []
+                    lists.lastList = nil; lists.orderedList = nil
                 case .body(let text)?:
-                    let listStyle = referenceID(at: start, in: body.listStyles)
-                    switch listStyle.flatMap({ body.listMarkers[$0] }) {
-                    case .bullet?:
-                        parts.append((listItem("- ", text), listStyle == lastList))
-                        lastList = listStyle; orderedList = nil
-                    case .ordered?:
-                        // An explicit restart ("Start at N" / a new list) wins; otherwise
-                        // a change of list style starts a fresh count, and the same
-                        // style continues it.
-                        let restart = listRestart(at: start, in: body.listRestarts)
-                        if let restart {
-                            counter = restart - 1; orderedList = listStyle
-                        } else if listStyle != orderedList {
-                            counter = 0; orderedList = listStyle
-                        }
-                        counter += 1
-                        // A restarted list is its own list: set it off by a blank line
-                        // rather than tight-joining it to the previous one.
-                        parts.append((listItem("\(counter). ", text), listStyle == lastList && restart == nil))
-                        lastList = listStyle
-                    case nil:
+                    if let listKind {
+                        let (marker, tight) = nextListMarker(listKind, style: listStyle, at: start, body, &lists)
+                        if tight { parts += pendingEmpty }
+                        pendingEmpty = []
+                        parts.append((listItem(marker + " ", text), tight))
+                    } else {
                         parts.append((text, false))
-                        lastList = nil; orderedList = nil
+                        pendingEmpty = []
+                        lists.lastList = nil; lists.orderedList = nil
                     }
                 case nil:
-                    // An empty paragraph that isn't a list item breaks the run: a
-                    // following same-style list restarts its numbering and is set off
-                    // by a blank line, not tight-joined. An empty list item leaves the
-                    // run intact.
-                    if referenceID(at: start, in: body.listStyles).flatMap({ body.listMarkers[$0] }) == nil {
-                        lastList = nil; orderedList = nil
+                    if let listKind {
+                        // An empty list item still takes a number (Pages shows its marker).
+                        let (marker, tight) = nextListMarker(listKind, style: listStyle, at: start, body, &lists)
+                        if !tight { pendingEmpty = [] }
+                        pendingEmpty.append((marker, tight))
+                    } else {
+                        // An empty paragraph that isn't a list item breaks the run: a
+                        // following same-style list restarts its numbering and is set
+                        // off by a blank line, not tight-joined.
+                        pendingEmpty = []
+                        lists.lastList = nil; lists.orderedList = nil
                     }
                 }
                 start = index + 1
@@ -303,6 +329,32 @@ enum IWATable {
         return output
     }
 
+    /// The marker (`-` or `N.`) for the next list paragraph and whether it joins the
+    /// previous item tightly, advancing the numbering state. An explicit restart
+    /// ("Start at N" / a new list) wins; otherwise a change of list style starts a
+    /// fresh count and the same style continues it. A restarted list is its own
+    /// list, so it is set off by a blank line rather than tight-joined.
+    private static func nextListMarker(_ kind: ListMarker, style: UInt64?, at offset: Int,
+                                       _ body: BodyStorage, _ lists: inout ListState) -> (marker: String, tight: Bool) {
+        switch kind {
+        case .bullet:
+            let tight = style == lists.lastList
+            lists.lastList = style; lists.orderedList = nil
+            return ("-", tight)
+        case .ordered:
+            let restart = listRestart(at: offset, in: body.listRestarts)
+            if let restart {
+                lists.counter = restart - 1; lists.orderedList = style
+            } else if style != lists.orderedList {
+                lists.counter = 0; lists.orderedList = style
+            }
+            lists.counter += 1
+            let tight = style == lists.lastList && restart == nil
+            lists.lastList = style
+            return ("\(lists.counter).", tight)
+        }
+    }
+
     /// Only true paragraph terminators split paragraphs; soft line breaks (U+2028,
     /// U+000B, U+000C) stay inside the paragraph and become newlines via `normalize`.
     private static func isParagraphSeparator(_ unit: UInt16) -> Bool {
@@ -315,26 +367,46 @@ enum IWATable {
     /// Whitespace the author typed after a soft break is dropped first, so the only
     /// leading spaces are the indent — which `PagesConverter.normalize` keeps on list
     /// continuation lines. Consecutive soft breaks collapse to one (a blank line
-    /// would end the item).
+    /// would end the item). Each line's leading list-marker-like text is escaped so
+    /// it stays literal content rather than opening a nested list.
     private static func listItem(_ marker: String, _ text: String) -> String {
         let softBreaks: Set<Unicode.Scalar> = ["\u{2028}", "\u{000B}", "\u{000C}"]
-        guard text.unicodeScalars.contains(where: { softBreaks.contains($0) }) else { return marker + text }
-        let indent = String(repeating: " ", count: marker.count)
-        var scalars = String.UnicodeScalarView()
+        var lines: [String] = []
+        var line = String.UnicodeScalarView()
         var atLineStart = false
         for scalar in text.unicodeScalars {
             if softBreaks.contains(scalar) {
-                if !atLineStart { scalars.append("\n"); atLineStart = true }
+                if !atLineStart { lines.append(String(line)); line = .init(); atLineStart = true }
                 continue
             }
             if atLineStart {
                 if scalar == " " || scalar == "\t" { continue }
-                scalars.append(contentsOf: indent.unicodeScalars)
                 atLineStart = false
             }
-            scalars.append(scalar)
+            line.append(scalar)
         }
-        return marker + String(scalars)
+        if !atLineStart { lines.append(String(line)) }
+        let indent = String(repeating: " ", count: marker.count)
+        return marker + lines.map(escapingListMarker).joined(separator: "\n" + indent)
+    }
+
+    /// `line` with a leading list marker (`- x`, `* x`, `+ x`, `1. x`, `1) x`)
+    /// backslash-escaped, so inside a list item it reads as text: CommonMark would
+    /// otherwise open a nested list there, splitting one Pages item into several.
+    static func escapingListMarker(_ line: String) -> String {
+        let content = line.drop { $0 == " " || $0 == "\t" }
+        let lead = String(line[..<content.startIndex])
+        func endsMarker(_ rest: Substring) -> Bool { rest.isEmpty || rest.first == " " || rest.first == "\t" }
+        if let first = content.first, "-*+".contains(first), endsMarker(content.dropFirst()) {
+            return lead + "\\" + String(content)
+        }
+        let digits = content.prefix { $0.isASCII && $0.isNumber }
+        let rest = content.dropFirst(digits.count)
+        if (1...9).contains(digits.count), let delimiter = rest.first, delimiter == "." || delimiter == ")",
+           endsMarker(rest.dropFirst()) {
+            return lead + String(digits) + "\\" + String(rest)
+        }
+        return line
     }
 
     /// The explicit list-number restart for the paragraph starting at `index`, or
@@ -343,13 +415,18 @@ enum IWATable {
     /// restart on the first item of each list (and to N for "Start at N"), 0 to
     /// continue.
     private static func listRestart(at index: Int, in runs: [(offset: Int, value: Int)]) -> Int? {
+        var low = 0
+        var high = runs.count - 1
         var value = 0
-        for run in runs {
-            guard run.offset <= index else { break }
-            value = run.value
+        while low <= high {                               // last run at or before `index`
+            let mid = (low + high) / 2
+            if runs[mid].offset <= index { value = runs[mid].value; low = mid + 1 } else { high = mid - 1 }
         }
         return value > 0 ? value : nil
     }
+
+    /// The largest list number CommonMark accepts (nine digits).
+    private static let maxListStart: UInt64 = 999_999_999
 
     /// The paragraph-data run table (storage field 6) as sorted `(offset, restart)`
     /// pairs. Level (field 2) isn't read yet: nested items render flat.
@@ -367,7 +444,9 @@ enum IWATable {
                 while let field = runReader.next() {
                     switch (field.number, field.value) {
                     case (1, .varint(let value)): offset = Int(exactly: value)
-                    case (3, .varint(let value)): restart = Int(exactly: value) ?? 0
+                    // Clamped to CommonMark's nine-digit list numbers, so a corrupt
+                    // start can't overflow the counter as items follow it.
+                    case (3, .varint(let value)): restart = Int(min(value, maxListStart))
                     default: continue
                     }
                 }

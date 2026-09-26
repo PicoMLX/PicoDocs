@@ -282,6 +282,71 @@ struct PagesConverterTests {
         #expect(!html.contains("<p>second line"))
     }
 
+    @Test("PagesConverter keeps empty list items and their numbering")
+    func emptyListItems() async throws {
+        func render(_ text: String, _ style: ListKind) async throws -> ConverterResult {
+            let pages = Self.makeListPagesFile(text: text, style: style, restarts: [])
+            return try await PicoDocsEngine.convert(data: pages, filename: "lists.pages")
+        }
+        // An interior empty item keeps its marker, so the next item stays "3.".
+        let ordered = try await render("a\n\nc", .ordered)
+        #expect(ordered.markdown() == "1. a\n2.\n3. c")
+        #expect(try await render("a\n\nc", .bullet).markdown() == "- a\n-\n- c")
+        // Trailing empty items leave no dangling marker.
+        #expect(try await render("a\nb\n\n", .ordered).markdown() == "1. a\n2. b")
+
+        // The renderers read the empty item as part of the same list.
+        let html = try DocumentRenderer.render(ordered, to: .html)
+        #expect(html.contains("<ol>\n<li>a</li>\n<li></li>\n<li>c</li>\n</ol>"))
+        #expect(try DocumentRenderer.render(ordered, to: .plaintext) == "1. a\n2.\n3. c")
+    }
+
+    @Test("PagesConverter escapes marker-like text inside list items")
+    func listItemMarkerText() async throws {
+        // A soft-break line (or item) that starts like a list marker is content,
+        // not a nested list.
+        let bullets = Self.makeListPagesFile(text: "Intro\u{2028}- not a sub-item\n- literal dash", style: .bullet, restarts: [])
+        let bulletResult = try await PicoDocsEngine.convert(data: bullets, filename: "lists.pages")
+        #expect(bulletResult.markdown() == "- Intro\n  \\- not a sub-item\n- \\- literal dash")
+
+        let ordered = Self.makeListPagesFile(text: "Alpha\u{2028}2. inner\nBeta", style: .ordered, restarts: [])
+        let orderedResult = try await PicoDocsEngine.convert(data: ordered, filename: "lists.pages")
+        #expect(orderedResult.markdown() == "1. Alpha\n   2\\. inner\n2. Beta")
+
+        // The renderers keep each item whole and drop the escape.
+        let html = try DocumentRenderer.render(bulletResult, to: .html)
+        #expect(html.components(separatedBy: "<li>").count == 3)
+        #expect(try DocumentRenderer.render(bulletResult, to: .plaintext) == "- Intro - not a sub-item\n- - literal dash")
+        #expect(try DocumentRenderer.render(orderedResult, to: .plaintext) == "1. Alpha 2. inner\n2. Beta")
+    }
+
+    @Test("PagesConverter clamps oversized list restarts instead of overflowing")
+    func oversizedListRestart() async throws {
+        let pages = Self.makeListPagesFile(text: "a\nb", style: .ordered,
+                                           restarts: [(0, UInt64(Int.max)), (2, 0)])
+        let markdown = try await PicoDocsEngine.convert(data: pages, filename: "lists.pages").markdown()
+        #expect(markdown == "999999999. a\n1000000000. b")
+    }
+
+    @Test("PagesConverter keeps list numbering across an inline table")
+    func listNumberingAcrossInlineTable() async throws {
+        // The table sits at the end of item 2; item 3 continues the same list.
+        let pages = Self.makeListPagesFile(text: "a\nb \u{FFFC}\nc", style: .ordered, restarts: [], tableCell: "X")
+        let markdown = try await PicoDocsEngine.convert(data: pages, filename: "lists.pages").markdown()
+        #expect(markdown == "1. a\n2. b\n\n| X |\n| --- |\n\n3. c")
+    }
+
+    @Test("Explicit list start numbers survive plaintext and HTML rendering")
+    func listStartRendering() async throws {
+        let pages = Self.makeListPagesFile(text: "a\nb\nc\nd", style: .ordered,
+                                           restarts: [(0, 1), (2, 0), (4, 5), (6, 0)])
+        let result = try await PicoDocsEngine.convert(data: pages, filename: "lists.pages")
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == "1. a\n2. b\n\n5. c\n6. d")
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<ol>\n<li>a</li>"))
+        #expect(html.contains("<ol start=\"5\">\n<li>c</li>\n<li>d</li>\n</ol>"))
+    }
+
     @Test("Detector routes a .pages package to the Pages format")
     func detectionRoutesToPages() {
         let pages = Self.makePagesFile(paragraphs: ["Hi"])
@@ -342,11 +407,13 @@ struct PagesConverterTests {
     }
 
     /// A decompressed IWA stream holding several objects, each written as
-    /// `varint(ArchiveInfo length) · ArchiveInfo · payload`.
-    static func makeIWAStream(objects: [(id: UInt64, type: UInt64, payload: [UInt8])]) -> [UInt8] {
+    /// `varint(ArchiveInfo length) · ArchiveInfo · payload`, with its
+    /// cross-object references in MessageInfo field 5.
+    static func makeIWAStream(objects: [(id: UInt64, type: UInt64, payload: [UInt8], references: [UInt64])]) -> [UInt8] {
         var stream: [UInt8] = []
         for object in objects {
-            let messageInfo = varintField(1, object.type) + varintField(3, UInt64(object.payload.count))
+            var messageInfo = varintField(1, object.type) + varintField(3, UInt64(object.payload.count))
+            for reference in object.references { messageInfo += varintField(5, reference) }
             let archiveInfo = varintField(1, object.id) + lengthField(2, messageInfo)
             stream += varint(UInt64(archiveInfo.count)) + archiveInfo + object.payload
         }
@@ -359,8 +426,13 @@ struct PagesConverterTests {
     /// entirely in one list style of `style`'s kind (ListStyle field 11 level 0:
     /// 2 = bullet, 3 = number), with paragraph-data runs (storage field 6) carrying
     /// each `(UTF-16 offset, restart)`.
+    ///
+    /// With `tableCell`, the first U+FFFC in `text` becomes an inline table
+    /// attachment: a one-cell table (inline-string cell `tableCell`) reached from the
+    /// attachment object through a table model → tile, as in real Pages files.
     static func makeListPagesFile(text: String, style: ListKind,
-                                  restarts: [(offset: Int, restart: UInt64)]) -> Data {
+                                  restarts: [(offset: Int, restart: UInt64)],
+                                  tableCell: String? = nil) -> Data {
         let listStyleID: UInt64 = 10
         let listStyle = varintField(11, style == .bullet ? 2 : 3)
         var storage = varintField(1, 0) + lengthField(3, Array(text.utf8))
@@ -372,7 +444,22 @@ struct PagesConverterTests {
             }
             storage += lengthField(6, table)
         }
-        let stream = makeIWAStream(objects: [(1, 2001, storage), (listStyleID, 2023, listStyle)])
+        var objects: [(id: UInt64, type: UInt64, payload: [UInt8], references: [UInt64])] = [
+            (listStyleID, 2023, listStyle, []),
+        ]
+        if let tableCell, let marker = Array(text.utf16).firstIndex(of: 0xFFFC) {
+            let (modelID, tileID, listID): (UInt64, UInt64, UInt64) = (20, 21, 22)
+            // Attachment run (storage field 9): {1: charIndex, 2: Reference{1: id}}.
+            storage += lengthField(9, lengthField(1, varintField(1, UInt64(marker)) + lengthField(2, varintField(1, modelID))))
+            // Tile row: cell storage buffer (field 6) + 16-bit cell offsets (field 7).
+            // Cell: version 5, type 3 (inline string), key 1 at byte 12.
+            let cell: [UInt8] = [0x05, 0x03] + Array(repeating: 0, count: 10) + [1, 0, 0, 0]
+            let tile = lengthField(5, lengthField(6, cell) + lengthField(7, [0x00, 0x00]))
+            // Inline-string data list: list_type 1, entry {1: key, 3: text}.
+            let strings = varintField(1, 1) + lengthField(3, varintField(1, 1) + lengthField(3, Array(tableCell.utf8)))
+            objects += [(modelID, 6001, [], [tileID, listID]), (tileID, 6002, tile, []), (listID, 6005, strings, [])]
+        }
+        let stream = makeIWAStream(objects: [(1, 2001, storage, [])] + objects)
         return makeZip([(name: "Index/Document.iwa", data: snappyFrame(stream))])
     }
 

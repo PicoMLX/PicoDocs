@@ -60,10 +60,11 @@ public enum DocumentRenderer {
                 out.append("---")
             case .blockquote(let lines):
                 out.append(lines.map { stripInline($0, footnoteNumbers: numbers) }.joined(separator: "\n"))
-            case .list(let ordered, let items):
+            case .list(let ordered, let start, let items):
                 let rendered = items.enumerated().map { index, item in
-                    let marker = ordered ? "\(index + 1). " : "- "
-                    return marker + stripInline(item, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: " ")
+                    let marker = ordered ? "\(start + index)." : "-"
+                    return item.isEmpty ? marker
+                        : marker + " " + stripInline(item, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: " ")
                 }
                 out.append(rendered.joined(separator: "\n"))
             case .table(let rows):
@@ -107,10 +108,11 @@ public enum DocumentRenderer {
             case .blockquote(let lines):
                 let inner = lines.map { inlineHTML($0, footnoteNumbers: numbers) }.joined(separator: "<br>\n")
                 blocks.append("<blockquote>\(inner)</blockquote>")
-            case .list(let ordered, let items):
+            case .list(let ordered, let start, let items):
                 let tag = ordered ? "ol" : "ul"
                 let lis = items.map { "<li>\(inlineHTML($0, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: " "))</li>" }
-                blocks.append("<\(tag)>\n\(lis.joined(separator: "\n"))\n</\(tag)>")
+                let startAttribute = ordered && start != 1 ? " start=\"\(start)\"" : ""
+                blocks.append("<\(tag)\(startAttribute)>\n\(lis.joined(separator: "\n"))\n</\(tag)>")
             case .table(let rows):
                 blocks.append(renderHTMLTable(rows, footnoteNumbers: numbers))
             }
@@ -309,7 +311,7 @@ public enum DocumentRenderer {
             case .heading(_, let text): scan(text)
             case .paragraph(let text): scan(text)
             case .blockquote(let lines): lines.forEach(scan)
-            case .list(_, let items): items.forEach(scan)
+            case .list(_, _, let items): items.forEach(scan)
             case .table(let rows): rows.forEach { $0.forEach(scan) }
             }
         }
@@ -436,7 +438,7 @@ public enum DocumentRenderer {
         case paragraph(String)
         case code(String)
         case blockquote([String])
-        case list(ordered: Bool, items: [String])
+        case list(ordered: Bool, start: Int, items: [String])
         case table([[String]])
         case rule
     }
@@ -503,19 +505,22 @@ public enum DocumentRenderer {
 
             if listMarker(trimmed) != nil {
                 let ordered = listMarker(trimmed) == .ordered
+                let start = ordered ? listStart(trimmed) : 1
                 var items: [String] = []
                 while i < lines.count {
                     let itemLine = lines[i].trimmingCharacters(in: .whitespaces)
                     if let marker = listMarker(itemLine), (marker == .ordered) == ordered {
-                        items.append(stripListMarker(itemLine)); i += 1
+                        items.append(unescapeListMarker(stripListMarker(itemLine))); i += 1
+                    } else if let marker = bareListMarker(itemLine), (marker == .ordered) == ordered {
+                        items.append(""); i += 1          // an empty item inside the list
                     } else if !isBlank(lines[i]), lines[i].hasPrefix("  "), !items.isEmpty {
-                        items[items.count - 1] += "\n" + lines[i].trimmingCharacters(in: .whitespaces)
+                        items[items.count - 1] += "\n" + unescapeListMarker(lines[i].trimmingCharacters(in: .whitespaces))
                         i += 1
                     } else {
                         break
                     }
                 }
-                blocks.append(.list(ordered: ordered, items: items)); continue
+                blocks.append(.list(ordered: ordered, start: start, items: items)); continue
             }
 
             // Paragraph: gather until a blank line or a structural line.
@@ -560,6 +565,32 @@ public enum DocumentRenderer {
             if after < line.endIndex, line[after] == " " { return .ordered }
         }
         return nil
+    }
+
+    /// A marker with no content (`-`, `2.`) — an empty list item. Only accepted
+    /// inside an open list, so a lone `-` or `2020.` line never starts one.
+    private static func bareListMarker(_ line: String) -> ListKind? {
+        if line == "-" || line == "*" || line == "+" { return .unordered }
+        let digits = line.prefix { $0.isNumber }
+        return !digits.isEmpty && line.dropFirst(digits.count) == "." ? .ordered : nil
+    }
+
+    /// The number an ordered list starts at (`5. x` → 5), 1 when it isn't a
+    /// CommonMark list number (one to nine ASCII digits).
+    private static func listStart(_ line: String) -> Int {
+        let digits = line.prefix { $0.isASCII && $0.isNumber }
+        return digits.count <= 9 ? Int(digits) ?? 1 : 1
+    }
+
+    /// List-item text with the backslash dropped from a leading escaped marker
+    /// (`\- x`, `1\. x`) — converters escape item lines that would otherwise open
+    /// a nested list, and CommonMark renders them without the backslash.
+    private static func unescapeListMarker(_ text: String) -> String {
+        if text.hasPrefix("\\-") || text.hasPrefix("\\*") || text.hasPrefix("\\+") { return String(text.dropFirst()) }
+        let digits = text.prefix { $0.isASCII && $0.isNumber }
+        let rest = text.dropFirst(digits.count)
+        if !digits.isEmpty, rest.hasPrefix("\\.") || rest.hasPrefix("\\)") { return String(digits) + String(rest.dropFirst()) }
+        return text
     }
 
     private static func stripListMarker(_ line: String) -> String {
