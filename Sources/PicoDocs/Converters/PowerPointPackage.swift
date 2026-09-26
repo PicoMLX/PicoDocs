@@ -11,6 +11,7 @@ final class PowerPointPackage {
     private let entryLimit: Int
     private(set) var failure: Error?
     var contentTypes: [String: String]?
+    var relationshipMaps: [String: [String: PowerPointConverter.Relationship]] = [:]
 
     init(archive: Archive, entryLimit: Int = 64 * 1024 * 1024, totalLimit: Int = 256 * 1024 * 1024) {
         self.archive = archive

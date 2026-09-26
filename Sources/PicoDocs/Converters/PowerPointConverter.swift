@@ -127,6 +127,7 @@ public struct PowerPointConverter: DocumentConverter {
         let paragraphs = ((try? notes.getElementsByTag("p:sp").array()) ?? [])
             .filter { placeholderType(of: $0) == "body" }
             .flatMap { shape in
+                context.defaultLink = shapeLink(shape, context: context)
                 context.runDefaults = inheritedRunDefaults(for: shape, context: context)
                 return textBody(of: shape).map { renderParagraphs($0, inherited: inheritedBullets(for: shape, context: context), context: &context) } ?? []
             }
@@ -194,6 +195,13 @@ public struct PowerPointConverter: DocumentConverter {
         return (title, blocks)
     }
 
+    private static func shapeLink(_ shape: Element, context: SlideContext) -> String? {
+        let properties = child(of: shape, named: "p:nvsppr").flatMap { child(of: $0, named: "p:cnvpr") }
+        return properties.flatMap { child(of: $0, named: "a:hlinkclick") }
+            .flatMap { try? $0.attr("r:id") }.flatMap { context.relationships[$0] }
+            .flatMap { $0.external && DocumentRenderer.isSafeURL($0.target, isImage: false) ? $0.target : nil }
+    }
+
     /// Placeholder types that are slide furniture, not content.
     private static let skippedPlaceholders: Set<String> = ["dt", "ftr", "sldNum", "hdr", "sldImg"]
 
@@ -209,10 +217,7 @@ public struct PowerPointConverter: DocumentConverter {
                 let type = placeholderType(of: shape)
                 if let type, skippedPlaceholders.contains(type) { continue }
                 guard let body = textBody(of: shape) else { continue }
-                let shapeProperties = child(of: shape, named: "p:nvsppr").flatMap { child(of: $0, named: "p:cnvpr") }
-                context.defaultLink = shapeProperties.flatMap { child(of: $0, named: "a:hlinkclick") }
-                    .flatMap { try? $0.attr("r:id") }.flatMap { context.relationships[$0] }
-                    .flatMap { $0.external && DocumentRenderer.isSafeURL($0.target, isImage: false) ? $0.target : nil }
+                context.defaultLink = shapeLink(shape, context: context)
                 context.runDefaults = inheritedRunDefaults(for: shape, context: context)
                 if type == "title" || type == "ctrTitle" {
                     let text = renderParagraphs(body, inherited: noInheritance, context: &context)
@@ -514,8 +519,8 @@ public struct PowerPointConverter: DocumentConverter {
         guard bold || italic, !text.contains("\n") else { return text }
         let core = text.trimmingCharacters(in: .whitespaces)
         guard !core.isEmpty else { return text }
-        let leading = String(text.prefix { $0 == " " || $0 == "\t" })
-        let trailing = String(text.reversed().prefix { $0 == " " || $0 == "\t" })
+        let leading = String(text.prefix { $0.unicodeScalars.allSatisfy(CharacterSet.whitespaces.contains) })
+        let trailing = String(text.reversed().prefix { $0.unicodeScalars.allSatisfy(CharacterSet.whitespaces.contains) }.reversed())
         let marker = bold && italic ? "***" : bold ? "**" : "*"
         return leading + marker + core + marker + trailing
     }
@@ -612,7 +617,7 @@ public struct PowerPointConverter: DocumentConverter {
                 if !merged, let body = textBody(ofCell: cell) {
                     text = renderParagraphs(body, inherited: noInheritance, context: &context).joined(separator: "\n")
                 }
-                cells.append(MarkdownTableCell.escapeDelimiters(text).replacingOccurrences(of: "\n", with: "<br>"))
+                cells.append(text.replacingOccurrences(of: "|", with: "\\|").replacingOccurrences(of: "\n", with: "<br>"))
             }
             if !cells.isEmpty { rows.append(cells) }
         }
@@ -637,8 +642,9 @@ public struct PowerPointConverter: DocumentConverter {
     /// `name`), registering its bytes as an `.image` section.
     static func pictureMarkdown(_ picture: Element, context: inout SlideContext) -> String? {
         guard let blip = try? picture.getElementsByTag("a:blip").first(),
-              let id = try? blip.attr("r:embed"), !id.isEmpty,
-              let target = context.relationships[id]?.target else { return nil }
+              let id = try? blip.attr("r:embed"), !id.isEmpty else { return nil }
+        guard let relation = context.relationships[id], !relation.external else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
+        let target = relation.target
         let mediaPath = WordConverter.resolvePartPath(target, relativeTo: directory(of: context.partPath))
         let filename = (mediaPath as NSString).lastPathComponent
         let properties = child(of: picture, named: "p:nvpicpr").flatMap { child(of: $0, named: "p:cnvpr") }
@@ -723,9 +729,11 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// A part's relationships (`<dir>/_rels/<file>.rels`), keyed by id.
     static func relationships(_ archive: PowerPointPackage, forPart part: String) -> [String: Relationship] {
+        if let cached = archive.relationshipMaps[part] { return cached }
         let relsPath = "\(directory(of: part))/_rels/\((part as NSString).lastPathComponent).rels"
         guard let document = xml(archive, path: relsPath) else {
             if archive.archive[relsPath] != nil { archive.fail(PicoDocsError.fileCorrupted) }
+            archive.relationshipMaps[part] = [:]
             return [:]
         }
         var map: [String: Relationship] = [:]
@@ -734,6 +742,7 @@ public struct PowerPointConverter: DocumentConverter {
                   !id.isEmpty, !target.isEmpty else { continue }
             map[id] = Relationship(type: (try? element.attr("Type")) ?? "", target: target, external: ((try? element.attr("TargetMode")) ?? "").lowercased() == "external")
         }
+        archive.relationshipMaps[part] = map
         return map
     }
 

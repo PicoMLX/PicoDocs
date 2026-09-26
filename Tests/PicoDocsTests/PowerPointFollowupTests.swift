@@ -4,6 +4,46 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func sharedRelationshipCacheUsesDistinctPartBudget() throws {
+        typealias B = PowerPointConverterTests
+        let xml = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster", "../slideMasters/m.xml")])
+        let data = PagesConverterTests.makeZip([(name: "ppt/slideLayouts/_rels/shared.xml.rels", data: Array(xml.utf8))])
+        let package = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)), totalLimit: xml.utf8.count)
+        for _ in 0..<5 { #expect(PowerPointConverter.relationships(package, forPart: "ppt/slideLayouts/shared.xml")["master"]?.target == "../slideMasters/m.xml") }
+        try package.check()
+    }
+
+    @Test func missingPictureRelationshipsAndNotesShapeLinks() async throws {
+        typealias B = PowerPointConverterTests
+        let picture = #"<p:pic><p:nvPicPr><p:cNvPr descr="Missing"/></p:nvPicPr><p:blipFill><a:blip r:embed="missing"/></p:blipFill></p:pic>"#
+        let missing = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title") + picture)])
+        await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: missing, filename: "missing.pptx") }
+        let shape = B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: [#"<a:p><a:r><a:t>Linked note</a:t></a:r></a:p>"#])
+            .replacingOccurrences(of: #"<p:cNvPr id="2" name="Shape"/>"#, with: #"<p:cNvPr id="2" name="Shape"><a:hlinkClick r:id="link"/></p:cNvPr>"#)
+        let notes = "<p:notes \(B.namespaces)>" + shape + "</p:notes>"
+        let rels = B.relationshipsXML([("link", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "https://example.com/notes\" TargetMode=\"External")])
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title"), relationships: [("notes", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide", "../notesSlides/n.xml")])], extraParts: [("ppt/notesSlides/n.xml", Array(notes.utf8)), ("ppt/notesSlides/_rels/n.xml.rels", Array(rels.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "notes.pptx")
+        #expect(result.markdown().contains("[Linked note](https://example.com/notes)"))
+    }
+
+    @Test func tableLiteralPunctuationUnicodeWhitespaceAndBackticks() async throws {
+        typealias B = PowerPointConverterTests
+        let table = #"<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>*stars* `code` \path | &lt;br&gt;</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#
+        let shape = B.shape(placeholder: nil, paragraphs: ["<a:p><a:r><a:t>Hello</a:t></a:r><a:r><a:rPr b=\"1\"/><a:t>\u{00A0}world\u{2003}\u{00A0}</a:t></a:r><a:r><a:t>end</a:t></a:r></a:p>"])
+        let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: shape + table)]), filename: "literal.pptx")
+        #expect(result.markdown().contains("Hello\u{00A0}**world**\u{2003}\u{00A0}end"))
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            let rendered = try DocumentRenderer.render(result, to: format)
+            #expect(rendered.contains("*stars* `code` \\path | " + (format == .html ? "&lt;br&gt;" : "<br>")))
+            #expect(!rendered.contains("<em>stars</em>")); #expect(!rendered.contains("<code>code</code>"))
+        }
+        let mixed = ConverterResult(sections: [.init(markdown: #"\`literal\` and `\*code` and \`[^n]\`"# + "\n\n[^n]: Note")])
+        let html = try DocumentRenderer.render(mixed, to: .html)
+        #expect(html.contains("`literal`")); #expect(html.contains(#"<code>\*code</code>"#))
+        #expect(html.contains("footnote-ref")); #expect(html.contains("Note"))
+    }
+
     @Test func defaultParagraphStyleAndExplicitLinkOverride() async throws {
         typealias B = PowerPointConverterTests
         let shape = B.shape(placeholder: nil, paragraphs: [
