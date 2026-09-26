@@ -1,0 +1,122 @@
+//
+//  OOXMLPackageWriter.swift
+//  PicoDocs
+//
+//  A tiny in-memory wrapper over ZIPFoundation's write mode, shared by the OOXML
+//  exporters (DOCX/XLSX/PPTX). OOXML files are a ZIP ("package") of XML "parts"
+//  plus media; this assembles one entirely in memory (no temp files), which keeps
+//  the exporters' `write(...) -> Data` pure and usable from any context.
+//
+//  The read side (`WordConverter`/`EPUBConverter`) opens archives with
+//  `Archive(data:accessMode:.read)`; this is the symmetric `.create` path.
+//
+
+import Foundation
+import ZIPFoundation
+
+struct OOXMLPackageWriter {
+
+    /// Preserve valid URI escapes while encoding literal percent characters.
+    static func relationshipURI(_ target: String) -> String {
+        let protected = target.replacingOccurrences(of: "%(?![0-9A-Fa-f]{2})", with: "%25", options: .regularExpression)
+        let allowed = CharacterSet.urlFragmentAllowed.union(.urlQueryAllowed).union(.urlPathAllowed)
+            .union(CharacterSet(charactersIn: ":/?#[]@!$&'()*+,;=%"))
+        return protected.addingPercentEncoding(withAllowedCharacters: allowed) ?? protected
+    }
+
+    private var archive: Archive
+
+    init() throws {
+        guard let archive = Archive(data: Data(), accessMode: .create) else {
+            throw ExporterError.serializationFailed("Could not create in-memory OOXML archive")
+        }
+        self.archive = archive
+    }
+
+    /// Adds a UTF-8 XML part at `path` (e.g. "word/document.xml").
+    mutating func addXML(_ path: String, _ xml: String) throws {
+        try addData(path, Data(xml.utf8))
+    }
+
+    /// Adds raw bytes at `path` (e.g. an image under "word/media/").
+    mutating func addData(_ path: String, _ data: Data) throws {
+        do {
+            try archive.addEntry(
+                with: path,
+                type: .file,
+                uncompressedSize: Int64(data.count),
+                compressionMethod: .deflate,
+                provider: { position, size in
+                    // `Int(position)` tolerates either Int/Int64 provider positions.
+                    let start = Int(position)
+                    let length = Swift.min(size, data.count - start)
+                    guard length > 0 else { return Data() }
+                    let lower = data.index(data.startIndex, offsetBy: start)
+                    let upper = data.index(lower, offsetBy: length)
+                    return data.subdata(in: lower..<upper)
+                }
+            )
+        } catch {
+            throw ExporterError.serializationFailed("Failed to add part \(path): \(error.localizedDescription)")
+        }
+    }
+
+    /// Finalizes the package into its bytes.
+    func data() throws -> Data {
+        guard let data = archive.data else {
+            throw ExporterError.serializationFailed("Could not finalize OOXML archive")
+        }
+        return data
+    }
+
+    mutating func addCoreProperties(_ result: ConverterResult) throws {
+        let title = result.title.map { "<dc:title>\(Self.escape($0))</dc:title>" } ?? ""
+        let author = result.author.map { "<dc:creator>\(Self.escape($0))</dc:creator>" } ?? ""
+        try addXML("docProps/core.xml", Self.xmlDeclaration + "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\(title)\(author)</cp:coreProperties>")
+    }
+
+    static func withCoreContentType(_ xml: String) -> String {
+        xml.replacingOccurrences(of: "</Types>", with: "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/></Types>")
+    }
+
+    static func withCoreRelationship(_ xml: String) -> String {
+        xml.replacingOccurrences(of: "</Relationships>", with: "<Relationship Id=\"coreProperties\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/></Relationships>")
+    }
+
+    // MARK: - XML helpers
+
+    /// XML standalone declaration used at the top of every part.
+    static let xmlDeclaration = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+
+    /// Escapes text content for an XML element body.
+    ///
+    /// Also drops scalars that XML 1.0 forbids (most C0 control characters, plus the
+    /// surrogate/`FFFE`/`FFFF` ranges). LLM output and text extracted from PDFs can
+    /// carry stray `NUL`/vertical-tab/etc.; left in, they'd make `document.xml`,
+    /// worksheet, or slide parts non-well-formed and Office would reject the file.
+    /// Raw `write(markdown:)` input doesn't pass through `sanitizeUnicode`, so this
+    /// is the single choke point that guarantees valid XML bodies.
+    static func escape(_ text: String) -> String {
+        let sanitized = String(String.UnicodeScalarView(text.unicodeScalars.filter(isValidXMLScalar)))
+        return sanitized.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    /// Whether a scalar is allowed in an XML 1.0 document (tab/LF/CR, then the
+    /// permitted BMP and supplementary ranges).
+    static func isValidXMLScalar(_ scalar: Unicode.Scalar) -> Bool {
+        let v = scalar.value
+        return v == 0x9 || v == 0xA || v == 0xD ||
+            (v >= 0x20 && v <= 0xD7FF) ||
+            (v >= 0xE000 && v <= 0xFFFD) ||
+            (v >= 0x10000 && v <= 0x10FFFF)
+    }
+
+    /// Escapes a value for an XML attribute (adds quote escaping).
+    static func escapeAttribute(_ text: String) -> String {
+        escape(text)
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
+    }
+}

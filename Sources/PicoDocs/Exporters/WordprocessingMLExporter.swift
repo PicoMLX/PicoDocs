@@ -1,0 +1,479 @@
+//
+//  WordprocessingMLExporter.swift
+//  PicoDocs
+//
+//  The primary, all-platform DOCX writer: walks the shared Markdown block + inline
+//  IR and emits a minimal-but-valid WordprocessingML package — the inverse of
+//  `WordConverter`'s read. It is the round-trip oracle (export -> `WordConverter` ->
+//  compare), and deliberately mirrors the exact markers `WordConverter` recognizes:
+//  `w:pStyle w:val="Heading{N}"` for headings, `w:numPr` for list items,
+//  `w:b`/`w:i` run properties for emphasis, `w:hyperlink r:id` for links, and
+//  `a:blip r:embed` drawings for images.
+//
+
+import Foundation
+
+public struct WordprocessingMLExporter: DocumentExporter {
+
+    public init() {}
+
+    public func accepts(_ format: ExportableFileType) -> Bool { format == .docx }
+
+    public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
+        guard format == .docx else { throw ExporterError.notAccepted }
+
+        let builder = Builder(images: Self.imageIndex(result.sections))
+        for block in MarkdownBlockParser.parse(result.markdown()) {
+            builder.append(block)
+        }
+        builder.finishRelationships()
+
+        var pkg = try OOXMLPackageWriter()
+        try pkg.addCoreProperties(result)
+        try pkg.addXML("[Content_Types].xml", OOXMLPackageWriter.withCoreContentType(Self.contentTypes(mediaExtensions: builder.mediaExtensions, hasNumbering: builder.usedNumbering)))
+        try pkg.addXML("_rels/.rels", OOXMLPackageWriter.withCoreRelationship(Self.rootRels))
+        try pkg.addXML("word/styles.xml", Self.stylesXML)
+        try pkg.addXML("word/document.xml", Self.documentXML(body: builder.body))
+        try pkg.addXML("word/_rels/document.xml.rels", Self.documentRels(builder.relationships))
+        if builder.usedNumbering {
+            try pkg.addXML("word/numbering.xml", Self.numberingXML(usedBullet: builder.usedBullet, orderedNumIds: builder.orderedNumIds))
+        }
+        for media in builder.media {
+            try pkg.addData("word/media/\(media.filename)", media.data)
+        }
+        return try pkg.data()
+    }
+
+    // MARK: - Image index, from the .image sections
+
+    /// A distinct embedded image: its bytes and the unique media part filename it
+    /// will be written under (`word/media/<mediaFilename>`).
+    private struct IndexedImage {
+        let data: Data
+        let mediaFilename: String
+    }
+
+    /// Resolves an inline image reference to an embedded carrier. Keyed by full
+    /// source path *and* by basename — the basename map only when unambiguous — so
+    /// two carriers that share a basename (`charts/logo.png` vs `headers/logo.png`)
+    /// stay distinct instead of one overwriting the other.
+    private struct ImageIndex {
+        let byPath: [String: IndexedImage]
+        let byBasename: [String: IndexedImage]
+
+        func lookup(_ source: String) -> IndexedImage? {
+            if let image = byPath[source] { return image }
+            return byBasename[WordprocessingMLExporter.portableBasename(source)]
+        }
+    }
+
+    private static func portableBasename(_ path: String) -> String {
+        (path.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent
+    }
+
+    private static func imageIndex(_ sections: [DocumentSection]) -> ImageIndex {
+        var byPath: [String: IndexedImage] = [:]
+        var byBasename: [String: IndexedImage] = [:]
+        var basenameCounts: [String: Int] = [:]
+        var usedFilenames: Set<String> = []
+
+        for section in sections where section.kind == .image {
+            guard let base64 = section.metadata["base64"], !base64.isEmpty,
+                  let data = Data(base64Encoded: base64) else { continue }
+
+            // The carrier's display name (basename of the source path, else title).
+            let name = [section.sourcePath, section.title].compactMap { $0 }.first { !$0.isEmpty }.map(portableBasename)
+            // Pick a stem + extension; fall back to the declared MIME for the
+            // extension so a name like "logo" (or no name) still gets a type Office
+            // recognizes rather than `.bin`/octet-stream.
+            let mime = section.metadata["mimeType"]
+            var ext = (name as NSString?)?.pathExtension.lowercased() ?? ""
+            if OfficeMediaType.mimeType(forExtension: ext) == "application/octet-stream" { ext = OfficeMediaType.fileExtension(forMIME: mime ?? "") }
+            let stem = (name as NSString?)?.deletingPathExtension ?? ""
+
+            // Allocate a unique media filename (suffix on basename collisions) so
+            // distinct images never share one `word/media/<file>` part.
+            let invalidFilename = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: ":\\/?*<>|\""))
+            let safeStem = String(stem.unicodeScalars.map { invalidFilename.contains($0) ? "_" : Character($0) }).trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            let base = safeStem.isEmpty ? "image\(usedFilenames.count + 1)" : safeStem
+            if ext.unicodeScalars.contains(where: invalidFilename.contains) { ext = OfficeMediaType.fileExtension(forMIME: mime ?? "") }
+            var mediaFilename = "\(base).\(ext)"
+            var n = 2
+            while usedFilenames.contains(mediaFilename) {
+                mediaFilename = "\(base)-\(n).\(ext)"
+                n += 1
+            }
+            usedFilenames.insert(mediaFilename)
+
+            let image = IndexedImage(data: data, mediaFilename: mediaFilename)
+            if let identity = [section.sourcePath, section.title].compactMap({ $0 }).first(where: { !$0.isEmpty }) {
+                byPath[identity] = image
+            }
+            if let name, !name.isEmpty {
+                basenameCounts[name, default: 0] += 1
+                byBasename[name] = image
+            }
+        }
+        // Drop ambiguous basenames; those references must use the full path.
+        for (name, count) in basenameCounts where count > 1 {
+            byBasename.removeValue(forKey: name)
+        }
+        return ImageIndex(byPath: byPath, byBasename: byBasename)
+    }
+
+    // MARK: - Builder
+
+    /// Accumulates body XML, relationships, and media as blocks are appended.
+    /// A reference type because it threads shared id counters through the inline
+    /// recursion.
+    private final class Builder {
+        private(set) var body = ""
+        private(set) var relationships: [Relationship] = []
+        private(set) var media: [(filename: String, data: Data)] = []
+        private(set) var mediaExtensions: Set<String> = []
+        private(set) var usedBullet = false
+        private(set) var orderedNumIds: [(id: Int, level: Int, start: Int)] = []
+
+        /// Numbering is needed when any list (bullet or ordered) was emitted.
+        var usedNumbering: Bool { usedBullet || !orderedNumIds.isEmpty }
+
+        private let images: ImageIndex
+        private var relCounter = 0
+        private var numberingRelAdded = false
+        private var drawingCounter = 0
+        private var emittedMediaRel: [String: String] = [:]   // media filename -> relID
+        private var nextOrderedNumId = 2                       // 1 is reserved for bullets
+
+        struct Relationship { let id: String; let type: String; let target: String; let external: Bool }
+
+        init(images: ImageIndex) { self.images = images }
+
+        private func nextRelID() -> String { relCounter += 1; return "rId\(relCounter)" }
+
+        func append(_ block: MarkdownBlock) {
+            switch block {
+            case .heading(let level, let text):
+                let pPr = "<w:pPr><w:pStyle w:val=\"Heading\(min(max(level, 1), 6))\"/></w:pPr>"
+                body += paragraph(pPr: pPr, content: inlineRuns(text))
+
+            case .paragraph(let text):
+                body += paragraph(pPr: "", content: inlineRuns(text))
+
+            case .code(let code):
+                // One paragraph, hard line breaks between lines, monospace runs.
+                let lines = code.components(separatedBy: "\n")
+                var content = ""
+                for (i, line) in lines.enumerated() {
+                    if i > 0 { content += "<w:r><w:br/></w:r>" }
+                    content += textRun(line, bold: false, italic: false, monospace: true)
+                }
+                body += paragraph(pPr: "<w:pPr><w:pStyle w:val=\"PicoCodeBlock\"/></w:pPr>", content: content)
+
+            case .blockquote(let lines):
+                let pPr = "<w:pPr><w:pStyle w:val=\"Quote\"/></w:pPr>"
+                for line in lines {
+                    body += paragraph(pPr: pPr, content: inlineRuns(line))
+                }
+
+            case .list(let list):
+                appendList(list)
+
+            case .table(let rows):
+                body += table(rows)
+
+            case .rule:
+                // A bottom-bordered empty paragraph. WordConverter drops empty
+                // paragraphs, so a rule simply doesn't survive round-trip (acceptable).
+                body += "<w:p><w:pPr><w:pBdr><w:bottom w:val=\"single\" w:sz=\"6\" w:space=\"1\" w:color=\"auto\"/></w:pBdr></w:pPr></w:p>"
+            }
+        }
+
+        private func appendList(_ list: MarkdownList, level: Int = 0) {
+            let level = min(level, 8)
+            var numId = 1
+            var expected = list.items.first?.number ?? 1
+            func allocate(_ start: Int) -> Int {
+                let id = nextOrderedNumId
+                nextOrderedNumId += 1
+                orderedNumIds.append((id, level, start))
+                return id
+            }
+            if list.ordered { numId = allocate(expected) } else { usedBullet = true }
+            for item in list.items {
+                if let number = item.number, number != expected { numId = allocate(number) }
+                if let number = item.number { expected = min(number, Int.max - 1) + 1 }
+                for (index, content) in item.content.enumerated() {
+                    switch content {
+                    case .text(let text):
+                        let pPr = index == 0
+                            ? "<w:pPr><w:numPr><w:ilvl w:val=\"\(level)\"/><w:numId w:val=\"\(numId)\"/></w:numPr></w:pPr>"
+                            : "<w:pPr><w:ind w:left=\"\((level + 1) * 720)\"/></w:pPr>"
+                        body += paragraph(pPr: pPr, content: inlineRuns(text))
+                    case .list(let child): appendList(child, level: level + 1)
+                    }
+                }
+            }
+        }
+
+        /// Allocates the numbering relationship once, after the body is built.
+        func finishRelationships() {
+            relationships.append(Relationship(id: nextRelID(), type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles", target: "styles.xml", external: false))
+            guard usedNumbering, !numberingRelAdded else { return }
+            numberingRelAdded = true
+            relationships.append(Relationship(
+                id: nextRelID(),
+                type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering",
+                target: "numbering.xml",
+                external: false
+            ))
+        }
+
+        // MARK: Inline
+
+        private func inlineRuns(_ markdown: String) -> String {
+            renderRuns(MarkdownInlineParser.parse(markdown), bold: false, italic: false)
+        }
+
+        private func renderRuns(_ nodes: [MarkdownInline], bold: Bool, italic: Bool) -> String {
+            var out = ""
+            for node in nodes {
+                switch node {
+                case .text(let s):
+                    let lines = s.components(separatedBy: "\n")
+                    for (index, line) in lines.enumerated() {
+                        let hasNext = index + 1 < lines.count
+                        let hardBreak = hasNext && (line.hasSuffix("  ") || line.hasSuffix("\\"))
+                        let content = hardBreak
+                            ? (line.hasSuffix("\\") ? String(line.dropLast()) : line.trimmingCharacters(in: .whitespaces))
+                            : (hasNext ? line.replacingOccurrences(of: "[ \t]+$", with: "", options: .regularExpression) : line)
+                        out += textRun(content, bold: bold, italic: italic, monospace: false)
+                        if hasNext {
+                            out += hardBreak ? "<w:r><w:br/></w:r>" : textRun(" ", bold: bold, italic: italic, monospace: false)
+                        }
+                    }
+                case .code(let s):
+                    out += textRun(s, bold: bold, italic: italic, monospace: true)
+                case .strong(let children):
+                    out += renderRuns(children, bold: true, italic: italic)
+                case .emphasis(let children):
+                    out += renderRuns(children, bold: bold, italic: true)
+                case .link(let label, let destination):
+                    let id = nextRelID()
+                    relationships.append(Relationship(
+                        id: id,
+                        type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+                        target: destination,
+                        external: true
+                    ))
+                    out += "<w:hyperlink r:id=\"\(id)\">\(renderRuns(label, bold: bold, italic: italic))</w:hyperlink>"
+                case .image(let alt, let source):
+                    out += imageRun(alt: alt, source: source) ?? textRun(alt, bold: bold, italic: italic, monospace: false)
+                case .footnoteReference(let fid):
+                    // No footnote part is generated; preserve the marker as literal text.
+                    out += textRun("[^\(fid)]", bold: bold, italic: italic, monospace: false)
+                }
+            }
+            return out
+        }
+
+        /// Emits a drawing run for an image whose bytes we hold. Returns nil when the
+        /// reference isn't a known image (e.g. an external URL), so the caller falls
+        /// back to alt text.
+        ///
+        /// - Resolves the carrier via the index (full path, else unambiguous basename),
+        ///   which already assigned it a unique, correctly-typed media filename.
+        /// - Packages and relates each distinct media file exactly once, reusing the
+        ///   relationship for repeated references so the OOXML package can't end up
+        ///   with duplicate `word/media/<file>` parts.
+        /// - Writes the Markdown alt text into `wp:docPr/@descr`, which
+        ///   `WordConverter.imageAltText` reads first, so meaningful alt text survives
+        ///   the round-trip instead of collapsing to the filename.
+        private func imageRun(alt: String, source: String) -> String? {
+            guard let image = images.lookup(source) else { return nil }
+            let filename = image.mediaFilename
+            let ext = (filename as NSString).pathExtension.lowercased()
+
+            // One media part + one relationship per distinct file; reuse for repeats.
+            let relID: String
+            if let existing = emittedMediaRel[filename] {
+                relID = existing
+            } else {
+                mediaExtensions.insert(ext)
+                media.append((filename, image.data))
+                relID = nextRelID()
+                relationships.append(Relationship(
+                    id: relID,
+                    type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+                    target: "media/\(filename.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))) ?? filename)",
+                    external: false
+                ))
+                emittedMediaRel[filename] = relID
+            }
+
+            // Each drawing needs a unique non-visual id, even when reusing media.
+            drawingCounter += 1
+            let docPrID = drawingCounter
+            let name = OOXMLPackageWriter.escapeAttribute(filename)
+            let descr = alt.isEmpty ? "" : " descr=\"\(OOXMLPackageWriter.escapeAttribute(alt))\""
+            // Fixed display size (EMU); WordConverter ignores extents on read.
+            let cx = 4572000, cy = 3429000
+            return """
+            <w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">\
+            <wp:extent cx="\(cx)" cy="\(cy)"/>\
+            <wp:docPr id="\(docPrID)" name="\(name)"\(descr)/>\
+            <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">\
+            <pic:pic><pic:nvPicPr><pic:cNvPr id="\(docPrID)" name="\(name)"/><pic:cNvPicPr/></pic:nvPicPr>\
+            <pic:blipFill><a:blip r:embed="\(relID)"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>\
+            <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(cx)" cy="\(cy)"/></a:xfrm>\
+            <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>\
+            </a:graphicData></a:graphic></wp:inline></w:drawing></w:r>
+            """
+        }
+
+        // MARK: Table
+
+        private func table(_ rows: [[String]]) -> String {
+            guard !rows.isEmpty else { return "" }
+            let columns = rows.map(\.count).max() ?? 0
+            guard columns > 0 else { return "" }
+            let borders = """
+            <w:tblBorders>\
+            <w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>\
+            <w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>\
+            <w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>\
+            <w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>\
+            <w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>\
+            <w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>\
+            </w:tblBorders>
+            """
+            let grid = String(repeating: "<w:gridCol w:w=\"2000\"/>", count: columns)
+            var out = "<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/>\(borders)</w:tblPr><w:tblGrid>\(grid)</w:tblGrid>"
+            for row in rows {
+                out += "<w:tr>"
+                for col in 0..<columns {
+                    let cell = col < row.count ? row[col] : ""
+                    out += "<w:tc><w:tcPr><w:tcW w:w=\"0\" w:type=\"auto\"/></w:tcPr>\(cellParagraph(cell))</w:tc>"
+                }
+                out += "</w:tr>"
+            }
+            out += "</w:tbl>"
+            return out
+        }
+
+        /// A table cell paragraph. `<br>` separators become hard line breaks; each
+        /// segment is parsed for inline emphasis/links so `**x**` etc. round-trip.
+        private func cellParagraph(_ cell: String) -> String {
+            let segments = cell.components(separatedBy: "<br>")
+            var content = ""
+            for (i, segment) in segments.enumerated() {
+                if i > 0 { content += "<w:r><w:br/></w:r>" }
+                content += inlineRuns(segment)
+            }
+            return "<w:p>\(content)</w:p>"
+        }
+
+        // MARK: Run/paragraph primitives
+
+        private func paragraph(pPr: String, content: String) -> String {
+            "<w:p>\(pPr)\(content)</w:p>"
+        }
+
+        private func textRun(_ text: String, bold: Bool, italic: Bool, monospace: Bool) -> String {
+            "<w:r>\(runProperties(bold: bold, italic: italic, monospace: monospace))<w:t xml:space=\"preserve\">\(OOXMLPackageWriter.escape(text))</w:t></w:r>"
+        }
+
+        private func runProperties(bold: Bool, italic: Bool, monospace: Bool) -> String {
+            var inner = ""
+            if bold { inner += "<w:b/>" }
+            if italic { inner += "<w:i/>" }
+            if monospace { inner += "<w:rStyle w:val=\"PicoCode\"/><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/>" }
+            return inner.isEmpty ? "" : "<w:rPr>\(inner)</w:rPr>"
+        }
+    }
+
+    // MARK: - Package parts
+
+    private static let rootRels = OOXMLPackageWriter.xmlDeclaration + """
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\
+    <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>\
+    </Relationships>
+    """
+
+    private static func contentTypes(mediaExtensions: Set<String>, hasNumbering: Bool) -> String {
+        var defaults = """
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\
+        <Default Extension="xml" ContentType="application/xml"/>
+        """
+        for ext in mediaExtensions.sorted() where ext != "xml" && ext != "rels" {
+            defaults += "<Default Extension=\"\(OOXMLPackageWriter.escapeAttribute(ext))\" ContentType=\"\(OfficeMediaType.mimeType(forExtension: ext))\"/>"
+        }
+        var overrides = "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>"
+        overrides += "<Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>"
+        if hasNumbering {
+            overrides += "<Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/>"
+        }
+        return OOXMLPackageWriter.xmlDeclaration + """
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\(defaults)\(overrides)</Types>
+        """
+    }
+
+    private static func documentXML(body: String) -> String {
+        OOXMLPackageWriter.xmlDeclaration + """
+        <w:document \
+        xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" \
+        xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" \
+        xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" \
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" \
+        xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">\
+        <w:body>\(body)<w:sectPr/></w:body></w:document>
+        """
+    }
+
+    private static func documentRels(_ relationships: [Builder.Relationship]) -> String {
+        var rels = ""
+        for rel in relationships {
+            let mode = rel.external ? " TargetMode=\"External\"" : ""
+            let target = rel.external ? Self.relationshipURI(rel.target) : rel.target
+            rels += "<Relationship Id=\"\(rel.id)\" Type=\"\(rel.type)\" Target=\"\(OOXMLPackageWriter.escapeAttribute(target))\"\(mode)/>"
+        }
+        return OOXMLPackageWriter.xmlDeclaration + """
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\(rels)</Relationships>
+        """
+    }
+
+    private static func relationshipURI(_ target: String) -> String {
+        OOXMLPackageWriter.relationshipURI(target)
+    }
+
+    private static var stylesXML: String {
+        var styles = "<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/></w:style>"
+        for level in 1...6 {
+            styles += "<w:style w:type=\"paragraph\" w:styleId=\"Heading\(level)\"><w:name w:val=\"heading \(level)\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:keepNext/><w:spacing w:before=\"240\" w:after=\"120\"/><w:outlineLvl w:val=\"\(level - 1)\"/></w:pPr><w:rPr><w:b/><w:sz w:val=\"\(40 - level * 2)\"/></w:rPr></w:style>"
+        }
+        styles += "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:ind w:left=\"720\" w:right=\"720\"/></w:pPr><w:rPr><w:i/></w:rPr></w:style>"
+        styles += "<w:style w:type=\"paragraph\" w:styleId=\"PicoCodeBlock\"><w:name w:val=\"Code Block\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr><w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/></w:rPr></w:style>"
+        styles += "<w:style w:type=\"character\" w:styleId=\"PicoCode\"><w:name w:val=\"Inline Code\"/><w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/></w:rPr></w:style>"
+        return OOXMLPackageWriter.xmlDeclaration + "<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\(styles)</w:styles>"
+    }
+
+    /// Builds `numbering.xml` for the lists that were actually emitted. Bullets map
+    /// to a single shared instance (`numId` 1); every ordered list gets its own
+    /// `numId` over a shared decimal abstract definition, each with a `startOverride`
+    /// of 1 so Word restarts separate lists instead of continuing the count.
+    private static func numberingXML(usedBullet: Bool, orderedNumIds: [(id: Int, level: Int, start: Int)]) -> String {
+        func levels(ordered: Bool) -> String {
+            (0..<9).map { level in
+                "<w:lvl w:ilvl=\"\(level)\"><w:start w:val=\"1\"/><w:numFmt w:val=\"\(ordered ? "decimal" : "bullet")\"/><w:lvlText w:val=\"\(ordered ? "%\(level + 1)." : "•")\"/><w:pPr><w:ind w:left=\"\((level + 1) * 720)\" w:hanging=\"360\"/></w:pPr></w:lvl>"
+            }.joined()
+        }
+        var definitions = ""
+        if usedBullet { definitions += "<w:abstractNum w:abstractNumId=\"0\">\(levels(ordered: false))</w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num>" }
+        if !orderedNumIds.isEmpty {
+            definitions += "<w:abstractNum w:abstractNumId=\"1\">\(levels(ordered: true))</w:abstractNum>"
+            for instance in orderedNumIds {
+                definitions += "<w:num w:numId=\"\(instance.id)\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"\(instance.level)\"><w:startOverride w:val=\"\(instance.start)\"/></w:lvlOverride></w:num>"
+            }
+        }
+        return OOXMLPackageWriter.xmlDeclaration + "<w:numbering xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\(definitions)</w:numbering>"
+    }
+}

@@ -35,10 +35,11 @@ public struct WordConverter: DocumentConverter {
             throw PicoDocsError.emptyDocument
         }
 
-        var blocks = try Self.renderBlocks(in: body, relationships: relationships)
+        let numbering = WordListNumbering(archive: archive)
+        var blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering)
         // Text boxes (shapes with text) store their content in `w:txbxContent`
         // outside the normal block flow; extract it and append as body blocks.
-        blocks += try Self.extractTextBoxes(from: body, relationships: relationships)
+        blocks += try Self.extractTextBoxes(from: body, relationships: relationships, numbering: numbering)
         var markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Footnote/endnote text lives in separate parts; append the referenced
@@ -95,21 +96,33 @@ public struct WordConverter: DocumentConverter {
     /// Renders the block-level children of a container (the body, or a content
     /// control's content) to Markdown blocks, recursing into `w:sdt` content
     /// controls (forms/templates wrap paragraphs and tables in them).
-    static func renderBlocks(in container: Element, relationships: [String: String]) throws -> [String] {
+    static func renderBlocks(in container: Element, relationships: [String: String], numbering: WordListNumbering? = nil) throws -> [String] {
         var blocks: [String] = []
-        for element in container.children().array() {
+        var previousList: MarkdownBlockParser.ListKind?
+        var rootListInstance: String?
+        var pending = Array(container.children().array().reversed())
+        while let element = pending.popLast() {
             try Task.checkCancellation()
             switch element.tagName().lowercased() {
             case "w:p":
-                if let markdown = renderParagraph(element, relationships: relationships), !markdown.isEmpty {
-                    blocks.append(markdown)
+                if let markdown = renderParagraph(element, relationships: relationships, numbering: numbering), !markdown.isEmpty {
+                    let marker = MarkdownBlockParser.listMarker(markdown.trimmingCharacters(in: .whitespaces))
+                    let identity = marker == nil ? nil : numbering?.lastParagraphList
+                    let joins = identity.map { $0.level > 0 || $0.instance == rootListInstance } ?? (marker != nil && marker == previousList)
+                    if joins, previousList != nil, !blocks.isEmpty {
+                        blocks[blocks.count - 1] += "\n" + markdown
+                    } else { blocks.append(markdown) }
+                    previousList = marker
+                    if let identity, identity.level == 0 { rootListInstance = identity.instance }
+                    if marker == nil { rootListInstance = nil }
                 }
             case "w:tbl":
-                let table = renderTable(element, relationships: relationships)
+                previousList = nil
+                let table = renderTable(element, relationships: relationships, numbering: numbering)
                 if !table.isEmpty { blocks.append(table) }
             case "w:sdt":
-                if let content = try? element.getElementsByTag("w:sdtContent").first() {
-                    blocks.append(contentsOf: try renderBlocks(in: content, relationships: relationships))
+                if let content = element.children().first(where: { $0.tagName().lowercased() == "w:sdtcontent" }) {
+                    pending.append(contentsOf: content.children().array().reversed())
                 }
             default:
                 continue
@@ -123,13 +136,13 @@ public struct WordConverter: DocumentConverter {
     /// blocks. Honors markup-compatibility (`mc:AlternateContent`) semantics by
     /// rendering only one branch per AlternateContent, so a text box isn't
     /// duplicated across `mc:Choice`/`mc:Fallback` (or multiple choices).
-    static func extractTextBoxes(from body: Element, relationships: [String: String]) throws -> [String] {
+    static func extractTextBoxes(from body: Element, relationships: [String: String], numbering: WordListNumbering? = nil) throws -> [String] {
         var blocks: [String] = []
         // Iterate the Elements sequence directly (no intermediate array copy).
         guard let textBoxes = try? body.getElementsByTag("w:txbxContent") else { return blocks }
         for txbx in textBoxes {
             if !shouldRenderTextBox(txbx) { continue }
-            blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships))
+            blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships, numbering: numbering))
         }
         return blocks
     }
@@ -188,18 +201,26 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Paragraphs
 
-    static func renderParagraph(_ paragraph: Element, relationships: [String: String]) -> String? {
-        let style = try? paragraph.getElementsByTag("w:pStyle").first()?.attr("w:val")
-        let isListItem = (try? paragraph.getElementsByTag("w:numPr").first()) != nil
-        let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return nil }
+    static func renderParagraph(_ paragraph: Element, relationships: [String: String], numbering: WordListNumbering? = nil) -> String? {
+        let properties = paragraph.children().first { $0.tagName().lowercased() == "w:ppr" }
+        let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
+        if style == "PicoCodeBlock" {
+            let code = codeText(paragraph)
+            let fence = String(repeating: "`", count: max(3, (code.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0) + 1))
+            return fence + "\n" + code + "\n" + fence
+        }
+        let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
+        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style) } ?? (numPr != nil ? "- " : nil)
+        let text = escapeBlockStarts(renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces))
+        guard !text.isEmpty else { return prefix }
 
         if let level = headingLevel(forStyle: style) {
             return String(repeating: "#", count: level) + " " + text
         }
-        if isListItem {
-            return "- " + text
+        if style?.lowercased() == "quote" {
+            return text.components(separatedBy: "\n").map { "> " + $0 }.joined(separator: "\n")
         }
+        if let prefix { return prefix + text }
         return text
     }
 
@@ -243,7 +264,7 @@ public struct WordConverter: DocumentConverter {
                         // label needs a structured inline representation (a run-level
                         // "contains image" signal) — a deliberately deferred
                         // enhancement for this narrow icon+label case.
-                        out += "[\(escapeLinkLabel(inner))](\(escapeLinkDestination(url)))"
+                        out += "[\(escapeCanonicalLabel(inner))](\(escapeLinkDestination(url)))"
                     }
                 } else {
                     out += inner
@@ -260,6 +281,15 @@ public struct WordConverter: DocumentConverter {
         let properties = try? run.getElementsByTag("w:rPr").first()
         let bold = isFormattingEnabled(properties, tag: "w:b")
         let italic = isFormattingEnabled(properties, tag: "w:i")
+        if (try? properties?.getElementsByTag("w:rStyle").first()?.attr("w:val")) == "PicoCode" {
+            let code = codeText(run)
+            let delimiter = String(repeating: "`", count: max(1, (code.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0) + 1))
+            let pad = code.hasPrefix("`") || code.hasSuffix("`") || (code.hasPrefix(" ") && code.hasSuffix(" ") && code.contains(where: { $0 != " " })) ? " " : ""
+            var fragment = delimiter + pad + code + pad + delimiter
+            if bold { fragment = "**\(fragment)**" }
+            if italic { fragment = "*\(fragment)*" }
+            return fragment
+        }
 
         var out = ""
         var textBuffer = ""
@@ -280,7 +310,7 @@ public struct WordConverter: DocumentConverter {
                 // Read raw text nodes to preserve significant whitespace
                 // (w:t may carry xml:space="preserve").
                 for child in node.getChildNodes() {
-                    if let textNode = child as? TextNode { textBuffer += textNode.getWholeText() }
+                    if let textNode = child as? TextNode { textBuffer += escapeLiteralText(textNode.getWholeText()) }
                 }
             case "w:tab":
                 textBuffer += "\t"
@@ -304,6 +334,20 @@ public struct WordConverter: DocumentConverter {
         return out
     }
 
+    private static func codeText(_ element: Element) -> String {
+        var text = ""
+        for child in element.children().array() {
+            switch child.tagName().lowercased() {
+            case "w:t": text += child.getChildNodes().compactMap { ($0 as? TextNode)?.getWholeText() }.joined()
+            case "w:br", "w:cr": text += "\n"
+            case "w:tab": text += "\t"
+            case "w:rpr", "w:ppr": continue
+            default: text += codeText(child)
+            }
+        }
+        return text
+    }
+
     /// True when a run-property toggle (`w:b`/`w:i`) is present and not explicitly
     /// disabled (`w:val="false"/"0"/"none"`, used to override style hierarchies).
     private static func isFormattingEnabled(_ properties: Element?, tag: String) -> Bool {
@@ -314,8 +358,41 @@ public struct WordConverter: DocumentConverter {
         return true
     }
 
+    private static func escapeBlockStarts(_ text: String) -> String {
+        text.components(separatedBy: "\n").map { line in
+            let leading = line.prefix { $0 == " " || $0 == "\t" }
+            let body = String(line.dropFirst(leading.count))
+            if let first = body.first, "#+-~|".contains(first) {
+                return String(leading) + "\\" + body
+            }
+            let digits = body.prefix { $0.isASCII && $0.isNumber }
+            if !digits.isEmpty, body.dropFirst(digits.count).hasPrefix(".") {
+                return String(leading) + digits + "\\" + body.dropFirst(digits.count)
+            }
+            return line
+        }.joined(separator: "\n")
+    }
+
+    private static func escapeLiteralText(_ text: String) -> String {
+        text.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+    }
+
+    private static func escapeCanonicalLabel(_ text: String) -> String {
+        var output = "", index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            if text[index] == "\\", next < text.endIndex {
+                output.append(text[index]); output.append(text[next]); index = text.index(after: next)
+            } else {
+                if text[index] == "[" || text[index] == "]" { output.append("\\") }
+                output.append(text[index]); index = next
+            }
+        }
+        return output
+    }
+
     private static func escapeLinkLabel(_ text: String) -> String {
-        text.replacingOccurrences(of: "[", with: "\\[")
+        text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "[", with: "\\[")
             .replacingOccurrences(of: "]", with: "\\]")
     }
 
@@ -338,7 +415,7 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Tables
 
-    static func renderTable(_ table: Element, relationships: [String: String]) -> String {
+    static func renderTable(_ table: Element, relationships: [String: String], numbering: WordListNumbering? = nil) -> String {
         var rows: [[String]] = []
         for tr in table.children().array() where tr.tagName().lowercased() == "w:tr" {
             var cells: [String] = []
@@ -352,7 +429,11 @@ public struct WordConverter: DocumentConverter {
                 // own cells still render — see isInsideTextBox.)
                 for paragraph in (try? tc.getElementsByTag("w:p").array()) ?? [] {
                     if isInsideTextBox(paragraph, before: tc) { continue }
-                    let t = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
+                    let properties = paragraph.children().first { $0.tagName().lowercased() == "w:ppr" }
+                    let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
+                    let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
+                    let prefix = numbering?.prefix(numPr: numPr, style: style)
+                    let t = ((prefix ?? "") + renderInline(paragraph, relationships: relationships)).trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
@@ -400,7 +481,11 @@ public struct WordConverter: DocumentConverter {
         for rel in (try? doc.getElementsByTag("Relationship").array()) ?? [] {
             guard let id = try? rel.attr("Id"), let target = try? rel.attr("Target"),
                   !id.isEmpty, !target.isEmpty else { continue }
-            map[id] = target
+            let isImage = ((try? rel.attr("Type")) ?? "").hasSuffix("/image")
+            let directory = ((path as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+            // Image entries carry decoded package-absolute paths; consumers must
+            // not percent-decode these a second time. Hyperlinks retain their URI.
+            map[id] = isImage ? "/" + resolvePartPath(target, relativeTo: directory) : target
         }
         return map
     }
@@ -430,7 +515,7 @@ public struct WordConverter: DocumentConverter {
 
     /// The Target of the first `document.xml.rels` relationship whose Type ends
     /// with `typeSuffix` (e.g. "/footnotes"); relative to `word/`.
-    private static func relationshipTarget(_ archive: Archive, typeSuffix: String) -> String? {
+    static func relationshipTarget(_ archive: Archive, typeSuffix: String) -> String? {
         guard let data = readEntry(archive, path: "word/_rels/document.xml.rels"),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
@@ -530,8 +615,8 @@ public struct WordConverter: DocumentConverter {
     /// strict failure.
     static func imageMarkdown(in drawing: Element, relationships: [String: String]) -> String {
         guard let target = imageTarget(in: drawing, relationships: relationships) else { return "" }
-        let filename = (target as NSString).lastPathComponent
-        return "![\(escapeLinkLabel(imageAltText(in: drawing)))](\(escapeLinkDestination(filename)))"
+        let path = target.hasPrefix("/") ? String(target.dropFirst()) : resolvePartPath(target, relativeTo: "word")
+        return "![\(escapeLiteralText(imageAltText(in: drawing)))](\(escapeLinkDestination(path)))"
     }
 
     /// The relationship Target (e.g. "media/image1.png") an image references via
@@ -567,12 +652,13 @@ public struct WordConverter: DocumentConverter {
             if relId.isEmpty { relId = (try? element.attr("r:id")) ?? "" }
             guard !relId.isEmpty, let target = relationships[relId], !target.isEmpty else { continue }
 
-            let mediaPath = resolvePartPath(target, relativeTo: partDirectory)
+            // parseRelationships already decoded package-absolute image paths.
+            let mediaPath = target.hasPrefix("/") ? String(target.dropFirst()) : resolvePartPath(target, relativeTo: partDirectory)
             guard !seen.contains(mediaPath) else { continue }
             seen.insert(mediaPath)
 
             guard let bytes = readEntry(archive, path: mediaPath), !bytes.isEmpty else { continue }
-            let filename = (target as NSString).lastPathComponent
+            let filename = (mediaPath as NSString).lastPathComponent
             sections.append(DocumentSection(
                 title: filename,
                 kind: .image,
@@ -594,6 +680,8 @@ public struct WordConverter: DocumentConverter {
     /// for a notes part stored in a subfolder). Normalizes segment-by-segment
     /// (single pass), so `.`/`..` are collapsed without any risk of looping.
     static func resolvePartPath(_ target: String, relativeTo baseDirectory: String) -> String {
+        // Relationship targets are package URIs, while ZIP entries use decoded names.
+        let target = target.removingPercentEncoding ?? target
         let combined: String
         if target.hasPrefix("/") {
             combined = String(target.dropFirst())
@@ -615,18 +703,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     private static func mimeType(forExtension ext: String) -> String {
-        switch ext.lowercased() {
-        case "png": return "image/png"
-        case "jpg", "jpeg": return "image/jpeg"
-        case "gif": return "image/gif"
-        case "bmp": return "image/bmp"
-        case "tif", "tiff": return "image/tiff"
-        case "svg": return "image/svg+xml"
-        case "webp": return "image/webp"
-        case "emf": return "image/emf"
-        case "wmf": return "image/wmf"
-        default: return "application/octet-stream"
-        }
+        OfficeMediaType.mimeType(forExtension: ext)
     }
 
     // MARK: - Archive helpers
