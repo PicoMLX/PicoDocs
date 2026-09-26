@@ -458,7 +458,7 @@ public struct WordConverter: DocumentConverter {
 
     /// The Target of the first `document.xml.rels` relationship whose Type ends
     /// with `typeSuffix` (e.g. "/footnotes"); relative to `word/`.
-    private static func relationshipTarget(_ archive: Archive, typeSuffix: String) -> String? {
+    static func relationshipTarget(_ archive: Archive, typeSuffix: String) -> String? {
         guard let data = readEntry(archive, path: "word/_rels/document.xml.rels"),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {

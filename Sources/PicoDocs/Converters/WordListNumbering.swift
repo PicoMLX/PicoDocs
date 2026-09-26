@@ -36,7 +36,8 @@ final class WordListNumbering {
     private var isLibreOffice = false
     private var lastInstance: [String: String] = [:]
     private var resumeAlias: (original: String, replacement: String)?
-    private var levelOverrides: [String: [Int: Level]] = [:]
+    private struct PartialLevel { let format: String?; let start: Int?; let restart: Int? }
+    private var levelOverrides: [String: [Int: PartialLevel]] = [:]
 
     /// Whether `numbering.xml` was found; without it, list paragraphs fall back
     /// to plain bullets.
@@ -46,11 +47,15 @@ final class WordListNumbering {
         if let app = Self.xml(archive, path: "docProps/app.xml") {
             isLibreOffice = ((try? app.getElementsByTag("Application").text()) ?? "").hasPrefix("LibreOffice")
         }
-        if let numbering = Self.xml(archive, path: "word/numbering.xml") {
+        let numberingPath = WordConverter.relationshipTarget(archive, typeSuffix: "/numbering")
+            .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/numbering.xml"
+        let stylesPath = WordConverter.relationshipTarget(archive, typeSuffix: "/styles")
+            .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/styles.xml"
+        if let numbering = Self.xml(archive, path: numberingPath) {
             isResolvable = true
             parseNumbering(numbering)
         }
-        if let styles = Self.xml(archive, path: "word/styles.xml") {
+        if let styles = Self.xml(archive, path: stylesPath) {
             parseStyles(styles)
         }
     }
@@ -65,7 +70,7 @@ final class WordListNumbering {
             numID = numID ?? inherited.numID
             level = level ?? inherited.level
         }
-        guard let numID, numID != "0" else { return nil }   // numId 0: numbering removed
+        guard let numID = Self.canonicalID(numID), numID != "0" else { return nil }   // numId 0: numbering removed
         let ilvl = min(max(level ?? 0, 0), 8)
 
         guard isResolvable, let number = numbers[numID] else {
@@ -74,8 +79,8 @@ final class WordListNumbering {
         let abstract = number.abstract
         let definition = effectiveLevel(numID: numID, level: ilvl)
         if let alias = resumeAlias, alias.original == numID {
-            counters[numID] = counters[alias.replacement]
-            markerWidths[numID] = markerWidths[alias.replacement]
+            counters[numID, default: [:]].merge(counters[alias.replacement] ?? [:]) { _, new in new }
+            markerWidths[numID, default: [:]].merge(markerWidths[alias.replacement] ?? [:]) { _, new in new }
         }
         resumeAlias = nil
         if isLibreOffice, counters[numID] == nil, !number.overrides.isEmpty,
@@ -114,18 +119,23 @@ final class WordListNumbering {
 
     private func effectiveLevel(numID: String, level: Int, visited: Set<String> = []) -> Level? {
         guard !visited.contains(numID), visited.count < 16, let number = numbers[numID] else { return nil }
-        if let direct = levelOverrides[numID]?[level] ?? abstractLevels[number.abstract]?[level] { return direct }
-        guard let style = numberingStyleLinks[number.abstract],
-              let linkedID = styleNumbering(style)?.numID,
-              let linked = effectiveLevel(numID: linkedID, level: level, visited: visited.union([numID])) else { return nil }
-        return Level(format: linked.format, start: numbers[linkedID]?.overrides[level] ?? linked.start, restart: linked.restart)
+        var base = abstractLevels[number.abstract]?[level]
+        if base == nil, let style = numberingStyleLinks[number.abstract],
+           let linkedID = Self.canonicalID(styleNumbering(style)?.numID),
+           let linked = effectiveLevel(numID: linkedID, level: level, visited: visited.union([numID])) {
+            base = Level(format: linked.format, start: numbers[linkedID]?.overrides[level] ?? linked.start, restart: linked.restart)
+        }
+        guard let override = levelOverrides[numID]?[level] else { return base }
+        return Level(format: override.format ?? base?.format ?? "decimal",
+                     start: override.start ?? base?.start ?? 1,
+                     restart: override.restart ?? base?.restart)
     }
 
     // MARK: - Parsing
 
     private func parseNumbering(_ document: Document) {
         for abstract in (try? document.getElementsByTag("w:abstractNum").array()) ?? [] {
-            guard let id = try? abstract.attr("w:abstractNumId"), !id.isEmpty else { continue }
+            guard let id = Self.canonicalID(try? abstract.attr("w:abstractNumId")) else { continue }
             numberingStyleLinks[id] = Self.child(of: abstract, named: "w:numstylelink").flatMap { try? $0.attr("w:val") }
             var levels: [Int: Level] = [:]
             for level in abstract.children().array() where level.tagName().lowercased() == "w:lvl" {
@@ -138,8 +148,8 @@ final class WordListNumbering {
             abstractLevels[id] = levels
         }
         for number in (try? document.getElementsByTag("w:num").array()) ?? [] {
-            guard let id = try? number.attr("w:numId"), !id.isEmpty,
-                  let abstract = Self.child(of: number, named: "w:abstractnumid").flatMap({ try? $0.attr("w:val") }) else { continue }
+            guard let id = Self.canonicalID(try? number.attr("w:numId")),
+                  let abstract = Self.child(of: number, named: "w:abstractnumid").flatMap({ try? $0.attr("w:val") }).flatMap(Self.canonicalID) else { continue }
             var overrides: [Int: Int] = [:]
             for override in number.children().array() where override.tagName().lowercased() == "w:lvloverride" {
                 guard let ilvl = Int((try? override.attr("w:ilvl")) ?? ""), (0...8).contains(ilvl) else { continue }
@@ -148,11 +158,10 @@ final class WordListNumbering {
                     overrides[ilvl] = max(0, start)
                 }
                 if let level = Self.child(of: override, named: "w:lvl") {
-                    let base = abstractLevels[abstract]?[ilvl]
-                    let format = Self.child(of: level, named: "w:numfmt").flatMap { try? $0.attr("w:val") } ?? base?.format ?? "decimal"
-                    let start = Self.child(of: level, named: "w:start").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) } ?? base?.start ?? 1
-                    let restart = Self.child(of: level, named: "w:lvlrestart").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) } ?? base?.restart
-                    levelOverrides[id, default: [:]][ilvl] = Level(format: format, start: max(0, start), restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil })
+                    let format = Self.child(of: level, named: "w:numfmt").flatMap { try? $0.attr("w:val") }
+                    let start = Self.child(of: level, named: "w:start").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
+                    let restart = Self.child(of: level, named: "w:lvlrestart").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
+                    levelOverrides[id, default: [:]][ilvl] = PartialLevel(format: format, start: start.map { max(0, $0) }, restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil })
                 }
             }
             numbers[id] = (abstract, overrides)
@@ -187,6 +196,14 @@ final class WordListNumbering {
             current = style.basedOn
         }
         return numID == nil && level == nil ? nil : (numID, level)
+    }
+
+    private static func canonicalID(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let digits = value.hasPrefix("+") ? value.dropFirst() : value[...]
+        guard !digits.isEmpty, digits.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        let trimmed = digits.drop { $0 == "0" }
+        return trimmed.isEmpty ? "0" : String(trimmed)
     }
 
     private static func xml(_ archive: Archive, path: String) -> Document? {

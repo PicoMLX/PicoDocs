@@ -86,6 +86,35 @@ struct WordNumberingReviewTests {
         }
     }
 
+    @Test func linkedOverridesAliasesAndRelocatedParts() throws {
+        let numbering = """
+        <w:numbering \(ns)>
+        <w:abstractNum w:abstractNumId="001"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="decimal"/><w:lvlRestart w:val="0"/></w:lvl></w:abstractNum>
+        <w:abstractNum w:abstractNumId="2"><w:numStyleLink w:val="Linked"/></w:abstractNum>
+        <w:abstractNum w:abstractNumId="3"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/></w:lvl></w:abstractNum>
+        <w:num w:numId="001"><w:abstractNumId w:val="1"/></w:num>
+        <w:num w:numId="2"><w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride></w:num>
+        <w:num w:numId="3"><w:abstractNumId w:val="2"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:lvlRestart w:val="0"/></w:lvl></w:lvlOverride></w:num>
+        <w:num w:numId="4"><w:abstractNumId w:val="3"/></w:num>
+        </w:numbering>
+        """
+        let styles = "<w:styles \(ns)><w:style w:styleId=\"Linked\"><w:pPr><w:numPr><w:numId w:val=\"004\"/></w:numPr></w:pPr></w:style></w:styles>"
+        let relationships = #"<Relationships><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="lists/n.xml"/><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="lists/s.xml"/></Relationships>"#
+        let data = PagesConverterTests.makeZip([(name: "word/lists/n.xml", data: Array(numbering.utf8)), (name: "word/lists/s.xml", data: Array(styles.utf8)), (name: "word/_rels/document.xml.rels", data: Array(relationships.utf8)), (name: "docProps/app.xml", data: Array("<Properties><Application>LibreOffice</Application></Properties>".utf8))])
+        let resolver = WordListNumbering(archive: try #require(Archive(data: data, accessMode: .read)))
+        func prefix(_ id: String, _ level: Int = 0) throws -> String? {
+            let doc = try SwiftSoup.parse("<w:numPr \(ns)><w:numId w:val=\"\(id)\"/><w:ilvl w:val=\"\(level)\"/></w:numPr>", "", SwiftSoup.Parser.xmlParser())
+            return resolver.prefix(numPr: try doc.getElementsByTag("w:numPr").first(), style: nil)
+        }
+        #expect(try prefix("00") == nil)
+        #expect(try prefix("+01") == "1. ")
+        #expect(try prefix("1", 1) == "   1. ")
+        #expect(try prefix("02") == "1. ")
+        #expect(try prefix("1") == "2. ")
+        #expect(try prefix("1", 1) == "   2. ")
+        #expect(try prefix("3") == "- ")
+    }
+
     @Test func looseNestedListsRenderWithSourceNumbers() throws {
         let result = ConverterResult(sections: [DocumentSection(markdown: "5. First\n\n   1. Child\n\n   2. Child two\n\n6. Second")])
         let html = try DocumentRenderer.render(result, to: .html)
