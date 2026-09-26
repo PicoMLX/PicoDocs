@@ -5,6 +5,35 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func literalLabelsLegalNumberingAndLocalizedText() async throws {
+        func convert(format: String, label: String, start: Int = 1, language: String = "en-US", extra: String = "", override: String = "") async throws -> ConverterResult {
+            let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"upperRoman\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:start w:val=\"\(start)\"/><w:numFmt w:val=\"\(format)\"/><w:lvlText w:val=\"\(label)\"/>\(extra)</w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/>\(override)</w:num></w:numbering>"
+            let document = "<w:document \(ns)><w:body><w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>Item</w:t></w:r></w:p></w:body></w:document>"
+            let styles = "<w:styles \(ns)><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val=\"\(language)\"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"
+            return try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8)), (name: "word/styles.xml", data: Array(styles.utf8))]), filename: "labels.docx")
+        }
+        let literal = try await convert(format: "decimal", label: "`%2` _x_ *y* [z]")
+        for format in [ExportFileType.html, .plaintext] { #expect(try DocumentRenderer.render(literal, to: format).contains("`1` _x_ *y* [z] Item")) }
+        let legal = try await convert(format: "decimal", label: "%1.%2.", extra: "<w:isLgl/>")
+        #expect(legal.markdown().contains("1.1. Item"))
+        let disabled = try await convert(format: "decimal", label: "%1.%2.", extra: "<w:isLgl/>", override: #"<w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:isLgl w:val="0"/></w:lvl></w:lvlOverride>"#)
+        #expect(disabled.markdown().contains("I.1. Item"))
+        let enabled = try await convert(format: "decimal", label: "%1.%2.", override: #"<w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:isLgl/></w:lvl></w:lvlOverride>"#)
+        #expect(enabled.markdown().contains("1.1. Item"))
+        for (format, start, language, expected) in [("cardinalText", 1, "en-US", "one"), ("ordinalText", 1, "en-US", "first"), ("ordinalText", 22, "en-GB", "twenty-second"), ("cardinalText", 2, "fr-FR", "deux")] {
+            let result = try await convert(format: format, label: "%2.", start: start, language: language)
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(expected + ". Item"))
+        }
+    }
+
+    @Test func imageAltBackslashesAreLiteral() throws {
+        let source = #"<w:drawing><wp:docPr descr="\* \` \["/><a:blip r:embed="image"/></w:drawing>"#
+        let drawing = try #require(SwiftSoup.parse(source, "", SwiftSoup.Parser.xmlParser()).getElementsByTag("w:drawing").first())
+        let markdown = WordConverter.imageMarkdown(in: drawing, relationships: ["image": "media/a.png"])
+        let result = ConverterResult(sections: [.init(markdown: markdown)])
+        for format in [ExportFileType.html, .plaintext] { #expect(try DocumentRenderer.render(result, to: format).contains(#"\* \` \["#)) }
+    }
+
     @Test func discardedPrefixesDoNotBecomeVisibleParents() async throws {
         let levels = (0...2).map { "<w:lvl w:ilvl=\"\($0)\"><w:numFmt w:val=\"decimal\"/></w:lvl>" }.joined()
         let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\">\(levels)</w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"

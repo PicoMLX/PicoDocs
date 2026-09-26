@@ -616,7 +616,13 @@ public enum DocumentRenderer {
         var result = ""
         var index = text.startIndex
         while index < text.endIndex {
-            if text[index] == "`",
+            let next = text.index(after: index)
+            // Backslash escapes outside code cannot open a code span. Inside
+            // a real span, backslashes remain literal as required by Markdown.
+            if text[index] == "\\", next < text.endIndex {
+                result.append(text[index]); result.append(text[next])
+                index = text.index(after: next)
+            } else if text[index] == "`",
                let close = text[text.index(after: index)...].firstIndex(of: "`") {
                 spans.append(String(text[text.index(after: index)..<close]))
                 result += "\(codeOpen)\(spans.count - 1)\(codeClose)"

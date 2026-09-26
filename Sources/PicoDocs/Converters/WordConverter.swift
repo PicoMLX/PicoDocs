@@ -573,7 +573,7 @@ public struct WordConverter: DocumentConverter {
     static func imageMarkdown(in drawing: Element, relationships: [String: String]) -> String {
         guard let target = imageTarget(in: drawing, relationships: relationships) else { return "" }
         let filename = (target as NSString).lastPathComponent
-        return "![\(escapeLinkLabel(imageAltText(in: drawing)))](\(escapeLinkDestination(filename)))"
+        return "![\(escapeLinkLabel(imageAltText(in: drawing).replacingOccurrences(of: "\\", with: "\\\\")))](\(escapeLinkDestination(filename)))"
     }
 
     /// The relationship Target (e.g. "media/image1.png") an image references via
