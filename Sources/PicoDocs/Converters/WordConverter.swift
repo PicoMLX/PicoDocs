@@ -29,12 +29,26 @@ public struct WordConverter: DocumentConverter {
             throw PicoDocsError.fileCorrupted
         }
 
-        let relationships = Self.parseRelationships(archive)
+        var relationships = Self.parseRelationships(archive)
         let document = try SwiftSoup.parse(documentXML, "", SwiftSoup.Parser.xmlParser())
         guard let body = try document.getElementsByTag("w:body").first() else {
             throw PicoDocsError.emptyDocument
         }
 
+        // Map heading bookmarks to their canonical fragments before rendering,
+        // so forward internal links survive the DOCX round trip.
+        let headings = try body.getElementsByTag("w:p").array().filter { paragraph in
+            let properties = paragraph.children().first { $0.tagName().lowercased() == "w:ppr" }
+            let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
+            return Self.headingLevel(forStyle: style) != nil
+        }
+        let titles = headings.map { MarkdownInlineParser.parse(Self.renderInline($0, relationships: relationships)).plainText }
+        for (heading, slug) in zip(headings, MarkdownHeadingAnchors.slugs(titles)) {
+            for bookmark in try heading.getElementsByTag("w:bookmarkStart").array() {
+                let name = try bookmark.attr("w:name")
+                if !name.isEmpty { relationships["#" + name] = "#" + slug }
+            }
+        }
         let numbering = WordListNumbering(archive: archive)
         var blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering)
         // Text boxes (shapes with text) store their content in `w:txbxContent`
@@ -249,7 +263,9 @@ public struct WordConverter: DocumentConverter {
             case "w:hyperlink":
                 let inner = renderInline(child, relationships: relationships)
                 let relId = (try? child.attr("r:id")) ?? ""
-                if let url = relationships[relId], !url.isEmpty, !inner.isEmpty {
+                let anchor = (try? child.attr("w:anchor")) ?? ""
+                let target = relationships[relId] ?? (anchor.isEmpty ? nil : (relationships["#" + anchor] ?? "#" + anchor))
+                if let url = target, !url.isEmpty, !inner.isEmpty {
                     if isImageOnlyMarkdown(inner) {
                         // Hyperlink wrapping an image: keep the image. A nested
                         // linked image ([![alt](src)](url)) isn't round-trippable

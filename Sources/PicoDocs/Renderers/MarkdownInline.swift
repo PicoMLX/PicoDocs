@@ -35,7 +35,8 @@ enum MarkdownInlineParser {
     /// images, and footnote references are pulled out by a single scan (so their
     /// contents aren't reinterpreted), and the remaining plain-text runs are parsed
     /// for `*`/`**`/`***` emphasis.
-    static func parse(_ text: String) -> [MarkdownInline] {
+    static func parse(_ text: String, depth: Int = 0) -> [MarkdownInline] {
+        guard depth < 64 else { return [.text(text)] }
         let chars = Array(text)
         // Cache the next unescaped label closer once instead of rescanning the
         // suffix for every unmatched opener in partially generated Markdown.
@@ -114,7 +115,7 @@ enum MarkdownInlineParser {
 
             // Image: ![alt](dest)
             if c == "!", i + 1 < chars.count, chars[i + 1] == "[",
-               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: labelCloses[i + 1], parenCloses: parenCloses, nextAngle: nextAngle) {
+               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: labelCloses[i + 1], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth) {
                 append(parsed.node)
                 i = parsed.next
                 continue
@@ -122,7 +123,7 @@ enum MarkdownInlineParser {
 
             if c == "[" {
                 // Link: [label](dest)
-                if let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: labelCloses[i], parenCloses: parenCloses, nextAngle: nextAngle) {
+                if let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: labelCloses[i], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth) {
                     append(parsed.node)
                     i = parsed.next
                     continue
@@ -173,7 +174,7 @@ enum MarkdownInlineParser {
     /// link, the `!` for an image). Supports CommonMark angle-bracket destinations
     /// `(<url with spaces>)` that `WordConverter` emits. Returns the node and the
     /// index just past the closing `)`, or nil if the syntax doesn't match.
-    private static func parseLinkOrImage(_ chars: [Character], from: Int, isImage: Bool, labelEnd: Int?, parenCloses: [Int: Int], nextAngle: [Int?]) -> (node: MarkdownInline, next: Int)? {
+    private static func parseLinkOrImage(_ chars: [Character], from: Int, isImage: Bool, labelEnd: Int?, parenCloses: [Int: Int], nextAngle: [Int?], depth: Int) -> (node: MarkdownInline, next: Int)? {
         let bracket = isImage ? from + 1 : from
         guard bracket < chars.count, chars[bracket] == "[" else { return nil }
         // Find the label's closing `]`, skipping backslash-escaped delimiters:
@@ -219,9 +220,22 @@ enum MarkdownInlineParser {
         }
         guard cursor < chars.count, chars[cursor] == ")" else { return nil }
         let labelText = String(chars[(bracket + 1)..<labelEnd])
+        let label = parse(labelText, depth: depth + 1)
+        func containsLink(_ nodes: [MarkdownInline]) -> Bool {
+            nodes.contains { node in
+                switch node {
+                case .link: return true
+                case .strong(let children), .emphasis(let children): return containsLink(children)
+                default: return false
+                }
+            }
+        }
+        // An inner link deactivates the outer opener; the main scan will then
+        // recognize that inner link and retain the outer punctuation literally.
+        guard isImage || !containsLink(label) else { return nil }
         let node: MarkdownInline = isImage
-            ? .image(alt: parse(labelText).plainText, source: dest)
-            : .link(label: parse(labelText), destination: dest)
+            ? .image(alt: label.plainText, source: dest)
+            : .link(label: label, destination: dest)
         return (node, cursor + 1)   // past the ")"
     }
 
@@ -325,11 +339,21 @@ enum MarkdownInlineParser {
             let rightFlanking = !beforeSpace && (!punctuation(before) || afterSpace || punctuation(after))
             let opens = leftFlanking && (delimiter == "*" || !rightFlanking || punctuation(before))
             let closes = rightFlanking && (delimiter == "*" || !leftFlanking || punctuation(after))
-            while closes, remaining > 0, frames.count > 1, frames.last?.delimiter == delimiter {
+            while closes, remaining > 0, frames.count > 1 {
+                guard let match = frames.indices.reversed().first(where: { candidate in
+                    guard candidate > 0, frames[candidate].delimiter == delimiter else { return false }
+                    return !((opens || frames[candidate].canClose) && (frames[candidate].count + remaining) % 3 == 0
+                        && (frames[candidate].count % 3 != 0 || remaining % 3 != 0))
+                }) else { break }
+                while frames.count - 1 > match {
+                    let skipped = frames.removeLast()
+                    appendText(String(repeating: String(skipped.delimiter), count: skipped.count))
+                    for node in skipped.nodes {
+                        if case .text(let text) = node { appendText(text) }
+                        else { frames[frames.count - 1].nodes.append(node) }
+                    }
+                }
                 let top = frames.count - 1
-                // CommonMark's rule of three disambiguates intraword runs.
-                if (opens || frames[top].canClose), (frames[top].count + remaining) % 3 == 0,
-                   (frames[top].count % 3 != 0 || remaining % 3 != 0) { break }
                 let used = frames[top].count >= 2 && remaining >= 2 && !(frames[top].count == 3 && remaining == 3) ? 2 : 1
                 let children = frames[top].nodes
                 let node: MarkdownInline = used == 2 ? .strong(children) : .emphasis(children)

@@ -8,6 +8,68 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func exportedWordFragmentsSurviveImportAndSecondExport() async throws {
+        let source = "[Details](#details) [Again](#details-1)\n\n# Details\n\n# Details"
+        let first = try PicoDocsEngine.write(markdown:source,to:.docx)
+        let recovered = try await PicoDocsEngine.convert(data:first,filename:"anchors.docx")
+        #expect(recovered.markdown().contains("[Details](#details)"))
+        #expect(recovered.markdown().contains("[Again](#details-1)"))
+        let second = try xml(PicoDocsEngine.write(recovered,to:.docx),"word/document.xml")
+        #expect(second.contains(#"w:anchor="heading_1""#)); #expect(second.contains(#"w:anchor="heading_2""#))
+    }
+
+    @Test func presentationFragmentsBecomeInternalSlideJumps() throws {
+        let source = "# Start\n\n[Details](#details) [again](#details-1) [missing](#absent)\n\n# Details\n\nFirst\n\n# Details\n\nSecond"
+        let data = try PicoDocsEngine.write(markdown:source,to:.pptx)
+        let slide = try xml(data,"ppt/slides/slide1.xml")
+        #expect(slide.components(separatedBy:#"action="ppaction://hlinksldjump""#).count - 1 == 2)
+        let relationships = try xml(data,"ppt/slides/_rels/slide1.xml.rels")
+        #expect(relationships.contains(#"/slide" Target="slide2.xml""#))
+        #expect(relationships.contains(#"/slide" Target="slide3.xml""#))
+        #expect(!relationships.contains("External")); #expect(!relationships.contains("#"))
+    }
+
+    @Test func mixedEmphasisClosesPastUnmatchedFrames() {
+        #expect(MarkdownInlineParser.parse("*foo _bar* baz_") == [.emphasis([.text("foo _bar")]),.text(" baz_")])
+        #expect(MarkdownInlineParser.parse("_foo *bar_ baz*") == [.emphasis([.text("foo *bar")]),.text(" baz*")])
+        #expect(MarkdownInlineParser.parse("**foo _bar** baz_") == [.strong([.text("foo _bar")]),.text(" baz_")])
+    }
+
+    @Test func worksheetNamesSurviveOfficeProjection() throws {
+        let result = ConverterResult(sections:[.init(title:"Ignored",kind:.sheet,markdown:"## A *literal*\n\nOne",metadata:["sheetName":"A *literal*","csv":"One"]),.init(title:"Second",kind:.sheet,markdown:"## Second\n\nTwo",metadata:["csv":"Two"])])
+        let word = try xml(PicoDocsEngine.write(result,to:.docx),"word/document.xml")
+        #expect(word.contains("A *literal*")); #expect(word.contains("Second"))
+        let slides = try PicoDocsEngine.write(result,to:.pptx)
+        #expect(try xml(slides,"ppt/slides/slide1.xml").contains("A *literal*"))
+        #expect(try xml(slides,"ppt/slides/slide2.xml").contains("Second"))
+        #if canImport(AppKit) || canImport(UIKit)
+        let attributed = AttributedStringDocumentBuilder.attributedString(from:result).string
+        #expect(attributed.contains("A *literal*")); #expect(attributed.contains("Second"))
+        #endif
+    }
+
+    @Test func looseListParagraphsRetainTheirItemAndNesting() throws {
+        let source = "- parent\n  - first\n\n    continuation"
+        let blocks = MarkdownBlockParser.parse(source)
+        guard case .list(let list) = try #require(blocks.first) else { Issue.record("Expected list"); return }
+        let paragraphs = list.paragraphs()
+        #expect(paragraphs.count == 3)
+        #expect(paragraphs.last?.continuation == true); #expect(paragraphs.last?.level == 1)
+        let word = try xml(PicoDocsEngine.write(markdown:source,to:.docx),"word/document.xml")
+        #expect(word.contains("continuation")); #expect(word.contains(#"w:left="1440""#))
+        let slide = try xml(PicoDocsEngine.write(markdown:source,to:.pptx),"ppt/slides/slide1.xml")
+        #expect(slide.contains(#"<a:pPr lvl="1"><a:buNone/></a:pPr>"#))
+    }
+
+    @Test func innerLinkDeactivatesOuterLinkWithoutNestedHyperlinks() throws {
+        let source = "[outer [inner](https://inner.test)](https://outer.test)"
+        #expect(MarkdownInlineParser.parse(source) == [.text("[outer "),.link(label:[.text("inner")],destination:"https://inner.test"),.text("](https://outer.test)")])
+        let word = try PicoDocsEngine.write(markdown:source,to:.docx)
+        #expect(try xml(word,"word/document.xml").components(separatedBy:"<w:hyperlink ").count - 1 == 1)
+        #expect(!(try xml(word,"word/_rels/document.xml.rels")).contains("https://outer.test"))
+        #expect(MarkdownInlineParser.parse("[**text** ![alt](image.png)](url)") == [.link(label:[.strong([.text("text")]),.text(" "),.image(alt:"alt",source:"image.png")],destination:"url")])
+    }
+
     @Test func underscoreEmphasisUsesFlankingAndPreservesIdentifiers() throws {
         #expect(MarkdownInlineParser.parse("_italic_") == [.emphasis([.text("italic")])])
         #expect(MarkdownInlineParser.parse("__bold__") == [.strong([.text("bold")])])

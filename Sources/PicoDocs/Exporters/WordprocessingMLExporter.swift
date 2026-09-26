@@ -154,16 +154,11 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
         init(images: ImageIndex, blocks: [MarkdownBlock]) {
             self.images = images
-            var usedSlugs: Set<String> = []
-            for block in blocks {
-                guard case .heading(_, let text) = block else { continue }
-                let plain = MarkdownInlineParser.parse(text).plainText.lowercased()
-                let base = String(plain.unicodeScalars.filter {
-                    !CharacterSet.punctuationCharacters.union(.symbols).contains($0) || $0 == "-" || $0 == "_"
-                }).replacingOccurrences(of: "\\s", with: "-", options: .regularExpression)
-                var slug = base, suffix = 1
-                while usedSlugs.contains(slug) { slug = "\(base)-\(suffix)"; suffix += 1 }
-                usedSlugs.insert(slug)
+            let titles = blocks.compactMap { block -> String? in
+                guard case .heading(_, let text) = block else { return nil }
+                return MarkdownInlineParser.parse(text).plainText
+            }
+            for slug in MarkdownHeadingAnchors.slugs(titles) {
                 // Generated names are short and valid even for Unicode headings.
                 let name = "heading_\(headingBookmarks.count + 1)"
                 headingBookmarks.append(name)

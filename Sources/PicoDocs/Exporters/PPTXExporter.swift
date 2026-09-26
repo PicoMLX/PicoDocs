@@ -30,6 +30,8 @@ public struct PPTXExporter: DocumentExporter {
         let count = max(slides.count, 1)
         let effectiveSlides = slides.isEmpty ? [Slide(title: "", body: [])] : slides
 
+        let fragments = MarkdownHeadingAnchors.slugs(effectiveSlides.map(\.title))
+        let fragmentSlides = Dictionary(uniqueKeysWithValues: fragments.enumerated().map { ($0.element, $0.offset + 1) })
         var pkg = try OOXMLPackageWriter()
         try pkg.addCoreProperties(result)
         try pkg.addXML("[Content_Types].xml", OOXMLPackageWriter.withCoreContentType(Self.contentTypes(slideCount: count)))
@@ -43,7 +45,7 @@ public struct PPTXExporter: DocumentExporter {
         try pkg.addXML("ppt/theme/theme1.xml", PPTXTemplates.theme)
         for (i, slide) in effectiveSlides.enumerated() {
             var relationships: [String] = []
-            try pkg.addXML("ppt/slides/slide\(i + 1).xml", Self.slideXML(slide, relationships: &relationships))
+            try pkg.addXML("ppt/slides/slide\(i + 1).xml", Self.slideXML(slide, fragmentSlides: fragmentSlides, relationships: &relationships))
             let rels = PPTXTemplates.slideRels.replacingOccurrences(of: "</Relationships>", with: relationships.joined() + "</Relationships>")
             try pkg.addXML("ppt/slides/_rels/slide\(i + 1).xml.rels", rels)
         }
@@ -184,8 +186,8 @@ public struct PPTXExporter: DocumentExporter {
 
     // MARK: - Slide part
 
-    private static func slideXML(_ slide: Slide, relationships: inout [String]) -> String {
-        let titleRuns = "<a:p>\(runs(slide.titleInlines ?? [.text(slide.title)], relationships: &relationships))</a:p>"
+    private static func slideXML(_ slide: Slide, fragmentSlides: [String: Int], relationships: inout [String]) -> String {
+        let titleRuns = "<a:p>\(runs(slide.titleInlines ?? [.text(slide.title)], fragmentSlides: fragmentSlides, relationships: &relationships))</a:p>"
         let bodyParagraphs: String
         if slide.body.isEmpty {
             bodyParagraphs = "<a:p/>"
@@ -201,7 +203,7 @@ public struct PPTXExporter: DocumentExporter {
                 case false?: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buChar char=\"•\"/></a:pPr>"
                 case nil: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buNone/></a:pPr>"
                 }
-                let runs = runs(nodes, relationships: &relationships)
+                let runs = runs(nodes, fragmentSlides: fragmentSlides, relationships: &relationships)
                 return "<a:p>\(properties)\(runs)</a:p>"
             }.joined()
         }
@@ -229,26 +231,38 @@ public struct PPTXExporter: DocumentExporter {
     }
 
     /// Hyperlinks belong to runs and reference this slide's relationship part.
-    private static func runs(_ nodes: [MarkdownInline], bold: Bool = false, italic: Bool = false, link: String? = nil, relationships: inout [String]) -> String {
+    private static func runs(_ nodes: [MarkdownInline], bold: Bool = false, italic: Bool = false, link: (id: String, jump: Bool)? = nil, fragmentSlides: [String: Int], relationships: inout [String]) -> String {
         var output = ""
         for node in nodes {
             switch node {
             case .strong(let children):
-                output += runs(children, bold: true, italic: italic, link: link, relationships: &relationships)
+                output += runs(children, bold: true, italic: italic, link: link, fragmentSlides: fragmentSlides, relationships: &relationships)
             case .emphasis(let children):
-                output += runs(children, bold: bold, italic: true, link: link, relationships: &relationships)
+                output += runs(children, bold: bold, italic: true, link: link, fragmentSlides: fragmentSlides, relationships: &relationships)
             case .link(let label, let destination):
                 let id = "hyperlink\(relationships.count + 1)"
-                let target = OOXMLPackageWriter.relationshipURI(destination)
-                relationships.append("<Relationship Id=\"\(id)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"\(OOXMLPackageWriter.escapeAttribute(target))\" TargetMode=\"External\"/>")
-                output += runs(label, bold: bold, italic: italic, link: id, relationships: &relationships)
+                let jump: Bool
+                if destination.hasPrefix("#") {
+                    let fragment = String(destination.dropFirst())
+                    guard let targetSlide = fragmentSlides[fragment.removingPercentEncoding ?? fragment] else {
+                        output += runs(label, bold: bold, italic: italic, fragmentSlides: fragmentSlides, relationships: &relationships)
+                        continue
+                    }
+                    relationships.append("<Relationship Id=\"\(id)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slide\(targetSlide).xml\"/>")
+                    jump = true
+                } else {
+                    let target = OOXMLPackageWriter.relationshipURI(destination)
+                    relationships.append("<Relationship Id=\"\(id)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"\(OOXMLPackageWriter.escapeAttribute(target))\" TargetMode=\"External\"/>")
+                    jump = false
+                }
+                output += runs(label, bold: bold, italic: italic, link: (id, jump), fragmentSlides: fragmentSlides, relationships: &relationships)
             default:
                 let text = [node].plainText
                 var attributes = bold ? " b=\"1\"" : ""
                 if italic { attributes += " i=\"1\"" }
                 let font: String
                 if case .code = node { font = "<a:latin typeface=\"Courier New\"/>" } else { font = "" }
-                let hyperlink = link.map { "<a:hlinkClick r:id=\"\($0)\"/>" } ?? ""
+                let hyperlink = link.map { "<a:hlinkClick r:id=\"\($0.id)\"\($0.jump ? " action=\"ppaction://hlinksldjump\"" : "")/>" } ?? ""
                 let properties = attributes.isEmpty && hyperlink.isEmpty && font.isEmpty ? "" : "<a:rPr\(attributes)>\(font)\(hyperlink)</a:rPr>"
                 output += text.components(separatedBy: "\n").map {
                     "<a:r>\(properties)<a:t\($0.first?.isWhitespace == true || $0.last?.isWhitespace == true ? " xml:space=\"preserve\"" : "")>\(OOXMLPackageWriter.escape($0))</a:t></a:r>"

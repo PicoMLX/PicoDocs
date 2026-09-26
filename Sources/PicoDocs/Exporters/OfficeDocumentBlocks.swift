@@ -13,6 +13,10 @@ enum OfficeDocumentBlocks {
         for section in result.sections where section.kind != .image {
             if section.kind == .sheet, let csv = section.metadata["csv"] {
                 flush()
+                if let title = section.metadata["sheetName"] ?? section.title, !title.isEmpty {
+                    let escaped = title.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+                    blocks.append(.heading(2, escaped))
+                }
                 let rows = CSVConverter.parseCSV(csv).map { row in
                     row.map { cell in
                         MarkdownBlockParser.normalizedLineEndings(cell).map {
