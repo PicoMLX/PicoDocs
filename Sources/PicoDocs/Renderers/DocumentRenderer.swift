@@ -543,8 +543,11 @@ public enum DocumentRenderer {
                 blocks.append(.blockquote(inner)); continue
             }
 
-            if listMarker(trimmed) != nil {
-                let ordered = listMarker(trimmed) == .ordered
+            let leadingBare = bareListMarker(trimmed)
+            let confirmedBare = leadingBare != nil && i + 1 < lines.count
+                && (listMarker(lines[i + 1].trimmingCharacters(in: .whitespaces)) ?? bareListMarker(lines[i + 1].trimmingCharacters(in: .whitespaces))) == leadingBare
+            if listMarker(trimmed) != nil || confirmedBare {
+                let ordered = (listMarker(trimmed) ?? leadingBare) == .ordered
                 let start = ordered ? listStart(trimmed) : 1
                 // Items sit at the list's own indent; a line indented two or more
                 // columns past it continues the current item. It keeps its
@@ -804,7 +807,8 @@ public enum DocumentRenderer {
     /// Strips inline Markdown to plain text (links/images become their label/alt;
     /// code spans keep their literal contents).
     private static func stripInline(_ text: String, footnoteNumbers: [String: Int] = [:]) -> String {
-        let (afterCode, spans) = extractCodeSpans(text)
+        let (protected, escaped) = protectEscapes(text)
+        let (afterCode, spans) = extractCodeSpans(protected)
         let (afterLinks, links) = extractLinks(afterCode)
         var result = applyEmphasisStrip(afterLinks)
         // Footnote references become `[N]` here (code spans already extracted, so
@@ -818,7 +822,7 @@ public enum DocumentRenderer {
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: span)
         }
-        return result
+        return restoreEscapes(result, escaped: escaped, html: false)
     }
 
     private static func applyEmphasisStrip(_ text: String) -> String {
@@ -827,6 +831,29 @@ public enum DocumentRenderer {
         result = result.replacingOccurrences(of: "\\*\\*(.+?)\\*\\*", with: "$1", options: .regularExpression)
         result = result.replacingOccurrences(of: "\\*(.+?)\\*", with: "$1", options: .regularExpression)
         return result
+    }
+
+    private static func protectEscapes(_ text: String) -> (String, [String]) {
+        var out = "", escaped: [String] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            if text[index] == "\\", next < text.endIndex,
+               #"\`*_{}[]<>()#+-.!|"#.contains(text[next]) {
+                escaped.append(String(text[next]))
+                out += "\u{E006}\(escaped.count - 1)\u{E007}"
+                index = text.index(after: next)
+            } else { out.append(text[index]); index = next }
+        }
+        return (out, escaped)
+    }
+
+    private static func restoreEscapes(_ text: String, escaped: [String], html: Bool) -> String {
+        var out = text
+        for (index, value) in escaped.enumerated() {
+            out = out.replacingOccurrences(of: "\u{E006}\(index)\u{E007}", with: html ? escapeHTML(value) : value)
+        }
+        return out
     }
 
     // MARK: - Escaping

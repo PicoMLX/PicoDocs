@@ -324,8 +324,9 @@ struct PagesConverterTests {
     func oversizedListRestart() async throws {
         let pages = Self.makeListPagesFile(text: "a\nb", style: .ordered,
                                            restarts: [(0, UInt64(Int.max)), (2, 0)])
-        let markdown = try await PicoDocsEngine.convert(data: pages, filename: "lists.pages").markdown()
-        #expect(markdown == "999999999. a\n1000000000. b")
+        await #expect(throws: PicoDocsError.fileCorrupted) {
+            try await PicoDocsEngine.convert(data: pages, filename: "lists.pages")
+        }
     }
 
     @Test("PagesConverter keeps list numbering across an inline table")
@@ -345,6 +346,24 @@ struct PagesConverterTests {
         let html = try DocumentRenderer.render(result, to: .html)
         #expect(html.contains("<ol>\n<li>a</li>"))
         #expect(html.contains("<ol start=\"5\">\n<li>c</li>\n<li>d</li>\n</ol>"))
+    }
+
+    @Test func followupPagesListRegressions() async throws {
+        for style in [ListKind.ordered, .bullet] {
+            let data = Self.makeListPagesFile(text: "\nb", style: style, restarts: [])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "lists.pages")
+            let html = try DocumentRenderer.render(result, to: .html)
+            #expect(html.contains("<li></li>\n<li>b</li>"))
+        }
+        let table = Self.makeListPagesFile(text: "a\n\n\u{FFFC}\nc", style: .ordered, restarts: [], tableCell: "X")
+        let result = try await PicoDocsEngine.convert(data: table, filename: "lists.pages")
+        #expect(result.markdown().contains("1. a\n2.\n3.\n\n| X |"))
+        #expect(result.markdown().contains("4. c"))
+        let markers = Self.makeListPagesFile(text: "- literal\u{2028}1. note", style: .bullet, restarts: [])
+        let content = try await PicoDocsEngine.convert(data: markers, filename: "lists.pages")
+        let csv = try DocumentRenderer.render(content, to: .csv)
+        #expect(!csv.contains("\\-"))
+        #expect(!csv.contains("1\\."))
     }
 
     @Test("Detector routes a .pages package to the Pages format")

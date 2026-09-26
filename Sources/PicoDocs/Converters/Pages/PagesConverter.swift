@@ -82,7 +82,7 @@ public struct PagesConverter: DocumentConverter {
         // reading order. Falls back to body text + tables appended after it when
         // the attachments can't be mapped 1:1 (so a table is never dropped).
         if let documentStream,
-           let blocks = IWATable.inlineBlocks(documentStream: documentStream, in: allStreams) {
+           let blocks = try IWATable.inlineBlocks(documentStream: documentStream, in: allStreams) {
             for block in blocks {
                 switch block {
                 case .text(let raw):
@@ -101,7 +101,7 @@ public struct PagesConverter: DocumentConverter {
             if let documentStream {
                 // Render headings even on the fallback path; degrade to plain text
                 // extraction only if the style-aware renderer yields nothing.
-                let rendered = IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams)
+                let rendered = try IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams)
                 bodyText = rendered.isEmpty ? IWAArchive.text(in: documentStream) : rendered
             } else {
                 var firstText = ""

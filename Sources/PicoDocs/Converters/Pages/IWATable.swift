@@ -132,7 +132,7 @@ enum IWATable {
     /// appended tables — only when the ￼ markers can't be matched 1:1 to attachment
     /// runs, so a table is never dropped. Offsets are UTF-16 code units, the index
     /// space iWork's run/attachment character indices use.
-    static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]]) -> [Block]? {
+    static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]]) throws -> [Block]? {
         let objects = buildObjects(streams)
         let tableMarkdown = reconstructTables(objects)
         let tiles = Set(tableMarkdown.keys)
@@ -160,15 +160,15 @@ enum IWATable {
             for (marker, attachment) in zip(markers, attachments) {
                 guard let tile = reachableTile(from: attachment.objectID, objects: objects, tiles: tiles),
                       let markdown = tableMarkdown[tile] else { continue }  // image: leave ￼ in the text
-                let segment = renderParagraphs(body, segmentStart ..< marker, objects: objects,
-                                               lists: &lists, continuesParagraph: continuesParagraph)
+                let segment = try renderParagraphs(body, segmentStart ..< marker, objects: objects,
+                                               lists: &lists, continuesParagraph: continuesParagraph, flushEmptyAtEnd: true)
                 if !segment.isEmpty { blocks.append(.text(segment)) }
                 blocks.append(.table(markdown))
                 placed.insert(tile)
                 segmentStart = marker + 1                                   // drop the table ￼
                 continuesParagraph = true
             }
-            let tail = renderParagraphs(body, segmentStart ..< body.units.count, objects: objects,
+            let tail = try renderParagraphs(body, segmentStart ..< body.units.count, objects: objects,
                                         lists: &lists, continuesParagraph: continuesParagraph)
             if !tail.isEmpty { blocks.append(.text(tail)) }
         }
@@ -181,13 +181,13 @@ enum IWATable {
     /// placement) so styles still produce Markdown while the tables are appended
     /// separately; attachment marks are dropped. Empty when there is no body text,
     /// so the caller can degrade to plain extraction.
-    static func bodyMarkdown(documentStream: [UInt8], in streams: [[UInt8]]) -> String {
+    static func bodyMarkdown(documentStream: [UInt8], in streams: [[UInt8]]) throws -> String {
         let objects = buildObjects(streams)
         var parts: [String] = []
         for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
             guard let body = bodyStorage(storage, objects: objects) else { continue }
             var lists = ListState()
-            let rendered = renderParagraphs(body, 0 ..< body.units.count, objects: objects,
+            let rendered = try renderParagraphs(body, 0 ..< body.units.count, objects: objects,
                                             lists: &lists, continuesParagraph: false)
             if !rendered.isEmpty { parts.append(rendered) }
         }
@@ -267,7 +267,7 @@ enum IWATable {
     /// marker nor counts again.
     private static func renderParagraphs(_ body: BodyStorage, _ range: Range<Int>,
                                          objects: [UInt64: IWAArchive.Object],
-                                         lists: inout ListState, continuesParagraph: Bool) -> String {
+                                         lists: inout ListState, continuesParagraph: Bool, flushEmptyAtEnd: Bool = false) throws -> String {
         var parts: [(text: String, tight: Bool)] = []   // tight = join to previous with one newline
         // Empty list items (a bare marker, still numbered) wait here until their list
         // continues with a nonempty item, so an interior blank item keeps its place
@@ -277,6 +277,7 @@ enum IWATable {
         var index = range.lowerBound
         var fragment = continuesParagraph
         while index <= range.upperBound {
+            if index == range.upperBound, start == index, !flushEmptyAtEnd { break }
             if fragment, index == range.upperBound || isParagraphSeparator(body.units[index]) {
                 fragment = false
                 switch renderParagraph(body, start ..< index, objects: objects) {
@@ -294,7 +295,7 @@ enum IWATable {
                     lists.lastList = nil; lists.orderedList = nil
                 case .body(let text)?:
                     if let listKind {
-                        let (marker, tight) = nextListMarker(listKind, style: listStyle, at: start, body, &lists)
+                        let (marker, tight) = try nextListMarker(listKind, style: listStyle, at: start, body, &lists)
                         if tight { parts += pendingEmpty }
                         pendingEmpty = []
                         parts.append((listItem(marker + " ", text), tight))
@@ -306,7 +307,7 @@ enum IWATable {
                 case nil:
                     if let listKind {
                         // An empty list item still takes a number (Pages shows its marker).
-                        let (marker, tight) = nextListMarker(listKind, style: listStyle, at: start, body, &lists)
+                        let (marker, tight) = try nextListMarker(listKind, style: listStyle, at: start, body, &lists)
                         if !tight { pendingEmpty = [] }
                         pendingEmpty.append((marker, tight))
                     } else {
@@ -321,6 +322,9 @@ enum IWATable {
             }
             index += 1
         }
+        // A table attachment is visible content: emit pending empty markers
+        // before the table, so a split cannot discard a numbered item.
+        if flushEmptyAtEnd { parts += pendingEmpty }
         var output = ""
         for (i, part) in parts.enumerated() {
             if i > 0 { output += part.tight ? "\n" : "\n\n" }
@@ -335,7 +339,7 @@ enum IWATable {
     /// fresh count and the same style continues it. A restarted list is its own
     /// list, so it is set off by a blank line rather than tight-joined.
     private static func nextListMarker(_ kind: ListMarker, style: UInt64?, at offset: Int,
-                                       _ body: BodyStorage, _ lists: inout ListState) -> (marker: String, tight: Bool) {
+                                       _ body: BodyStorage, _ lists: inout ListState) throws -> (marker: String, tight: Bool) {
         switch kind {
         case .bullet:
             let tight = style == lists.lastList
@@ -348,6 +352,7 @@ enum IWATable {
             } else if style != lists.orderedList {
                 lists.counter = 0; lists.orderedList = style
             }
+            guard lists.counter < Int(maxListStart) else { throw PicoDocsError.fileCorrupted }
             lists.counter += 1
             let tight = style == lists.lastList && restart == nil
             lists.lastList = style
