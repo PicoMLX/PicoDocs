@@ -50,7 +50,7 @@ public struct PDFConverter: DocumentConverter {
             if !text.isEmpty {
                 sections.append(DocumentSection(
                     kind: .body,
-                    markdown: MarkdownLiteral.escapeBackslashes(text),
+                    markdown: text,
                     pageRange: pageNumber...pageNumber,
                     metadata: ["extractionMethod": "pdfkit"]
                 ))
@@ -91,7 +91,7 @@ public struct PDFConverter: DocumentConverter {
                     if !ocrText.isEmpty {
                         sections.append(DocumentSection(
                             kind: .body,
-                            markdown: MarkdownLiteral.escapeBackslashes(ocrText),
+                            markdown: ocrText,
                             pageRange: pageNumber...pageNumber,
                             metadata: ["extractionMethod": "vision-ocr"]
                         ))
@@ -110,6 +110,21 @@ public struct PDFConverter: DocumentConverter {
             // surface that error rather than a misleading "empty document".
             if let firstOCRError { throw firstOCRError }
             throw PicoDocsError.emptyDocument
+        }
+
+        // The renderer joins pages into one Markdown stream. Match that context
+        // while retaining page provenance and OCR metadata on each section.
+        let escapeCounts = MarkdownLiteral.backslashEscapeCounts(sections.map(\.markdown).joined(separator: "\n\n"))
+        var sourceOffset = 0
+        for index in sections.indices {
+            var units: [UInt16] = []
+            for unit in sections[index].markdown.utf16 {
+                units.append(unit)
+                units += Array(repeating: 0x5C, count: escapeCounts[sourceOffset])
+                sourceOffset += 1
+            }
+            sections[index].markdown = String(decoding: units, as: UTF16.self)
+            sourceOffset += 2
         }
 
         let attributes = document.documentAttributes

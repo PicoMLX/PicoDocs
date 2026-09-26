@@ -23,6 +23,28 @@ import PDFKit
 
 @Suite("OCR (Vision)")
 struct OCRTests {
+    @Test func PDFCodeFencesSpanPageBoundaries() async throws {
+        let data = NSMutableData()
+        let consumer = CGDataConsumer(data: data as CFMutableData)!
+        var box = CGRect(x:0,y:0,width:800,height:200)
+        let context = CGContext(consumer:consumer,mediaBox:&box,nil)!
+        let attributes: [CFString:Any] = [kCTFontAttributeName:CTFontCreateWithName("Courier" as CFString,28,nil)]
+        for text in ["```", #"a\*b"#, "```"] {
+            context.beginPDFPage(nil)
+            context.textPosition = CGPoint(x:30,y:80)
+            CTLineDraw(CTLineCreateWithAttributedString(CFAttributedStringCreate(nil,text as CFString,attributes as CFDictionary)!),context)
+            context.endPDFPage()
+        }
+        context.closePDF()
+        let result = try await PicoDocsEngine.convert(data:data as Data,filename:"pages.pdf")
+        #expect(result.sections.count == 3)
+        #expect(result.sections[1].pageRange == 2...2)
+        for format in [ExportFileType.html,.plaintext] {
+            let output = try DocumentRenderer.render(result,to:format)
+            #expect(output.contains(#"a\*b"#)); #expect(!output.contains(#"a\\*b"#))
+        }
+    }
+
 
     @Test("Selectable PDF backslashes survive rendered exports")
     func selectablePDFLiteralBackslashes() async throws {

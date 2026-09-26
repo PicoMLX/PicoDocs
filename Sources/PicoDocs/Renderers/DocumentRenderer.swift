@@ -552,7 +552,10 @@ public enum DocumentRenderer {
 
             let leadingBare = bareListMarker(trimmed)
             let next = i + 1
+            let prospectiveBase = indentWidth(line)
+            let prospectiveContent = prospectiveBase + trimmed.count + 1
             let adjacent = next < lines.count && !isBlank(lines[next])
+                && (indentWidth(lines[next]) < prospectiveBase + 2 || indentWidth(lines[next]) >= prospectiveContent)
                 && (listMarker(lines[next].trimmingCharacters(in: .whitespaces)) ?? bareListMarker(lines[next].trimmingCharacters(in: .whitespaces))) == leadingBare
             var following = next
             while following < lines.count, isBlank(lines[following]) { following += 1 }

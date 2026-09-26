@@ -14,6 +14,26 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func alternateBodyComponentKeepsCodeAndPairedEscapes() async throws {
+        let source = "`a\\*b`\n\n\\*literal\\*\n\n```\nc\\*d\n```"
+        let data = Self.makeZip([(name:"Index/Alternate.iwa",data:Self.snappyFrame(Self.makeIWAStream(runs:[source])))])
+        let result = try await PicoDocsEngine.convert(data:data,filename:"alternate.pages")
+        for format in [ExportFileType.html,.plaintext] {
+            let text = try DocumentRenderer.render(result,to:format)
+            #expect(text.contains(#"a\*b"#)); #expect(text.contains(#"c\*d"#)); #expect(text.contains(#"\*literal\*"#))
+        }
+    }
+
+    @Test func bareMarkersRequireConsumableAdjacentIndentation() throws {
+        let result = ConverterResult(sections:[.init(markdown:"1234.\n  1. child")])
+        let html = try DocumentRenderer.render(result,to:.html)
+        #expect(html.contains("<p>1234.</p>")); #expect(!html.contains(#"start="1234""#))
+        for source in ["1234.\n1235. sibling", "1234.\n      1. child"] {
+            let confirmed = try DocumentRenderer.render(ConverterResult(sections:[.init(markdown:source)]),to:.html)
+            #expect(confirmed.contains(#"start="1234""#))
+        }
+    }
+
     @Test func verbatimEscapesKeepPairedPunctuationLiteral() async throws {
         for literal in [#"\*literal\*"#, #"\`code\`"#, #"\[label\](url)"#, #"\\\*literal\\\*"#] {
             let rtf = #"{\rtf1\ansi "# + literal.replacingOccurrences(of:"\\",with:"\\\\") + "}"
