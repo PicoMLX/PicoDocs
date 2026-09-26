@@ -41,8 +41,10 @@ public struct PPTXExporter: DocumentExporter {
         try pkg.addXML("ppt/slideLayouts/_rels/slideLayout1.xml.rels", PPTXTemplates.slideLayoutRels)
         try pkg.addXML("ppt/theme/theme1.xml", PPTXTemplates.theme)
         for (i, slide) in effectiveSlides.enumerated() {
-            try pkg.addXML("ppt/slides/slide\(i + 1).xml", Self.slideXML(slide))
-            try pkg.addXML("ppt/slides/_rels/slide\(i + 1).xml.rels", PPTXTemplates.slideRels)
+            var relationships: [String] = []
+            try pkg.addXML("ppt/slides/slide\(i + 1).xml", Self.slideXML(slide, relationships: &relationships))
+            let rels = PPTXTemplates.slideRels.replacingOccurrences(of: "</Relationships>", with: relationships.joined() + "</Relationships>")
+            try pkg.addXML("ppt/slides/_rels/slide\(i + 1).xml.rels", rels)
         }
         return try pkg.data()
     }
@@ -54,8 +56,17 @@ public struct PPTXExporter: DocumentExporter {
         var ordered: Bool? = nil
         var number: Int = 1
         var level: Int = 0
+        var inlines: [MarkdownInline]? = nil
+
+        init(text: String, ordered: Bool? = nil, number: Int = 1, level: Int = 0, inlines: [MarkdownInline]? = nil) {
+            self.text = text; self.ordered = ordered; self.number = number; self.level = level; self.inlines = inlines
+        }
+        init(markdown: String, ordered: Bool? = nil, number: Int = 1, level: Int = 0) {
+            let nodes = MarkdownInlineParser.parse(markdown)
+            self.init(text: nodes.plainText, ordered: ordered, number: number, level: level, inlines: nodes)
+        }
     }
-    struct Slide { let title: String; let body: [Paragraph] }
+    struct Slide { let title: String; let body: [Paragraph]; var titleInlines: [MarkdownInline]? = nil }
 
     private static func slides(from result: ConverterResult) throws -> [Slide] {
         // Preserve associated tables, including slides containing only tables.
@@ -88,16 +99,18 @@ public struct PPTXExporter: DocumentExporter {
         // Otherwise segment the merged Markdown at top-level headings.
         var slides: [Slide] = []
         var title = ""
+        var titleInlines: [MarkdownInline]?
         var body: [Paragraph] = []
         var started = false
-        func flush() { if started { slides.append(Slide(title: title, body: body)) } }
+        func flush() { if started { slides.append(Slide(title: title, body: body, titleInlines: titleInlines)) } }
 
         for block in MarkdownBlockParser.parse(result.markdown()) {
             if case .heading(let level, let text) = block, level <= 2 {
                 flush()
                 // The title placeholder shows visible text, not Markdown syntax
                 // (`# **Q4** results` -> "Q4 results"), matching the body lines.
-                title = plain(text)
+                titleInlines = MarkdownInlineParser.parse(text)
+                title = titleInlines?.plainText ?? ""
                 body = []
                 started = true
             } else {
@@ -114,19 +127,19 @@ public struct PPTXExporter: DocumentExporter {
         for block in blocks {
             switch block {
             case .heading(_, let text):
-                lines.append(Paragraph(text: plain(text)))
+                lines.append(Paragraph(markdown: text))
             case .paragraph(let text):
-                lines.append(Paragraph(text: plain(normalizedBreaks(text))))
+                lines.append(Paragraph(markdown: normalizedBreaks(text)))
             case .list(let list):
                 for item in list.paragraphs() {
-                    lines.append(Paragraph(text: plain(normalizedBreaks(item.text)), ordered: item.continuation ? nil : item.ordered, number: item.number ?? 1, level: item.level))
+                    lines.append(Paragraph(markdown: normalizedBreaks(item.text), ordered: item.continuation ? nil : item.ordered, number: item.number ?? 1, level: item.level))
                 }
             case .code(let code):
                 for line in code.components(separatedBy: "\n") { lines.append(Paragraph(text: line)) }
             case .blockquote(let quoteLines):
-                for line in quoteLines { lines.append(Paragraph(text: plain(line))) }
+                for line in quoteLines { lines.append(Paragraph(markdown: line)) }
             case .table(let rows):
-                for row in rows { lines.append(Paragraph(text: row.map { plain($0.replacingOccurrences(of: "<br>", with: "\n")) }.joined(separator: "\t"))) }
+                for row in rows { lines.append(Paragraph(markdown: row.map { $0.replacingOccurrences(of: "<br>", with: "\n") }.joined(separator: "\t"))) }
             case .rule:
                 continue
             }
@@ -150,20 +163,24 @@ public struct PPTXExporter: DocumentExporter {
 
     // MARK: - Slide part
 
-    private static func slideXML(_ slide: Slide) -> String {
-        let titleRuns = "<a:p><a:r><a:t>\(OOXMLPackageWriter.escape(slide.title))</a:t></a:r></a:p>"
+    private static func slideXML(_ slide: Slide, relationships: inout [String]) -> String {
+        let titleRuns = "<a:p>\(runs(slide.titleInlines ?? [.text(slide.title)], relationships: &relationships))</a:p>"
         let bodyParagraphs: String
         if slide.body.isEmpty {
             bodyParagraphs = "<a:p/>"
         } else {
             bodyParagraphs = slide.body.map { paragraph in
                 let properties: String
+                var nodes = paragraph.inlines ?? [.text(paragraph.text)]
                 switch paragraph.ordered {
+                case true? where !(1...32767).contains(paragraph.number):
+                    properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buNone/></a:pPr>"
+                    nodes.insert(.text("\(paragraph.number). "), at: 0)
                 case true?: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buAutoNum type=\"arabicPeriod\" startAt=\"\(paragraph.number)\"/></a:pPr>"
                 case false?: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buChar char=\"•\"/></a:pPr>"
                 case nil: properties = "<a:pPr><a:buNone/></a:pPr>"
                 }
-                let runs = paragraph.text.components(separatedBy: "\n").map { "<a:r><a:t>\(OOXMLPackageWriter.escape($0))</a:t></a:r>" }.joined(separator: "<a:br/>")
+                let runs = runs(nodes, relationships: &relationships)
                 return "<a:p>\(properties)\(runs)</a:p>"
             }.joined()
         }
@@ -188,6 +205,36 @@ public struct PPTXExporter: DocumentExporter {
         accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" \
         accent6="accent6" hlink="hlink" folHlink="folHlink"/></p:clrMapOvr></p:sld>
         """
+    }
+
+    /// Hyperlinks belong to runs and reference this slide's relationship part.
+    private static func runs(_ nodes: [MarkdownInline], bold: Bool = false, italic: Bool = false, link: String? = nil, relationships: inout [String]) -> String {
+        var output = ""
+        for node in nodes {
+            switch node {
+            case .strong(let children):
+                output += runs(children, bold: true, italic: italic, link: link, relationships: &relationships)
+            case .emphasis(let children):
+                output += runs(children, bold: bold, italic: true, link: link, relationships: &relationships)
+            case .link(let label, let destination):
+                let id = "hyperlink\(relationships.count + 1)"
+                let allowed = CharacterSet.urlFragmentAllowed.union(.urlQueryAllowed).union(.urlPathAllowed)
+                    .union(CharacterSet(charactersIn: ":/?#[]@!$&'()*+,;=%"))
+                let target = destination.addingPercentEncoding(withAllowedCharacters: allowed) ?? destination
+                relationships.append("<Relationship Id=\"\(id)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"\(OOXMLPackageWriter.escapeAttribute(target))\" TargetMode=\"External\"/>")
+                output += runs(label, bold: bold, italic: italic, link: id, relationships: &relationships)
+            default:
+                let text = [node].plainText
+                var attributes = bold ? " b=\"1\"" : ""
+                if italic { attributes += " i=\"1\"" }
+                let hyperlink = link.map { "<a:hlinkClick r:id=\"\($0)\"/>" } ?? ""
+                let properties = attributes.isEmpty && hyperlink.isEmpty ? "" : "<a:rPr\(attributes)>\(hyperlink)</a:rPr>"
+                output += text.components(separatedBy: "\n").map {
+                    "<a:r>\(properties)<a:t>\(OOXMLPackageWriter.escape($0))</a:t></a:r>"
+                }.joined(separator: "<a:br/>")
+            }
+        }
+        return output
     }
 
     // MARK: - Package parts (dynamic)

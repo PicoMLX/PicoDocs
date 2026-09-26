@@ -88,7 +88,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             // recognizes rather than `.bin`/octet-stream.
             let mime = section.metadata["mimeType"]
             var ext = (name as NSString?)?.pathExtension.lowercased() ?? ""
-            if ext.isEmpty || ext == "xml" || ext == "rels" { ext = OfficeMediaType.fileExtension(forMIME: mime ?? "") }
+            if OfficeMediaType.mimeType(forExtension: ext) == "application/octet-stream" { ext = OfficeMediaType.fileExtension(forMIME: mime ?? "") }
             let stem = (name as NSString?)?.deletingPathExtension ?? ""
 
             // Allocate a unique media filename (suffix on basename collisions) so

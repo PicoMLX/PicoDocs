@@ -28,9 +28,13 @@ struct MarkdownList: Equatable {
         let text: String
     }
 
+    private static func indentation(_ line: String) -> Int {
+        line.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
+    }
+
     private static func marker(_ line: String) -> Marker? {
         let whitespace = line.prefix { $0 == " " || $0 == "\t" }
-        let indent = whitespace.reduce(0) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
+        let indent = indentation(line)
         let content = String(line.dropFirst(whitespace.count))
         if let first = content.first, "-*+".contains(first),
            content.count == 1 || content.dropFirst().hasPrefix(" ") {
@@ -66,7 +70,7 @@ struct MarkdownList: Equatable {
                     index = childIndex
                 }
             } else {
-                let indent = lines[next].prefix { $0 == " " }.count
+                let indent = indentation(lines[next])
                 guard !blank, indent > first.indent, !list.items.isEmpty else { break }
                 list.items[list.items.count - 1].appendText(lines[next].trimmingCharacters(in: .whitespaces))
                 index = next + 1

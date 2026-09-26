@@ -29,6 +29,7 @@ indirect enum MarkdownInline: Equatable {
 }
 
 enum MarkdownInlineParser {
+    private static let punctuation = ##"!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"##
 
     /// Parses an inline Markdown string into structured nodes. Code spans, links,
     /// images, and footnote references are pulled out by a single scan (so their
@@ -83,7 +84,7 @@ enum MarkdownInlineParser {
         while i < chars.count {
             let c = chars[i]
 
-            if c == "\\", i + 1 < chars.count, #"\`*_{}[]<>()#+-.!|"#.contains(chars[i + 1]) {
+            if c == "\\", i + 1 < chars.count, punctuation.contains(chars[i + 1]) {
                 run.append(c); run.append(chars[i + 1]); i += 2; continue
             }
 
@@ -198,7 +199,6 @@ enum MarkdownInlineParser {
     private static func unescape(_ text: String) -> String {
         guard text.contains("\\") else { return text }
         var out = "", index = text.startIndex
-        let punctuation = ##"!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"##
         while index < text.endIndex {
             let next = text.index(after: index)
             if text[index] == "\\", next < text.endIndex, punctuation.contains(text[next]) {
@@ -210,15 +210,12 @@ enum MarkdownInlineParser {
 
     // MARK: - Emphasis
 
-    private static let emphasisRegex = try! NSRegularExpression(
-        pattern: #"\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*|\*\*(?=\S)(.+?)(?<=\S)\*\*|\*(?=\S)(.+?)(?<=\S)\*"#)
-
     static func parseEmphasis(_ text: String) -> [MarkdownInline] {
         var protected = "", escapes: [String] = []
         var index = text.startIndex
         while index < text.endIndex {
             let next = text.index(after: index)
-            if text[index] == "\\", next < text.endIndex, #"\`*_{}[]<>()#+-.!|"#.contains(text[next]) {
+            if text[index] == "\\", next < text.endIndex, punctuation.contains(text[next]) {
                 escapes.append(String(text[next]))
                 protected += "\u{E010}\(escapes.count - 1)\u{E011}"
                 index = text.index(after: next)
@@ -252,25 +249,73 @@ enum MarkdownInlineParser {
     private static let escapeRegex = try! NSRegularExpression(pattern: "\u{E010}([0-9]+)\u{E011}")
 
     private static func parseEmphasisProtected(_ text: String) -> [MarkdownInline] {
-        let ns = text as NSString
-        var nodes: [MarkdownInline] = []
-        var offset = 0
-        for match in emphasisRegex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-            if match.range.location > offset {
-                nodes.append(.text(ns.substring(with: NSRange(location: offset, length: match.range.location - offset))))
-            }
-            for group in 1...3 where match.range(at: group).location != NSNotFound {
-                let children = parseEmphasisProtected(ns.substring(with: match.range(at: group)))
-                switch group {
-                case 1: nodes.append(.strong([.emphasis(children)]))
-                case 2: nodes.append(.strong(children))
-                default: nodes.append(.emphasis(children))
-                }
-            }
-            offset = NSMaxRange(match.range)
+        // Keep unmatched delimiter runs on a stack. A closing run is consumed
+        // from its left edge, so *** can close an inner * and then an outer **.
+        struct Frame {
+            var count: Int
+            let canClose: Bool
+            var nodes: [MarkdownInline]
         }
-        if offset < ns.length { nodes.append(.text(ns.substring(from: offset))) }
-        return nodes
+        let chars = Array(text)
+        var frames: [Frame] = [Frame(count: 0, canClose: false, nodes: [])]
+        var index = 0
+        func punctuation(_ c: Character?) -> Bool {
+            guard let c else { return false }
+            return c.unicodeScalars.allSatisfy { CharacterSet.punctuationCharacters.union(.symbols).contains($0) }
+        }
+        func appendText(_ value: String) {
+            guard !value.isEmpty else { return }
+            let last = frames.count - 1
+            if case .text(let previous)? = frames[last].nodes.last {
+                frames[last].nodes[frames[last].nodes.count - 1] = .text(previous + value)
+            } else { frames[last].nodes.append(.text(value)) }
+        }
+        while index < chars.count {
+            guard chars[index] == "*" else {
+                let start = index
+                while index < chars.count, chars[index] != "*" { index += 1 }
+                appendText(String(chars[start..<index]))
+                continue
+            }
+            let start = index
+            while index < chars.count, chars[index] == "*" { index += 1 }
+            var remaining = index - start
+            let before: Character? = start > 0 ? chars[start - 1] : nil
+            let after: Character? = index < chars.count ? chars[index] : nil
+            let beforeSpace = before?.isWhitespace ?? true
+            let afterSpace = after?.isWhitespace ?? true
+            let opens = !afterSpace && (!punctuation(after) || beforeSpace || punctuation(before))
+            let closes = !beforeSpace && (!punctuation(before) || afterSpace || punctuation(after))
+            while closes, remaining > 0, frames.count > 1 {
+                let top = frames.count - 1
+                // CommonMark's rule of three disambiguates intraword runs.
+                if (opens || frames[top].canClose), (frames[top].count + remaining) % 3 == 0,
+                   (frames[top].count % 3 != 0 || remaining % 3 != 0) { break }
+                let used = frames[top].count >= 2 && remaining >= 2 && !(frames[top].count == 3 && remaining == 3) ? 2 : 1
+                let children = frames[top].nodes
+                let node: MarkdownInline = used == 2 ? .strong(children) : .emphasis(children)
+                frames[top].count -= used
+                remaining -= used
+                if frames[top].count == 0 {
+                    frames.removeLast()
+                    frames[frames.count - 1].nodes.append(node)
+                } else { frames[top].nodes = [node] }
+            }
+            if remaining > 0 {
+                if opens, frames.count < 128 {
+                    frames.append(Frame(count: remaining, canClose: closes, nodes: []))
+                } else { appendText(String(repeating: "*", count: remaining)) }
+            }
+        }
+        while frames.count > 1 {
+            let frame = frames.removeLast()
+            appendText(String(repeating: "*", count: frame.count))
+            for node in frame.nodes {
+                if case .text(let value) = node { appendText(value) }
+                else { frames[frames.count - 1].nodes.append(node) }
+            }
+        }
+        return frames[0].nodes
     }
 
     private static func firstIndex(of character: Character, in chars: [Character], from start: Int) -> Int? {

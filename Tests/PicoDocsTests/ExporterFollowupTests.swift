@@ -4,6 +4,42 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func nestedEmphasisSharedClosersAndAllPunctuationEscapes() {
+        #expect(MarkdownInlineParser.parse("**bold *italic***") == [.strong([.text("bold "), .emphasis([.text("italic")])])])
+        #expect(MarkdownInlineParser.parse("*italic **bold***") == [.emphasis([.text("italic "), .strong([.text("bold")])])])
+        #expect(MarkdownInlineParser.parse("**before *inside `code`* after**").plainText == "before inside code after")
+        #expect(MarkdownInlineParser.parse(#"Cost: \$5, literal \~text\~ and \>"#).plainText == "Cost: $5, literal ~text~ and >")
+        #expect(MarkdownInlineParser.parse(#"[\$5](https://example.com) and `\$5`"#).plainText == #"$5 and \$5"#)
+    }
+
+    @Test func slideHyperlinksNumberBoundsAndTabContinuations() throws {
+        let source = "# [Title](https://example.com/title)\n\nVisit **[bold](https://example.com/a?x=1&y=2)**\n\n0. Zero\n32768. Large\n\n- first\n\tcontinued\n\t- [child](https://example.com/child)"
+        let data = try PicoDocsEngine.write(markdown: source, to: .pptx)
+        let slide = try xml(data, "ppt/slides/slide1.xml")
+        let rels = try xml(data, "ppt/slides/_rels/slide1.xml.rels")
+        #expect(slide.components(separatedBy: "<a:hlinkClick ").count - 1 == 3)
+        #expect(slide.contains(#"<a:rPr b="1"><a:hlinkClick"#))
+        #expect(rels.contains(#"Target="https://example.com/a?x=1&amp;y=2" TargetMode="External""#))
+        #expect(rels.contains("/title")); #expect(rels.contains("/child"))
+        #expect(!slide.contains(#"startAt="0""#)); #expect(!slide.contains(#"startAt="32768""#))
+        #expect(slide.contains(">0. </a:t>")); #expect(slide.contains(">32768. </a:t>"))
+        #expect(slide.contains(">first continued</a:t>"))
+        #expect(slide.contains(#"<a:pPr lvl="1"><a:buChar"#))
+        let docx = try PicoDocsEngine.write(markdown: "- first\n\tcontinued", to: .docx)
+        let document = try xml(docx, "word/document.xml")
+        #expect(document.components(separatedBy: "<w:p>").count - 1 == 1)
+        #expect(document.contains("continued"))
+    }
+
+    @Test func unsupportedMediaExtensionUsesKnownMIME() throws {
+        let image = DocumentSection(kind: .image, markdown: "", sourcePath: "avatar.dat", metadata: ["base64": "AQID", "mimeType": "image/png"])
+        let data = try PicoDocsEngine.write(ConverterResult(sections: [.init(markdown: "![Avatar](avatar.dat)"), image]), to: .docx)
+        let archive = try #require(Archive(data: data, accessMode: .read))
+        #expect(archive["word/media/avatar.png"] != nil)
+        #expect(archive["word/media/avatar.dat"] == nil)
+        #expect(try xml(data, "[Content_Types].xml").contains(#"Extension="png" ContentType="image/png""#))
+    }
+
     @Test func structuredEmphasisFlankingAndLiteralPaths() {
         #expect(MarkdownInlineParser.parse("**before `code` after**") == [.strong([.text("before "), .code("code"), .text(" after")])])
         #expect(MarkdownInlineParser.parse("*see [link](https://example.com)*") == [.emphasis([.text("see "), .link(label: [.text("link")], destination: "https://example.com")])])

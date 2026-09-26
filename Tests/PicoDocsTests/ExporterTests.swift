@@ -76,7 +76,7 @@ struct ExporterTests {
             #expect(text(docx, "word/document.xml")?.contains("<w:drawing>") == true)
             let recovered = try await PicoDocsEngine.convert(data: docx, filename: "roundtrip.docx")
             #expect(recovered.sections.contains { $0.kind == .image })
-            if path == "chart.a&b" { #expect(text(docx, "[Content_Types].xml")?.contains("a&amp;b") == true) }
+            if path == "chart.a&b" { #expect(text(docx, "[Content_Types].xml")?.contains("image/png") == true) }
             if path == "chart#1.png" { #expect(text(docx, "word/_rels/document.xml.rels")?.contains("chart%231.png") == true) }
         }
     }
@@ -383,7 +383,9 @@ struct ExporterTests {
     func pptxTitleIsPlain() throws {
         let data = try PicoDocsEngine.write(markdown: "# **Q4** [results](https://example.com)\n\nUp", to: .pptx)
         let slide = try #require(text(data, "ppt/slides/slide1.xml"))
-        #expect(slide.contains(">Q4 results</a:t>"))
+        #expect(slide.contains(">Q4</a:t>"))
+        #expect(slide.contains(">results</a:t>"))
+        #expect(slide.contains("<a:hlinkClick"))
         #expect(!slide.contains("**"))
         #expect(!slide.contains("example.com"))
     }
