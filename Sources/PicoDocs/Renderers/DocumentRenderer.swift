@@ -463,7 +463,7 @@ public enum DocumentRenderer {
                 // (second row), so all-dash data rows elsewhere are preserved.
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.unescape($0) }
+                    let cells = parseTableRow(lines[i]).map { stripInline(MarkdownTableCell.decodeCodePipes($0)) }
                     if !(rowIndex == 1 && isTableSeparatorRow(cells)) {
                         rows.append(cells.map { csvField($0) }.joined(separator: ","))
                     }
@@ -526,7 +526,7 @@ public enum DocumentRenderer {
                 var rows: [[String]] = []
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i])
+                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.decodeCodePipes($0) }
                     // The header/body separator is conventionally the second row;
                     // only drop an all-dash row there, so real data rows that
                     // happen to be all dashes elsewhere are kept.
@@ -654,8 +654,8 @@ public enum DocumentRenderer {
     /// inside an open list, so a lone `-` or `2020.` line never starts one.
     private static func bareListMarker(_ line: String) -> ListKind? {
         if line == "-" || line == "*" || line == "+" { return .unordered }
-        let digits = line.prefix { $0.isNumber }
-        return !digits.isEmpty && line.dropFirst(digits.count) == "." ? .ordered : nil
+        let digits = line.prefix { $0.isASCII && $0.isNumber }
+        return (1...9).contains(digits.count) && line.dropFirst(digits.count) == "." ? .ordered : nil
     }
 
     /// The number an ordered list starts at (`5. x` → 5), 1 when it isn't a

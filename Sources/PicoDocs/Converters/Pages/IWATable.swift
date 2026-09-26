@@ -713,32 +713,41 @@ enum IWATable {
     /// bullets, …) is not a list. A style that inherits its marker array instead of
     /// carrying its own resolves through the parent chain (as names/traits do).
     /// Nesting levels beyond the first aren't resolved yet, so nested items render flat.
-    private static func listMarker(of listStyleID: UInt64, in objects: [UInt64: IWAArchive.Object],
-                                   visited: Set<UInt64> = []) -> ListMarker? {
-        guard !visited.contains(listStyleID), let object = objects[listStyleID] else { return nil }
-        var reader = ProtobufReader(object.payload)
-        while let field = reader.next() {
-            guard field.number == 11 else { continue }
-            // Field 11 is a repeated varint; take level 0. It may be unpacked (one
-            // varint field per level) or packed (all levels in one length field).
-            let level0: UInt64?
-            switch field.value {
-            case .varint(let value): level0 = value
-            case .length(let bytes): level0 = firstPackedVarint(bytes)
-            default: level0 = nil
+    private static func listMarker(of listStyleID: UInt64, in objects: [UInt64: IWAArchive.Object]) -> ListMarker? {
+        // Iterative DFS preserves parent precedence, visits shared ancestors once,
+        // and bounds work on hostile acyclic graphs as well as cycles.
+        var pending: [(UInt64, Int)] = [(listStyleID, 0)]
+        var seen: Set<UInt64> = []
+        var remaining = 4096
+        while let (id, depth) = pending.popLast(), remaining > 0 {
+            remaining -= 1
+            guard depth < 64, seen.insert(id).inserted, let object = objects[id] else { continue }
+            var hasMarker = false
+            var reader = ProtobufReader(object.payload)
+            markerFields: while let field = reader.next() {
+                guard field.number == 11 else { continue }
+                // Field 11 is a repeated varint; take level 0. It may be unpacked (one
+                // varint field per level) or packed (all levels in one length field).
+                let level0: UInt64?
+                switch field.value {
+                case .varint(let value): level0 = value
+                case .length(let bytes): level0 = firstPackedVarint(bytes)
+                default: level0 = nil
+                }
+                guard let level0 else { continue }
+                hasMarker = true
+                switch level0 {
+                case 2: return .bullet
+                case 3: return .ordered
+                default: break markerFields
+                }
             }
-            guard let level0 else { continue }
-            switch level0 {
-            case 2: return .bullet
-            case 3: return .ordered
-            default: return nil
+            if !hasMarker {
+                for parent in styleArchive(object).parents.reversed() where !seen.contains(parent) {
+                    guard pending.count < 4096 else { break }
+                    pending.append((parent, depth + 1))
+                }
             }
-        }
-        // No marker array of its own — inherit through the parent chain.
-        var seen = visited
-        seen.insert(listStyleID)
-        for parent in styleArchive(object).parents {
-            if let marker = listMarker(of: parent, in: objects, visited: seen) { return marker }
         }
         return nil
     }
@@ -1265,9 +1274,7 @@ enum IWATable {
                 || (0x7F...0x9F).contains(value)             // DEL + C1 controls
                 || value == 0xFFFC                           // object-replacement placeholder
         }
-        let escaped = String(scalars)
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "|", with: "\\|")
+        let escaped = String(scalars).map { #"\`*_{}[]<>|"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
         return escaped.trimmingCharacters(in: .whitespaces)
     }
 }

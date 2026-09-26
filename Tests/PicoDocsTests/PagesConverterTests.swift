@@ -14,6 +14,61 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func tableCodePipesAndLiteralCellsSurviveCSVDecoding() async throws {
+        for value in ["a|b", #"a\|b"#, #"a\\|b"#, #"a\\path | b"#] {
+            let converted = try HTMLToMarkdown.convert(html: "<table><tr><td><code>\(value)</code></td></tr></table>")
+            let result = ConverterResult(sections: [.init(markdown: converted.markdown)])
+            #expect(try DocumentRenderer.render(result, to: .csv) == value)
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(value))
+            #expect(try DocumentRenderer.render(result, to: .html).contains("<code>\(value)</code>"))
+        }
+        let literal = "*literal* `code` [label](target)"
+        let converted = try HTMLToMarkdown.convert(html: "<table><tr><td>\(literal)</td><td><strong>Bold</strong></td></tr></table>")
+        #expect(try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: converted.markdown)]), to: .csv) == literal + ",Bold")
+        let document = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>\(literal)</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"
+        let word = try await PicoDocsEngine.convert(data: Self.makeZip([(name: "word/document.xml", data: Array(document.utf8))]), filename: "literal.docx")
+        #expect(try DocumentRenderer.render(word, to: .csv) == literal)
+        let csv = try await PicoDocsEngine.convert(data: Data(("value\n" + literal).utf8), filename: "literal.csv")
+        #expect(try DocumentRenderer.render(csv, to: .plaintext).contains(literal))
+        let pages = try await PicoDocsEngine.convert(data: Self.makeListPagesFile(text: "\u{FFFC}", style: .bullet, restarts: [], tableCell: literal), filename: "literal.pages")
+        #expect(try DocumentRenderer.render(pages, to: .csv).contains(literal))
+    }
+
+    @Test func invalidBareOrderedMarkersStayLiteral() throws {
+        for marker in ["1234567890.", "١."] {
+            let result = ConverterResult(sections: [.init(markdown: marker + "\n" + marker)])
+            #expect(try !DocumentRenderer.render(result, to: .html).contains("<ol"))
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(marker))
+        }
+    }
+
+    @Test func deeplyNestedHTMLPreservesListContext() throws {
+        let count = 512
+        let source = "<ul><li>" + String(repeating: "<span>x", count: count) + "1. literal" + String(repeating: "</span>", count: count) + "</li></ul>"
+        let converted = try HTMLToMarkdown.convert(html: source)
+        let rendered = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: converted.markdown)]), to: .plaintext)
+        #expect(rendered.contains(String(repeating: "x", count: count) + "1. literal"))
+    }
+
+    @Test func listStyleInheritanceHasBoundedDepthAndSharedWork() async throws {
+        for (count, duplicated, terminalMarker) in [(8,false,true),(1400,false,true),(40,true,false)] {
+            let reference = Self.lengthField(1, Self.varintField(1, 0) + Self.lengthField(2, Self.varintField(1, 10)))
+            let storage = Self.varintField(1, 0) + Self.lengthField(3, Array("Visible".utf8)) + Self.lengthField(7, reference)
+            var objects: [(id: UInt64, type: UInt64, payload: [UInt8], references: [UInt64])] = [(1,2001,storage,[])]
+            for index in 0..<count {
+                var payload: [UInt8] = []
+                if index + 1 < count {
+                    let parent = Self.lengthField(3, Self.varintField(1, UInt64(11 + index)))
+                    payload = Self.lengthField(1, duplicated ? parent + parent : parent)
+                } else if terminalMarker { payload = Self.varintField(11, 2) }
+                objects.append((UInt64(10 + index),2023,payload,[]))
+            }
+            let data = Self.makeZip([(name: "Index/Document.iwa", data: Self.snappyFrame(Self.makeIWAStream(objects: objects)))])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "styles.pages")
+            #expect(result.markdown() == (count == 8 ? "- Visible" : "Visible"))
+        }
+    }
+
     @Test func numericLiteralListTextMatchesAcceptedMarkerGrammar() async throws {
         let result = try await PicoDocsEngine.convert(data: Self.makeListPagesFile(text: "1234567890. literal\n١. literal", style: .bullet, restarts: []), filename: "markers.pages")
         let html = try DocumentRenderer.render(result, to: .html)

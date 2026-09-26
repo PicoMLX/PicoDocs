@@ -88,7 +88,7 @@ public struct SpreadsheetConverter: DocumentConverter {
         }
         // Markdown table cells are single-line; escape pipes and flatten newlines
         // (including Windows CRLF and bare CR, common in Excel-on-Windows files).
-        return MarkdownTableCell.escapeDelimiters(raw)
+        return raw.map { #"\`*_{}[]<>|"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
             .replacingOccurrences(of: "\r\n", with: " ")
             .replacingOccurrences(of: "\r", with: " ")
             .replacingOccurrences(of: "\n", with: " ")
