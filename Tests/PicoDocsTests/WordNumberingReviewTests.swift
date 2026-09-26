@@ -5,6 +5,18 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func RTFPairedEscapesAndStyleBoundariesStayLiteral() async throws {
+        for literal in [#"\*literal\*"#, #"\`code\`"#, #"\\\*literal\\\*"#] {
+            let rtf = #"{\rtf1\ansi "# + literal.replacingOccurrences(of:"\\",with:"\\\\") + "}"
+            let result = try await PicoDocsEngine.convert(data:Data(rtf.utf8),filename:"paired.rtf")
+            #expect(try DocumentRenderer.render(result,to:.plaintext) == literal)
+            #expect(try DocumentRenderer.render(result,to:.html).contains(literal))
+        }
+        let rtf = #"{\rtf1\ansi \b bold\\\b0  plain}"#
+        let result = try await PicoDocsEngine.convert(data:Data(rtf.utf8),filename:"styled.rtf")
+        #expect(try DocumentRenderer.render(result,to:.html).contains(#"<strong>bold\</strong>"#))
+    }
+
     @Test func RTFBackslashesSurviveProseAndCode() async throws {
         let paragraphs = [#"literal \* and \\server"#, #"`a\*b` and ``c\*d``"#, "```", #"e\*f"#, "```"]
         let rtf = #"{\rtf1\ansi "# + paragraphs.map { $0.replacingOccurrences(of:"\\",with:"\\\\") }.joined(separator:#"\par "#) + "}"
