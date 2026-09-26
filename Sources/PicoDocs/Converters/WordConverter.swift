@@ -103,9 +103,14 @@ public struct WordConverter: DocumentConverter {
             try Task.checkCancellation()
             switch element.tagName().lowercased() {
             case "w:p":
+                defer {
+                    if child(of: element, named: "w:ppr").flatMap({ child(of: $0, named: "w:sectpr") }) != nil { numbering?.sectionBreak() }
+                }
                 if let markdown = renderParagraph(element, relationships: relationships, numbering: numbering), !markdown.isEmpty {
                     blocks.append(markdown)
                 }
+            case "w:sectpr":
+                numbering?.sectionBreak()
             case "w:tbl":
                 let table = renderTable(element, relationships: relationships, numbering: numbering)
                 if !table.isEmpty { blocks.append(table) }
@@ -386,7 +391,7 @@ public struct WordConverter: DocumentConverter {
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
-                cells.append(MarkdownTableCell.escapeDelimiters(cellText)
+                cells.append(cellText.replacingOccurrences(of: "|", with: "\\|")
                     .replacingOccurrences(of: "\r\n", with: "<br>")
                     .replacingOccurrences(of: "\r", with: "<br>")
                     .replacingOccurrences(of: "\n", with: "<br>"))

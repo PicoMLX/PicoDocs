@@ -5,6 +5,39 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func tableEscapesAreCanonicalAndDecodedOnce() async throws {
+        let csv = try await PicoDocsEngine.convert(data: Data("value\n\\* regex".utf8), filename: "literal.csv")
+        let document = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>\* regex</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
+        let word = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8))]), filename: "literal.docx")
+        #expect(word.markdown().contains(#"\\* regex"#))
+        #expect(!word.markdown().contains(#"\\\\* regex"#))
+        for result in [csv, word] {
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                #expect(try DocumentRenderer.render(result, to: format).contains(#"\* regex"#))
+            }
+        }
+    }
+
+    @Test func sectionRestartsLabelsAndDocumentDefaults() async throws {
+        let numbering = """
+        <w:numbering \(ns) xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">
+        <w:abstractNum w:abstractNumId="1" w15:restartNumberingAfterBreak="1">
+        <w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="Article %1:"/></w:lvl>
+        <w:lvl w:ilvl="1"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/></w:lvl>
+        </w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+        </w:numbering>
+        """
+        let styles = "<w:styles \(ns)><w:docDefaults><w:pPrDefault><w:pPr><w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"0\"/></w:numPr></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type=\"paragraph\" w:styleId=\"Named\"><w:pPr/></w:style></w:styles>"
+        func paragraph(_ text: String, properties: String = "") -> String { "<w:p><w:pPr><w:pStyle w:val=\"Named\"/>\(properties)</w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>" }
+        let document = "<w:document \(ns)><w:body>" + paragraph("First") + paragraph("Child", properties: "<w:numPr><w:ilvl w:val=\"1\"/></w:numPr>") + paragraph("Second", properties: "<w:sectPr/>") + paragraph("Restarted") + "</w:body></w:document>"
+        let data = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8)), (name: "word/styles.xml", data: Array(styles.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sections.docx")
+        #expect(result.markdown().contains("Article 1: First"))
+        #expect(result.markdown().contains("1.1. Child"))
+        #expect(result.markdown().contains("Article 2: Second"))
+        #expect(result.markdown().contains("Article 1: Restarted"))
+    }
+
     @Test func literalContinuationAndNestedReadingOrder() throws {
         let xml = try SwiftSoup.parse("<w:p><w:pPr><w:numPr/></w:pPr><w:r><w:t>First</w:t><w:br/><w:t>- literal</w:t><w:br/><w:t>2. literal number</w:t></w:r></w:p>", "", SwiftSoup.Parser.xmlParser())
         let paragraph = try #require(xml.getElementsByTag("w:p").first())

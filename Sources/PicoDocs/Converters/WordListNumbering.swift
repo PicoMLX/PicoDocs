@@ -20,6 +20,7 @@ final class WordListNumbering {
         let format: String   // w:numFmt, e.g. "decimal", "bullet", "none"
         let start: Int       // w:start
         let restart: Int?    // one-based triggering ancestor; zero means never
+        var text: String? = nil
     }
 
     /// abstractNumId → ilvl → level definition.
@@ -33,10 +34,12 @@ final class WordListNumbering {
     private var counters: [String: [Int: Int]] = [:]
     private var markerWidths: [String: [Int: Int]] = [:]
     private var defaultStyle: String?
+    private var documentDefaults: (numID: String?, level: Int?)?
+    private var restartAfterBreak: Set<String> = []
     private var isLibreOffice = false
     private var lastInstance: [String: String] = [:]
     private var resumeAlias: (original: String, replacement: String)?
-    private struct PartialLevel { let format: String?; let start: Int?; let restart: Int? }
+    private struct PartialLevel { let format: String?; let start: Int?; let restart: Int?; var text: String? = nil }
     private var levelOverrides: [String: [Int: PartialLevel]] = [:]
 
     /// Whether `numbering.xml` was found; without it, list paragraphs fall back
@@ -99,7 +102,7 @@ final class WordListNumbering {
         }
         markerWidths[numID] = markerWidths[numID]?.filter { $0.key < ilvl }
 
-        let marker: String
+        var marker: String
         switch definition?.format ?? "bullet" {
         case "none":
             return nil
@@ -110,10 +113,21 @@ final class WordListNumbering {
             let previous = counters[numID]?[ilvl]
             let count = previous.map { min($0, Int.max - 1) + 1 } ?? start
             counters[numID, default: [:]][ilvl] = count
-            marker = "\(count). "
+            let simple = Self.formattedNumber(count, format: definition?.format ?? "decimal") + "."
+            var label = definition?.text ?? simple
+            for level in 0...8 {
+                let effective = effectiveLevel(numID: numID, level: level)
+                let value = counters[numID]?[level] ?? numbers[numID]?.overrides[level] ?? effective?.start ?? 1
+                label = label.replacingOccurrences(of: "%\(level + 1)", with: Self.formattedNumber(value, format: effective?.format ?? "decimal"))
+            }
+            if label == "\(count)." { marker = label + " " }
+            else {
+                let escaped = label.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "*", with: "\\*")
+                marker = "- " + escaped + " "
+            }
         }
         let indent = (0..<ilvl).reduce(0) { $0 + (markerWidths[numID]?[$1] ?? 2) }
-        markerWidths[numID, default: [:]][ilvl] = marker.count
+        markerWidths[numID, default: [:]][ilvl] = marker.hasPrefix("- ") ? 2 : marker.count
         return String(repeating: " ", count: indent) + marker
     }
 
@@ -123,12 +137,12 @@ final class WordListNumbering {
         if base == nil, let style = numberingStyleLinks[number.abstract],
            let linkedID = Self.canonicalID(styleNumbering(style)?.numID),
            let linked = effectiveLevel(numID: linkedID, level: level, visited: visited.union([numID])) {
-            base = Level(format: linked.format, start: numbers[linkedID]?.overrides[level] ?? linked.start, restart: linked.restart)
+            base = Level(format: linked.format, start: numbers[linkedID]?.overrides[level] ?? linked.start, restart: linked.restart, text: linked.text)
         }
         guard let override = levelOverrides[numID]?[level] else { return base }
         return Level(format: override.format ?? base?.format ?? "decimal",
                      start: override.start ?? base?.start ?? 1,
-                     restart: override.restart ?? base?.restart)
+                     restart: override.restart ?? base?.restart, text: override.text ?? base?.text)
     }
 
     // MARK: - Parsing
@@ -136,6 +150,7 @@ final class WordListNumbering {
     private func parseNumbering(_ document: Document) {
         for abstract in (try? document.getElementsByTag("w:abstractNum").array()) ?? [] {
             guard let id = Self.canonicalID(try? abstract.attr("w:abstractNumId")) else { continue }
+            if ["1", "true", "on"].contains((try? abstract.attr("w15:restartNumberingAfterBreak")) ?? "") { restartAfterBreak.insert(id) }
             numberingStyleLinks[id] = Self.child(of: abstract, named: "w:numstylelink").flatMap { try? $0.attr("w:val") }
             var levels: [Int: Level] = [:]
             for level in abstract.children().array() where level.tagName().lowercased() == "w:lvl" {
@@ -143,7 +158,7 @@ final class WordListNumbering {
                 let format = Self.child(of: level, named: "w:numfmt").flatMap { try? $0.attr("w:val") } ?? "decimal"
                 let start = Self.child(of: level, named: "w:start").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) } ?? 1
                 let restart = Self.child(of: level, named: "w:lvlrestart").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
-                levels[ilvl] = Level(format: format, start: max(0, start), restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil })
+                levels[ilvl] = Level(format: format, start: max(0, start), restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil }, text: Self.child(of: level, named: "w:lvltext").flatMap { try? $0.attr("w:val") })
             }
             abstractLevels[id] = levels
         }
@@ -161,7 +176,7 @@ final class WordListNumbering {
                     let format = Self.child(of: level, named: "w:numfmt").flatMap { try? $0.attr("w:val") }
                     let start = Self.child(of: level, named: "w:start").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
                     let restart = Self.child(of: level, named: "w:lvlrestart").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
-                    levelOverrides[id, default: [:]][ilvl] = PartialLevel(format: format, start: start.map { max(0, $0) }, restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil })
+                    levelOverrides[id, default: [:]][ilvl] = PartialLevel(format: format, start: start.map { max(0, $0) }, restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil }, text: Self.child(of: level, named: "w:lvltext").flatMap { try? $0.attr("w:val") })
                 }
             }
             numbers[id] = (abstract, overrides)
@@ -169,6 +184,12 @@ final class WordListNumbering {
     }
 
     private func parseStyles(_ document: Document) {
+        if let defaults = try? document.getElementsByTag("w:docDefaults").first(),
+           let paragraph = Self.child(of: defaults, named: "w:pprdefault").flatMap({ Self.child(of: $0, named: "w:ppr") }),
+           let numPr = Self.child(of: paragraph, named: "w:numpr") {
+            documentDefaults = (Self.child(of: numPr, named: "w:numid").flatMap { try? $0.attr("w:val") },
+                                Self.child(of: numPr, named: "w:ilvl").flatMap { try? $0.attr("w:val") }.flatMap(Int.init))
+        }
         for style in (try? document.getElementsByTag("w:style").array()) ?? [] {
             guard let id = try? style.attr("w:styleId"), !id.isEmpty else { continue }
             if (try? style.attr("w:type")) == "paragraph",
@@ -195,7 +216,34 @@ final class WordListNumbering {
             if numID != nil && level != nil { break }
             current = style.basedOn
         }
+        numID = numID ?? documentDefaults?.numID
+        level = level ?? documentDefaults?.level
         return numID == nil && level == nil ? nil : (numID, level)
+    }
+
+    func sectionBreak() {
+        for (id, number) in numbers where restartAfterBreak.contains(number.abstract) {
+            counters[id] = nil
+            markerWidths[id] = nil
+        }
+        resumeAlias = nil
+    }
+
+    private static func formattedNumber(_ value: Int, format: String) -> String {
+        guard value > 0 else { return String(value) }
+        if format == "lowerLetter" || format == "upperLetter" {
+            var n = value, text = ""
+            while n > 0 { n -= 1; text = String(UnicodeScalar(65 + n % 26)!) + text; n /= 26 }
+            return format == "lowerLetter" ? text.lowercased() : text
+        }
+        if format == "lowerRoman" || format == "upperRoman", value < 4000 {
+            var n = value, text = ""
+            for (amount, symbol) in [(1000,"M"),(900,"CM"),(500,"D"),(400,"CD"),(100,"C"),(90,"XC"),(50,"L"),(40,"XL"),(10,"X"),(9,"IX"),(5,"V"),(4,"IV"),(1,"I")] {
+                while n >= amount { text += symbol; n -= amount }
+            }
+            return format == "lowerRoman" ? text.lowercased() : text
+        }
+        return String(value)
     }
 
     private static func canonicalID(_ value: String?) -> String? {

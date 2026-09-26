@@ -262,7 +262,7 @@ struct ConverterTests {
 
         2. Styled two
 
-           1. Styled nested
+           - a. Styled nested
 
         5. From five
 
