@@ -12,6 +12,9 @@
 //
 
 import Foundation
+#if canImport(ImageIO)
+import ImageIO
+#endif
 
 public struct WordprocessingMLExporter: DocumentExporter {
 
@@ -44,6 +47,21 @@ public struct WordprocessingMLExporter: DocumentExporter {
             try pkg.addData("word/media/\(media.filename)", media.data)
         }
         return try pkg.data()
+    }
+
+    static func imageExtents(_ data: Data) -> (Int, Int) {
+        let maximumWidth = 4_572_000.0, maximumHeight = 3_429_000.0
+        #if canImport(ImageIO)
+        if let source = CGImageSourceCreateWithData(data as CFData, nil),
+           let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+           let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+           let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
+           width.isFinite, height.isFinite, width > 0, height > 0 {
+            let scale = min(maximumWidth / width, maximumHeight / height)
+            return (max(1, Int((width * scale).rounded())), max(1, Int((height * scale).rounded())))
+        }
+        #endif
+        return (Int(maximumWidth), Int(maximumHeight))
     }
 
     // MARK: - Image index, from the .image sections
@@ -346,8 +364,8 @@ public struct WordprocessingMLExporter: DocumentExporter {
             let docPrID = drawingCounter
             let name = OOXMLPackageWriter.escapeAttribute(filename)
             let descr = alt.isEmpty ? "" : " descr=\"\(OOXMLPackageWriter.escapeAttribute(alt))\""
-            // Fixed display size (EMU); WordConverter ignores extents on read.
-            let cx = 4572000, cy = 3429000
+            // Fit the intrinsic aspect ratio inside the existing 5 × 3.75-inch box.
+            let (cx, cy) = WordprocessingMLExporter.imageExtents(image.data)
             return """
             <w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">\
             <wp:extent cx="\(cx)" cy="\(cy)"/>\

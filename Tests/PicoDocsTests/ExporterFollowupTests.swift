@@ -8,6 +8,40 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func flattenedTableHeadingsDoNotAllocateFragments() async throws {
+        let heading = #"<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>"#
+        let xml = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"# + "<w:tbl><w:tr><w:tc><w:p>" + heading + "<w:r><w:t>Details</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p>" + heading + #"<w:bookmarkStart w:id="1" w:name="details"/><w:r><w:t>Details</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p><w:p><w:hyperlink w:anchor="details"><w:r><w:t>Link</w:t></w:r></w:hyperlink></w:p></w:body></w:document>"#
+        let result = try await PicoDocsEngine.convert(data:PagesConverterTests.makeZip([(name:"word/document.xml",data:Array(xml.utf8))]),filename:"table-heading.docx")
+        #expect(result.markdown().contains("[Link](#details)"))
+        #expect(!result.markdown().contains("#details-1"))
+    }
+
+    @Test func namedEmptySheetsTranscodeToOfficeHeadings() async throws {
+        let workbook = try PicoDocsEngine.write(ConverterResult(sections:[.init(title:"Template",kind:.sheet,markdown:"")]),to:.xlsx)
+        let recovered = try await PicoDocsEngine.convert(data:workbook,filename:"empty.xlsx")
+        #expect(try xml(PicoDocsEngine.write(recovered,to:.docx),"word/document.xml").contains("Template"))
+        #expect(try xml(PicoDocsEngine.write(recovered,to:.pptx),"ppt/slides/slide1.xml").contains("Template"))
+        #if canImport(AppKit)
+        #expect(!(try PicoDocsEngine.write(recovered,to:.rtf)).isEmpty)
+        #endif
+    }
+
+    #if canImport(AppKit)
+    @Test func embeddedImagesFitWithoutChangingAspectRatio() throws {
+        for (width,height) in [(20,20),(10,30),(40,10)] {
+            let bitmap = try #require(NSBitmapImageRep(bitmapDataPlanes:nil,pixelsWide:width,pixelsHigh:height,bitsPerSample:8,samplesPerPixel:4,hasAlpha:true,isPlanar:false,colorSpaceName:.deviceRGB,bytesPerRow:0,bitsPerPixel:0))
+            let data = try #require(bitmap.representation(using:.png,properties:[:]))
+            let (cx,cy) = WordprocessingMLExporter.imageExtents(data)
+            #expect(abs(Double(cx) / Double(cy) - Double(width) / Double(height)) < 0.00001)
+            #expect(cx <= 4_572_000); #expect(cy <= 3_429_000)
+            let result = ConverterResult(sections:[.init(kind:.image,markdown:"",sourcePath:"image.png",metadata:["base64":data.base64EncodedString(),"mimeType":"image/png"])])
+            let document = try xml(PicoDocsEngine.write(result,to:.docx),"word/document.xml")
+            #expect(document.contains("<wp:extent cx=\"\(cx)\" cy=\"\(cy)\"/>"))
+            #expect(document.contains("<a:ext cx=\"\(cx)\" cy=\"\(cy)\"/>"))
+        }
+    }
+    #endif
+
     @Test func exportedWordFragmentsSurviveImportAndSecondExport() async throws {
         let source = "[Details](#details) [Again](#details-1)\n\n# Details\n\n# Details"
         let first = try PicoDocsEngine.write(markdown:source,to:.docx)
@@ -230,7 +264,7 @@ struct ExporterFollowupTests {
         let data = try PicoDocsEngine.write(result, to: .xlsx)
         #expect(try xml(data, "xl/workbook.xml").contains(#"name="Template""#))
         #expect(try xml(data, "xl/worksheets/sheet1.xml").contains("<sheetData>"))
-        #expect(throws: PicoDocsError.emptyDocument) { try PicoDocsEngine.write(result, to: .docx) }
+        #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains("Template"))
     }
 
     @Test func emphasizedCodeAndFencedCodeFonts() async throws {

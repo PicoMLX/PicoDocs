@@ -37,10 +37,9 @@ public struct WordConverter: DocumentConverter {
 
         // Map heading bookmarks to their canonical fragments before rendering,
         // so forward internal links survive the DOCX round trip.
-        let headings = try body.getElementsByTag("w:p").array().filter { paragraph in
-            let properties = paragraph.children().first { $0.tagName().lowercased() == "w:ppr" }
-            let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
-            return Self.headingLevel(forStyle: style) != nil
+        var headings = Self.headingParagraphs(in: body)
+        for textBox in try body.getElementsByTag("w:txbxContent") where Self.shouldRenderTextBox(textBox) {
+            headings += Self.headingParagraphs(in: textBox)
         }
         let titles = headings.map { MarkdownInlineParser.parse(Self.renderInline($0, relationships: relationships)).plainText }
         for (heading, slug) in zip(headings, MarkdownHeadingAnchors.slugs(titles)) {
@@ -103,6 +102,25 @@ public struct WordConverter: DocumentConverter {
         sections.append(contentsOf: imageSections)
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
         return ConverterResult(title: info.filename, sections: sections)
+    }
+
+    /// Match the block traversal and its emitted order; headings in flattened
+    /// table cells and ignored revision wrappers do not allocate fragments.
+    private static func headingParagraphs(in container: Element) -> [Element] {
+        var headings: [Element] = []
+        var pending = Array(container.children().array().reversed())
+        while let element = pending.popLast() {
+            switch element.tagName().lowercased() {
+            case "w:p":
+                let properties = element.children().first { $0.tagName().lowercased() == "w:ppr" }
+                let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
+                if headingLevel(forStyle: style) != nil, !renderInline(element, relationships: [:]).trimmingCharacters(in: .whitespaces).isEmpty { headings.append(element) }
+            case "w:sdt":
+                if let content = element.children().first(where: { $0.tagName().lowercased() == "w:sdtcontent" }) { pending += content.children().array().reversed() }
+            default: break
+            }
+        }
+        return headings
     }
 
     // MARK: - Blocks
