@@ -32,10 +32,9 @@ public struct SpreadsheetConverter: DocumentConverter {
             for (name, path) in try file.parseWorksheetPathsAndNames(workbook: workbook) {
                 try Task.checkCancellation()
                 let worksheet = try file.parseWorksheet(at: path)
-                guard let rows = worksheet.data?.rows, !rows.isEmpty else { continue }
+                let rows = worksheet.data?.rows ?? []
 
                 let table = try Self.markdownTable(rows: rows, sharedStrings: sharedStrings, sheetName: name)
-                guard !table.markdown.isEmpty else { continue }
 
                 if let name { sheetNames.append(name) }
                 sections.append(DocumentSection(

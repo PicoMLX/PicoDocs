@@ -24,6 +24,7 @@ public struct PPTXExporter: DocumentExporter {
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .pptx else { throw ExporterError.notAccepted }
+        let result = PicoDocsEngine.withSynthesizedImageReferences(result)
 
         let slides = try Self.slides(from: result)
         let count = max(slides.count, 1)
@@ -89,11 +90,11 @@ public struct PPTXExporter: DocumentExporter {
             let unnumbered = result.sections.filter { $0.slideNumber == nil && $0.kind != .slide && $0.kind != .image }
             if !unnumbered.isEmpty {
                 if groups.first?.isEmpty == true { groups[0] = unnumbered }
-                else { groups.append(unnumbered) }
+                else { groups.insert(unnumbered, at: 0) }
             }
             return groups.map { sections in
                 Slide(title: sections.first(where: { $0.kind == .slide })?.title ?? "",
-                      body: sections.flatMap { bodyLines(MarkdownBlockParser.parse($0.markdown)) })
+                      body: sections.flatMap { bodyLines(OfficeDocumentBlocks.parse(ConverterResult(sections: [$0]))) })
             }
         }
 
@@ -105,7 +106,7 @@ public struct PPTXExporter: DocumentExporter {
         var started = false
         func flush() { if started { slides.append(Slide(title: title, body: body, titleInlines: titleInlines)) } }
 
-        for block in MarkdownBlockParser.parse(result.markdown()) {
+        for block in OfficeDocumentBlocks.parse(result) {
             if case .heading(let level, let text) = block, level <= 2 {
                 flush()
                 // The title placeholder shows visible text, not Markdown syntax
@@ -140,7 +141,14 @@ public struct PPTXExporter: DocumentExporter {
             case .blockquote(let quoteLines):
                 for line in quoteLines { lines.append(Paragraph(markdown: line)) }
             case .table(let rows):
-                for row in rows { lines.append(Paragraph(markdown: row.map { $0.replacingOccurrences(of: "<br>", with: "\n") }.joined(separator: "\t"))) }
+                for row in rows {
+                    var nodes: [MarkdownInline] = []
+                    for (index, cell) in row.enumerated() {
+                        if index > 0 { nodes.append(.text("\t")) }
+                        nodes += MarkdownInlineParser.parse(cell.replacingOccurrences(of: "<br>", with: "\n"))
+                    }
+                    lines.append(Paragraph(text: nodes.plainText, inlines: nodes))
+                }
             case .rule:
                 continue
             }
@@ -243,7 +251,7 @@ public struct PPTXExporter: DocumentExporter {
                 let hyperlink = link.map { "<a:hlinkClick r:id=\"\($0)\"/>" } ?? ""
                 let properties = attributes.isEmpty && hyperlink.isEmpty && font.isEmpty ? "" : "<a:rPr\(attributes)>\(font)\(hyperlink)</a:rPr>"
                 output += text.components(separatedBy: "\n").map {
-                    "<a:r>\(properties)<a:t>\(OOXMLPackageWriter.escape($0))</a:t></a:r>"
+                    "<a:r>\(properties)<a:t\($0.first?.isWhitespace == true || $0.last?.isWhitespace == true ? " xml:space=\"preserve\"" : "")>\(OOXMLPackageWriter.escape($0))</a:t></a:r>"
                 }.joined(separator: "<a:br/>")
             }
         }

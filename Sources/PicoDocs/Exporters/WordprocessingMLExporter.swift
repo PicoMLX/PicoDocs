@@ -21,9 +21,10 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .docx else { throw ExporterError.notAccepted }
+        let result = PicoDocsEngine.withSynthesizedImageReferences(result)
 
         let builder = Builder(images: Self.imageIndex(result.sections))
-        for block in MarkdownBlockParser.parse(result.markdown()) {
+        for block in OfficeDocumentBlocks.parse(result) {
             builder.append(block)
         }
         builder.finishRelationships()
@@ -99,11 +100,11 @@ public struct WordprocessingMLExporter: DocumentExporter {
             if ext.unicodeScalars.contains(where: invalidFilename.contains) { ext = OfficeMediaType.fileExtension(forMIME: mime ?? "") }
             var mediaFilename = "\(base).\(ext)"
             var n = 2
-            while usedFilenames.contains(mediaFilename) {
+            while usedFilenames.contains(mediaFilename.lowercased()) {
                 mediaFilename = "\(base)-\(n).\(ext)"
                 n += 1
             }
-            usedFilenames.insert(mediaFilename)
+            usedFilenames.insert(mediaFilename.lowercased())
 
             let image = IndexedImage(data: data, mediaFilename: mediaFilename)
             if let identity = [section.sourcePath, section.title].compactMap({ $0 }).first(where: { !$0.isEmpty }) {
@@ -384,9 +385,9 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
         private func runProperties(bold: Bool, italic: Bool, monospace: Bool) -> String {
             var inner = ""
+            if monospace { inner += "<w:rStyle w:val=\"PicoCode\"/><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/>" }
             if bold { inner += "<w:b/>" }
             if italic { inner += "<w:i/>" }
-            if monospace { inner += "<w:rStyle w:val=\"PicoCode\"/><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/>" }
             return inner.isEmpty ? "" : "<w:rPr>\(inner)</w:rPr>"
         }
     }
@@ -466,14 +467,14 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 "<w:lvl w:ilvl=\"\(level)\"><w:start w:val=\"1\"/><w:numFmt w:val=\"\(ordered ? "decimal" : "bullet")\"/><w:lvlText w:val=\"\(ordered ? "%\(level + 1)." : "•")\"/><w:pPr><w:ind w:left=\"\((level + 1) * 720)\" w:hanging=\"360\"/></w:pPr></w:lvl>"
             }.joined()
         }
-        var definitions = ""
-        if usedBullet { definitions += "<w:abstractNum w:abstractNumId=\"0\">\(levels(ordered: false))</w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num>" }
+        var definitions = "", instances = ""
+        if usedBullet { definitions += "<w:abstractNum w:abstractNumId=\"0\">\(levels(ordered: false))</w:abstractNum>"; instances += "<w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num>" }
         if !orderedNumIds.isEmpty {
             definitions += "<w:abstractNum w:abstractNumId=\"1\">\(levels(ordered: true))</w:abstractNum>"
             for instance in orderedNumIds {
-                definitions += "<w:num w:numId=\"\(instance.id)\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"\(instance.level)\"><w:startOverride w:val=\"\(instance.start)\"/></w:lvlOverride></w:num>"
+                instances += "<w:num w:numId=\"\(instance.id)\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"\(instance.level)\"><w:startOverride w:val=\"\(instance.start)\"/></w:lvlOverride></w:num>"
             }
         }
-        return OOXMLPackageWriter.xmlDeclaration + "<w:numbering xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\(definitions)</w:numbering>"
+        return OOXMLPackageWriter.xmlDeclaration + "<w:numbering xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\(definitions)\(instances)</w:numbering>"
     }
 }

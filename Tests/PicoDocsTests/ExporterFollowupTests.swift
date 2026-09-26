@@ -8,6 +8,103 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func emptyWorksheetsSurviveTranscoding() async throws {
+        for includeData in [false,true] {
+            var sections = [DocumentSection(title:"Template",kind:.sheet,markdown:"")]
+            if includeData { sections.append(.init(title:"Data",kind:.sheet,markdown:"Value")) }
+            let first = try PicoDocsEngine.write(ConverterResult(sections:sections),to:.xlsx)
+            let second = try await PicoDocsEngine.transcode(data:first,filename:"empty.xlsx",to:.xlsx,sanitizeUnicode:true)
+            let workbook = try xml(second,"xl/workbook.xml")
+            #expect(workbook.contains(#"name="Template""#))
+            if includeData { #expect(workbook.contains(#"name="Data""#)) }
+        }
+    }
+
+    @Test func spreadsheetWhitespaceSurvivesEveryOfficeProjection() async throws {
+        let result = ConverterResult(sections:[.init(title:"Data",kind:.sheet,markdown:"lossy placeholder",metadata:["csv":"\"  first\nsecond  \""])])
+        let xlsx = try PicoDocsEngine.write(result,to:.xlsx)
+        let recovered = try await PicoDocsEngine.convert(data:xlsx,filename:"spaces.xlsx")
+        let docx = try xml(PicoDocsEngine.write(recovered,to:.docx),"word/document.xml")
+        #expect(docx.contains(">  first</w:t>")); #expect(docx.contains(">second  </w:t>")); #expect(docx.contains("<w:br/>"))
+        let pptx = try xml(PicoDocsEngine.write(recovered,to:.pptx),"ppt/slides/slide1.xml")
+        #expect(pptx.contains(#"<a:t xml:space="preserve">  first</a:t>"#))
+        #expect(pptx.contains(#"<a:t xml:space="preserve">second  </a:t>"#)); #expect(pptx.contains("<a:br/>"))
+        #if canImport(AppKit) || canImport(UIKit)
+        #expect(AttributedStringDocumentBuilder.attributedString(from:recovered).string.contains("  first\nsecond  "))
+        #endif
+    }
+
+    @Test func recoveryAndSynthesizedImagesKeepSlideOrder() throws {
+        let recovery = ConverterResult(sections:[.init(kind:.body,markdown:"Recovered first"),.init(kind:.table,markdown:"| Table |\n| --- |",slideNumber:1)])
+        let data = try PicoDocsEngine.write(recovery,to:.pptx)
+        #expect(try xml(data,"ppt/slides/slide1.xml").contains("Recovered first"))
+        #expect(try xml(data,"ppt/slides/slide2.xml").contains("Table"))
+        let image = DocumentSection(title:"Image alt",kind:.image,markdown:"",sourcePath:"image.png",slideNumber:1,metadata:["mimeType":"image/png","base64":"AQID"])
+        let deck = try PicoDocsEngine.write(ConverterResult(sections:[.init(kind:.slide,markdown:"",slideNumber:1),image]),to:.pptx)
+        #expect(try xml(deck,"ppt/slides/slide1.xml").contains("Image alt"))
+        #expect(try xml(deck,"ppt/presentation.xml").components(separatedBy:"<p:sldId ").count - 1 == 1)
+    }
+
+    @Test func numberingAndCodeRunPropertiesUseSchemaOrder() throws {
+        let data = try PicoDocsEngine.write(markdown:"- Bullet\n\n1. Ordered\n\n***`code`***",to:.docx)
+        let numbering = try SwiftSoup.parse(xml(data,"word/numbering.xml"),"",SwiftSoup.Parser.xmlParser())
+        let names = try #require(numbering.getElementsByTag("w:numbering").first()).children().array().map { $0.tagName().lowercased() }
+        #expect(names == ["w:abstractnum","w:abstractnum","w:num","w:num"])
+        let document = try SwiftSoup.parse(xml(data,"word/document.xml"),"",SwiftSoup.Parser.xmlParser())
+        let props = try #require(document.getElementsByTag("w:rPr").first { (try? $0.getElementsByTag("w:rStyle").isEmpty()) == false })
+        #expect(props.children().array().map { $0.tagName().lowercased() } == ["w:rstyle","w:rfonts","w:b","w:i"])
+    }
+
+    @Test func tableCellsDoNotShareInlineDelimitersAndCodeKeepsSpaces() throws {
+        let result = ConverterResult(sections:[.init(markdown:"| *open | close* |\n| --- | --- |")])
+        let slide = try xml(PicoDocsEngine.write(result,to:.pptx),"ppt/slides/slide1.xml")
+        #expect(slide.contains("*open")); #expect(slide.contains("close*")); #expect(!slide.contains(#"i="1""#))
+        let code = try xml(PicoDocsEngine.write(markdown:"```\n  x  \n```",to:.pptx),"ppt/slides/slide1.xml")
+        #expect(code.contains(#"<a:t xml:space="preserve">  x  </a:t>"#))
+        #if canImport(AppKit) || canImport(UIKit)
+        #expect(AttributedStringDocumentBuilder.attributedString(from:result).string.contains("*open\tclose*"))
+        #endif
+    }
+
+    @Test func decodedAnglesInImageNamesStayBoundToCarriers() async throws {
+        let document = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:drawing><a:blip r:embed="image"/></w:drawing></w:r></w:p></w:body></w:document>"#
+        let rels = #"<Relationships><Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/a%3Eb%20c.png"/></Relationships>"#
+        let data = PagesConverterTests.makeZip([(name:"word/document.xml",data:Array(document.utf8)),(name:"word/_rels/document.xml.rels",data:Array(rels.utf8)),(name:"word/media/a>b c.png",data:[1,2,3])])
+        let result = try await PicoDocsEngine.convert(data:data,filename:"angle.docx")
+        #expect(try xml(PicoDocsEngine.write(result,to:.docx),"word/document.xml").contains("<w:drawing>"))
+        #expect(!((try xml(PicoDocsEngine.write(result,to:.pptx),"ppt/slides/slide1.xml")).contains("a&gt;b c.png")))
+    }
+
+    @Test func CSVUsesTheSharedFenceGrammar() throws {
+        for (markdown, expected) in [("~~~\na|b\n~~~","a|b"),("````\na|b\n```\nc|d\n````","a|b\n```\nc|d")] {
+            let output = try DocumentRenderer.render(ConverterResult(sections:[.init(markdown:markdown)]),to:.csv)
+            #expect(output == expected)
+        }
+    }
+
+    @Test func customExportersReceiveCanonicalImageSections() throws {
+        struct InspectingExporter: DocumentExporter {
+            func accepts(_ format: ExportableFileType) -> Bool { true }
+            func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
+                #expect(result.sections.count == 3)
+                #expect(result.sections.allSatisfy { $0.kind == .image && $0.markdown.isEmpty })
+                #expect(result.sections.map(\.sourcePath) == ["same.png","same.png",nil])
+                return Data([42])
+            }
+        }
+        let images = ["same.png","same.png",nil].map { name in DocumentSection(kind:.image,markdown:"",sourcePath:name,metadata:["base64":"AQID"]) }
+        let registry = DocumentExporterRegistry.default.registering(InspectingExporter(),priority:DocumentExporterRegistry.Priority.override)
+        #expect(try PicoDocsEngine.write(ConverterResult(sections:images),to:.docx,registry:registry) == Data([42]))
+    }
+
+    @Test func mediaNamesAreUniqueIgnoringCase() throws {
+        let images = ["logo.png","Logo.png"].map { name in DocumentSection(kind:.image,markdown:"",sourcePath:name,metadata:["mimeType":"image/png","base64":"AQID"]) }
+        let data = try PicoDocsEngine.write(ConverterResult(sections:images),to:.docx)
+        let archive = try #require(Archive(data:data,accessMode:.read))
+        let names = archive.filter { $0.path.hasPrefix("word/media/") }.map { $0.path.lowercased() }
+        #expect(names.count == 2); #expect(Set(names).count == 2)
+    }
+
     @Test func percentTripletsInImageNamesAreDecodedOnce() async throws {
         for filename in ["sales%20chart.png", "literal%2Fname.png", "double%2520name.png"] {
             let image = DocumentSection(kind: .image, markdown: "", sourcePath: filename, metadata: ["mimeType": "image/png", "base64": Data([1,2,3]).base64EncodedString()])

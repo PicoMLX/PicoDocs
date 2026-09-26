@@ -55,9 +55,10 @@ public enum PicoDocsEngine {
         // Converters reject empty input before this pass, but sanitizing can empty
         // a result that held only removable characters — re-check so we don't
         // surface a blank, "successful" document. (Image-bearing results are never
-        // considered empty: their byte carriers live in `.image` sections.)
+        // considered empty: their byte carriers live in `.image` sections. Empty
+        // worksheet sections also represent valid workbook structure.)
         if sanitized.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           !sanitized.sections.contains(where: { $0.kind == .image }) {
+           !sanitized.sections.contains(where: { $0.kind == .image || $0.kind == .sheet }) {
             throw PicoDocsError.emptyDocument
         }
         return sanitized
@@ -114,12 +115,7 @@ public enum PicoDocsEngine {
         if isEmpty, !hasImages, !hasCSV, !hasSheets, !hasSlideTitle {
             throw PicoDocsError.emptyDocument
         }
-        // An image-only result carries `.image` byte sections but no body referencing
-        // them; `result.markdown()` (which omits `.image` carriers) is empty, so the
-        // markdown-driven exporters would emit a blank file. Synthesize one inline
-        // reference per carrier so the bytes are actually embedded.
-        let exportable = isEmpty && hasImages ? Self.withSynthesizedImageReferences(result) : result
-        return try registry.write(exportable, format: format)
+        return try registry.write(result, format: format)
     }
 
     /// Appends a `.body` section with an inline `![alt](reference)` for each `.image`
@@ -131,7 +127,8 @@ public enum PicoDocsEngine {
     /// `image-<n>.<ext>` name (extension from its MIME), assigned as its `sourcePath`
     /// so the exporter's index derives the identical lookup key — so even an
     /// unnamed, MIME-only carrier is embedded rather than silently dropped.
-    private static func withSynthesizedImageReferences(_ result: ConverterResult) -> ConverterResult {
+    static func withSynthesizedImageReferences(_ result: ConverterResult) -> ConverterResult {
+        guard result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return result }
         var sections = result.sections
         var refs: [DocumentSection] = []
         var generatedCount = 0
@@ -160,7 +157,8 @@ public enum PicoDocsEngine {
             let alt = section.title ?? (reference as NSString).lastPathComponent
             refs.append(DocumentSection(
                 kind: .body,
-                markdown: "![\(Self.escapeMarkdown(alt, "\\`*_{}[]<>"))](<\(Self.escapeMarkdown(reference, "\\<>"))>)"
+                markdown: "![\(Self.escapeMarkdown(alt, "\\`*_{}[]<>"))](<\(Self.escapeMarkdown(reference, "\\<>"))>)",
+                slideNumber: section.slideNumber
             ))
         }
         guard !refs.isEmpty else { return result }

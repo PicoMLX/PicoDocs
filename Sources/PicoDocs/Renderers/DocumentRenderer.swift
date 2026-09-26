@@ -390,15 +390,16 @@ public enum DocumentRenderer {
         var rows: [String] = []
         let lines = markdown.components(separatedBy: "\n")
         var i = 0
-        var inCodeFence = false
+        var codeFence: (character: Character, length: Int)?
         while i < lines.count {
             let line = lines[i].trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("```") {
-                inCodeFence.toggle()
-                i += 1
-                continue
+            if let opening = codeFence, MarkdownBlockParser.closesFence(line, opening: opening) {
+                codeFence = nil; i += 1; continue
             }
-            if inCodeFence {
+            if codeFence == nil, let opening = MarkdownBlockParser.fence(line) {
+                codeFence = opening; i += 1; continue
+            }
+            if codeFence != nil {
                 // Preserve fenced code verbatim as a single field, so a pipe-
                 // containing code line isn't split into CSV cells.
                 rows.append(csvField(lines[i]))

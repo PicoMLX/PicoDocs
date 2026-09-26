@@ -48,8 +48,9 @@ enum AttributedStringDocumentBuilder {
     }
 
     static func attributedString(from result: ConverterResult) -> NSAttributedString {
+        let result = PicoDocsEngine.withSynthesizedImageReferences(result)
         let output = NSMutableAttributedString()
-        let blocks = MarkdownBlockParser.parse(result.markdown())
+        let blocks = OfficeDocumentBlocks.parse(result)
         for (index, block) in blocks.enumerated() {
             append(block, to: output)
             if index < blocks.count - 1 {
@@ -91,7 +92,13 @@ enum AttributedStringDocumentBuilder {
 
         case .table(let rows):
             for row in rows {
-                output.append(inline(row.map { $0.replacingOccurrences(of: "<br>", with: "  \n") }.joined(separator: "\t")))
+                for (index, cell) in row.enumerated() {
+                    if index > 0 { output.append(NSAttributedString(string: "\t")) }
+                    for (lineIndex, line) in cell.components(separatedBy: "<br>").enumerated() {
+                        if lineIndex > 0 { output.append(NSAttributedString(string: "\n")) }
+                        output.append(inline(line))
+                    }
+                }
                 output.append(NSAttributedString(string: "\n"))
             }
 

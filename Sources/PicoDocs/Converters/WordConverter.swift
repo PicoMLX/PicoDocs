@@ -407,10 +407,11 @@ public struct WordConverter: DocumentConverter {
     private static func escapeLinkDestination(_ url: String) -> String {
         // Spaces / parens break inline link destinations; wrap in <> (a valid
         // CommonMark destination form) when present.
-        if url.contains(" ") || url.contains("(") || url.contains(")") {
-            return "<\(url)>"
+        let escaped = url.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "\\<").replacingOccurrences(of: ">", with: "\\>")
+        if url.contains(where: \.isWhitespace) || url.contains("(") || url.contains(")") || url.contains("<") || url.contains(">") {
+            return "<\(escaped)>"
         }
-        return url
+        return escaped
     }
 
     // MARK: - Tables
