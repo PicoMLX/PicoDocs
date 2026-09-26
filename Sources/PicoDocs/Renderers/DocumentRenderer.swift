@@ -157,7 +157,7 @@ public enum DocumentRenderer {
                   let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
             let mime = section.metadata["mimeType"] ?? "application/octet-stream"
             result = result.replacingOccurrences(
-                of: "src=\"\(filename)\"",
+                of: "src=\"\(escapeHTML(filename))\"",
                 with: "src=\"\(escapeHTML("data:\(mime);base64,\(base64)"))\""
             )
         }

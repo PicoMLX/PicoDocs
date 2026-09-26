@@ -10,6 +10,7 @@ final class PowerPointPackage {
     private var remaining: Int
     private let entryLimit: Int
     private(set) var failure: Error?
+    var contentTypes: [String: String]?
 
     init(archive: Archive, entryLimit: Int = 64 * 1024 * 1024, totalLimit: Int = 256 * 1024 * 1024) {
         self.archive = archive

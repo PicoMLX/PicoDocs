@@ -71,7 +71,7 @@ public struct PowerPointConverter: DocumentConverter {
             guard !blocks.isEmpty else { continue }   // empty slide: keep its number, emit nothing
 
             sections.append(DocumentSection(
-                title: rendered.title,
+                title: context.plainTitle,
                 kind: .slide,
                 markdown: blocks.joined(separator: "\n\n"),
                 sourcePath: slidePath,
@@ -121,7 +121,10 @@ public struct PowerPointConverter: DocumentConverter {
         context.master = Self.relatedPart(of: notesPath, type: "/notesMaster", relationships: notesRels).flatMap { xml(archive, path: $0) }
         let paragraphs = ((try? notes.getElementsByTag("p:sp").array()) ?? [])
             .filter { placeholderType(of: $0) == "body" }
-            .flatMap { shape in textBody(of: shape).map { renderParagraphs($0, inherited: inheritedBullets(for: shape, context: context), context: &context) } ?? [] }
+            .flatMap { shape in
+                context.runDefaults = inheritedRunDefaults(for: shape, context: context)
+                return textBody(of: shape).map { renderParagraphs($0, inherited: inheritedBullets(for: shape, context: context), context: &context) } ?? []
+            }
         let text = paragraphs.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : text
     }
@@ -148,6 +151,8 @@ public struct PowerPointConverter: DocumentConverter {
         var images: ImageCollector
         var embedsImages = true
         var defaultLink: String?
+        var plainTitle: String?
+        var runDefaults: [[Element]] = Array(repeating: [], count: 9)
         /// The slide's layout and master parts, when resolvable.
         var layout: Document?
         var master: Document?
@@ -163,6 +168,7 @@ public struct PowerPointConverter: DocumentConverter {
         mutating func document(_ path: String) -> Document? {
             if let cached = documents[path] { return cached }
             let parsed = PowerPointConverter.xml(archive, path: path)
+            if parsed == nil { archive.fail(PicoDocsError.fileCorrupted) }
             documents[path] = parsed
             return parsed
         }
@@ -202,11 +208,18 @@ public struct PowerPointConverter: DocumentConverter {
                 context.defaultLink = shapeProperties.flatMap { child(of: $0, named: "a:hlinkclick") }
                     .flatMap { try? $0.attr("r:id") }.flatMap { context.relationships[$0] }
                     .flatMap { $0.external && DocumentRenderer.isSafeURL($0.target, isImage: false) ? $0.target : nil }
+                context.runDefaults = inheritedRunDefaults(for: shape, context: context)
                 if type == "title" || type == "ctrTitle" {
                     let text = renderParagraphs(body, inherited: noInheritance, context: &context)
                         .joined(separator: " ")
                         .split(whereSeparator: \.isWhitespace).joined(separator: " ")
-                    if title == nil, !text.isEmpty { title = text; continue }
+                    if title == nil, !text.isEmpty {
+                        title = text
+                        context.plainTitle = ((try? body.getElementsByTag("a:p").array()) ?? []).map { paragraph in
+                            ((try? paragraph.getElementsByTag("a:t").array()) ?? []).map(wholeText).joined()
+                        }.joined(separator: " ").split(whereSeparator: \.isWhitespace).joined(separator: " ")
+                        continue
+                    }
                     if !text.isEmpty { blocks.append(text) }
                     continue
                 }
@@ -215,6 +228,7 @@ public struct PowerPointConverter: DocumentConverter {
                 if !paragraphs.isEmpty { blocks.append(paragraphs.joined(separator: "\n\n")) }
             case "p:graphicframe":
                 if let table = try? shape.getElementsByTag("a:tbl").first() {
+                    context.runDefaults = Array(repeating: [], count: 9)
                     let markdown = renderTable(table, context: &context)
                     if !markdown.isEmpty { blocks.append(markdown) }
                 }
@@ -313,6 +327,26 @@ public struct PowerPointConverter: DocumentConverter {
         }
     }
 
+    /// Run toggles inherit independently through the active paragraph level.
+    private static func inheritedRunDefaults(for shape: Element, context: SlideContext) -> [[Element]] {
+        var styles: [Element?] = [textBody(of: shape).flatMap { child(of: $0, named: "a:lststyle") }]
+        if let placeholder = placeholder(of: shape) {
+            let raw = (try? placeholder.attr("type")) ?? ""
+            let type = raw.isEmpty ? "obj" : raw
+            let index = (try? placeholder.attr("idx")) ?? ""
+            let bodyLike = ["obj", "body", "subTitle"].contains(type)
+            if let layout = context.layout { styles.append(matchingPlaceholder(in: layout, type: type, index: index).flatMap(listStyle)) }
+            if let master = context.master {
+                styles.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "").flatMap(listStyle))
+                let style = bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle")
+                styles.append(try? master.getElementsByTag(style).first())
+            }
+        }
+        return (0..<9).map { level in
+            styles.compactMap { $0.flatMap { child(of: $0, named: "a:lvl\(level + 1)ppr") }.flatMap { child(of: $0, named: "a:defrpr") } }
+        }
+    }
+
     /// The placeholder shape in a layout/master matching a slide placeholder: by
     /// `idx` when both have one, else by type (a typeless placeholder is "obj",
     /// which a master provides as "body").
@@ -386,10 +420,8 @@ public struct PowerPointConverter: DocumentConverter {
                 schemes[level] = scheme
                 let number = counters[level].map { $0 + 1 } ?? start
                 counters[level] = number
-                guard let formatted = automaticNumber(number, scheme: scheme) else {
-                    context.archive.fail(PicoDocsError.unableToExportToRequestedFormat)
-                    return []
-                }
+                let formatted = automaticNumber(number, scheme: scheme)
+                    ?? escapeMarkdown("[\(scheme): \(number)]")
                 // CommonMark only has decimal markers. Preserve other schemes as
                 // visible labels within a bullet item instead of changing them.
                 marker = scheme == "arabicPeriod" ? formatted + " " : "- " + formatted + " "
@@ -411,7 +443,7 @@ public struct PowerPointConverter: DocumentConverter {
             while markerWidths.count < depth { markerWidths.append(2) }
             let indent = String(repeating: " ", count: markerWidths.reduce(0, +))
             markerWidths.append(marker.count)
-            let continuation = "\n" + indent + String(repeating: " ", count: marker.count)
+            let continuation = "  \n" + indent + String(repeating: " ", count: marker.count)
             listLines.append(indent + marker + text.replacingOccurrences(of: "\n", with: continuation))
         }
         flushList()
@@ -423,7 +455,9 @@ public struct PowerPointConverter: DocumentConverter {
     static func renderRuns(_ paragraph: Element, context: inout SlideContext) -> String {
         struct Run { var text: String; var bold: Bool; var italic: Bool; var link: String? }
         var runs: [Run] = []
-        let defaults = child(of: paragraph, named: "a:ppr").flatMap { child(of: $0, named: "a:defrpr") }
+        let paragraphProperties = child(of: paragraph, named: "a:ppr")
+        let level = min(max(Int((try? paragraphProperties?.attr("lvl")) ?? "") ?? 0, 0), 8)
+        let defaults = [paragraphProperties.flatMap { child(of: $0, named: "a:defrpr") }].compactMap { $0 } + context.runDefaults[level]
         for node in paragraph.children().array() {
             if Task.isCancelled { return "" }
             switch node.tagName().lowercased() {
@@ -476,9 +510,9 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     /// Whether a run-property toggle (`b`/`i`) is on (`"1"` / `"true"`).
-    private static func isOn(_ properties: Element?, _ attribute: String, defaults: Element? = nil) -> Bool {
+    private static func isOn(_ properties: Element?, _ attribute: String, defaults: [Element] = []) -> Bool {
         let direct = (try? properties?.attr(attribute)) ?? ""
-        let value = direct.isEmpty ? ((try? defaults?.attr(attribute)) ?? "") : direct
+        let value = direct.isEmpty ? defaults.compactMap { try? $0.attr(attribute) }.first(where: { !$0.isEmpty }) ?? "" : direct
         return value == "1" || value == "true"
     }
 
@@ -504,10 +538,26 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     /// Latin, Roman and decimal schemes specified by DrawingML. Unknown schemes
-    /// fail explicitly rather than silently turning their labels into decimals.
+    /// use a visible scheme-and-counter fallback rather than aborting conversion.
     static func automaticNumber(_ number: Int, scheme: String) -> String? {
         let value: String
-        if scheme.hasPrefix("alphaLc") || scheme.hasPrefix("alphaUc") {
+        func digits(_ zero: UInt32) -> String {
+            String(String.UnicodeScalarView(String(number).unicodeScalars.map { UnicodeScalar(zero + $0.value - 48)! }))
+        }
+        if scheme == "circleNumWdBlackPlain", (1...10).contains(number) { return String(UnicodeScalar(0x2775 + number)!) }
+        if ["circleNumWdWhitePlain", "circleNumDbPlain"].contains(scheme), (1...20).contains(number) { return String(UnicodeScalar(0x245F + number)!) }
+        if scheme.hasPrefix("thaiNum") { value = digits(0x0E50) }
+        else if scheme.hasPrefix("hindiNum") { value = digits(0x0966) }
+        else if scheme.hasPrefix("arabicDb") { value = digits(0xFF10) }
+        else if scheme.hasPrefix("hindiAlpha") {
+            let alphabet = scheme.hasPrefix("hindiAlpha1") ? Array("कखगघङचछजझञटठडढणतथदधनपफबभमयरलवशषसह") : Array("अआइईउऊऋऌएऐओऔ")
+            guard number > 0, number <= alphabet.count else { return nil }
+            value = String(alphabet[number - 1])
+        } else if scheme.hasPrefix("thaiAlpha") {
+            let alphabet = Array("กขฃคฅฆงจฉชซฌญฎฏฐฑฒณดตถทนบปผฝพฟภมยรลวศษสหฬอฮ")
+            guard number > 0, number <= alphabet.count else { return nil }
+            value = String(alphabet[number - 1])
+        } else if scheme.hasPrefix("alphaLc") || scheme.hasPrefix("alphaUc") {
             var n = number, letters = ""
             while n > 0 {
                 n -= 1
@@ -526,8 +576,8 @@ public struct PowerPointConverter: DocumentConverter {
         else { return nil }
         if scheme.hasSuffix("ParenBoth") { return "(" + value + ")" }
         if scheme.hasSuffix("ParenR") { return value + ")" }
-        if scheme.hasSuffix("Period"), !scheme.hasPrefix("arabicDb") { return value + "." }
-        if scheme == "arabicPlain" { return value }
+        if scheme.hasSuffix("Period") { return value + (scheme.hasPrefix("arabicDb") ? "．" : ".") }
+        if scheme == "arabicPlain" || scheme == "arabicDbPlain" { return value }
         return nil
     }
 
@@ -617,15 +667,19 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     static func contentType(_ path: String, archive: PowerPointPackage) -> String? {
-        guard let manifest = xml(archive, path: "[Content_Types].xml") else { return nil }
-        for entry in (try? manifest.getElementsByTag("Override").array()) ?? [] {
-            if (try? entry.attr("PartName")) == "/" + path { return validatedMIME(try? entry.attr("ContentType")) }
+        if archive.contentTypes == nil {
+            var types: [String: String] = [:]
+            if let manifest = xml(archive, path: "[Content_Types].xml") {
+                for entry in (try? manifest.getElementsByTag("Override").array()) ?? [] {
+                    if let name = try? entry.attr("PartName"), let type = validatedMIME(try? entry.attr("ContentType")) { types[name] = type }
+                }
+                for entry in (try? manifest.getElementsByTag("Default").array()) ?? [] {
+                    if let ext = try? entry.attr("Extension"), let type = validatedMIME(try? entry.attr("ContentType")) { types["." + ext.lowercased()] = type }
+                }
+            }
+            archive.contentTypes = types
         }
-        let ext = (path as NSString).pathExtension.lowercased()
-        for entry in (try? manifest.getElementsByTag("Default").array()) ?? [] {
-            if ((try? entry.attr("Extension")) ?? "").lowercased() == ext { return validatedMIME(try? entry.attr("ContentType")) }
-        }
-        return nil
+        return archive.contentTypes?["/" + path] ?? archive.contentTypes?["." + (path as NSString).pathExtension.lowercased()]
     }
 
     private static func validatedMIME(_ value: String?) -> String? {

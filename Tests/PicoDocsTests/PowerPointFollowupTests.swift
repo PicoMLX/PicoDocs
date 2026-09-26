@@ -1,8 +1,58 @@
 import Foundation
 import Testing
+import ZIPFoundation
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func declaredLayoutsAndInheritedRunDefaults() async throws {
+        typealias B = PowerPointConverterTests
+        let relation = ("layout", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout", "../slideLayouts/layout.xml")
+        let shape = B.shape(placeholder: #"<p:ph type="body" idx="1"/>"#, paragraphs: [
+            #"<a:p><a:r><a:t>Inherited</a:t></a:r></a:p>"#,
+            #"<a:p><a:r><a:rPr b="0"/><a:t>Italic only</a:t></a:r></a:p>"#])
+        let missing = B.deck(slides: [.init(file: "s.xml", shapes: shape, relationships: [relation])])
+        await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: missing, filename: "bad.pptx") }
+        let layoutShape = B.shape(placeholder: #"<p:ph type="body" idx="1"/>"#, paragraphs: [])
+            .replacingOccurrences(of: "<a:bodyPr/>", with: #"<a:bodyPr/><a:lstStyle><a:lvl1pPr><a:buNone/><a:defRPr b="1"/></a:lvl1pPr></a:lstStyle>"#)
+        let layout = "<p:sldLayout \(B.namespaces)><p:cSld><p:spTree>\(layoutShape)</p:spTree></p:cSld></p:sldLayout>"
+        let master = "<p:sldMaster \(B.namespaces)><p:txStyles><p:bodyStyle><a:lvl1pPr><a:defRPr i=\"1\"/></a:lvl1pPr></p:bodyStyle></p:txStyles></p:sldMaster>"
+        let rels = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster", "../slideMasters/master.xml")])
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: shape, relationships: [relation])], extraParts: [
+            ("ppt/slideLayouts/layout.xml", Array(layout.utf8)), ("ppt/slideLayouts/_rels/layout.xml.rels", Array(rels.utf8)), ("ppt/slideMasters/master.xml", Array(master.utf8))])
+        let markdown = try await PicoDocsEngine.convert(data: data, filename: "styled.pptx").markdown()
+        #expect(markdown.contains("***Inherited***"))
+        #expect(markdown.contains("*Italic only*"))
+        #expect(!markdown.contains("**Italic only**"))
+    }
+
+    @Test func localizedNumbersHardBreaksAndPlainTitles() async throws {
+        typealias B = PowerPointConverterTests
+        let title = B.shape(placeholder: #"<p:ph type="title"/>"#, paragraphs: [#"<a:p><a:r><a:rPr b="1"/><a:t>Plan [Draft]</a:t></a:r></a:p>"#])
+        let paragraphs = [#"<a:p><a:pPr><a:buChar char="•"/></a:pPr><a:r><a:t>First</a:t></a:r><a:br/><a:r><a:t>Second</a:t></a:r></a:p>"#]
+            + ["circleNumWdBlackPlain", "thaiNumPeriod", "hindiAlphaPeriod", "ea1ChsPeriod"].map {
+                "<a:p><a:pPr><a:buAutoNum type=\"\($0)\"/></a:pPr><a:r><a:t>Item</a:t></a:r></a:p>"
+            }
+        let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: title + B.shape(placeholder: nil, paragraphs: paragraphs))]), filename: "local.pptx")
+        #expect(result.sections.first?.title == "Plan [Draft]")
+        #expect(result.markdown().contains("First  \n  Second"))
+        #expect(try DocumentRenderer.render(result, to: .html).contains("First<br>Second"))
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains("First\n  Second"))
+        #expect(result.markdown().contains("❶ Item"))
+        #expect(result.markdown().contains("๑. Item"))
+        #expect(result.markdown().contains("अ. Item"))
+        #expect(result.markdown().contains("ea1ChsPeriod"))
+    }
+
+    @Test func manifestIsCachedAndEscapedImageReferencesEmbed() throws {
+        let manifest = #"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="png" ContentType="image/png"/></Types>"#
+        let data = PagesConverterTests.makeZip([(name: "[Content_Types].xml", data: Array(manifest.utf8))])
+        let package = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)), totalLimit: manifest.utf8.count)
+        for name in ["a.png", "b.png", "c.png"] { #expect(PowerPointConverter.contentType(name, archive: package) == "image/png") }
+        try package.check()
+        let result = ConverterResult(sections: [.init(markdown: "![Image](chart&notes.png)"), .init(kind: .image, markdown: "", sourcePath: "chart&notes.png", metadata: ["base64": "AQID", "mimeType": "image/png"])])
+        #expect(try DocumentRenderer.render(result, to: .html).contains("data:image/png;base64,AQID"))
+    }
+
     @Test func manifestMIMEAndAssembledMarkers() async throws {
         typealias B = PowerPointConverterTests
         let paragraphs = [["-", " item"], ["1", ". item"], ["  ", "# heading"], ["-", "--"]].map { runs in

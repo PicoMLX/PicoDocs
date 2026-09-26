@@ -35,7 +35,7 @@ struct MarkdownList {
         var list = MarkdownList(ordered: first.number != nil)
         while index < lines.count {
             var next = index
-            while next < lines.count, lines[next].trimmingCharacters(in: .whitespaces).isEmpty { next += 1 }
+            while next < lines.count, String(lines[next].drop { $0 == " " || $0 == "\t" }).isEmpty { next += 1 }
             guard next < lines.count else { break }
             let blank = next > index
             if let current = marker(lines[next]) {
@@ -56,7 +56,7 @@ struct MarkdownList {
             } else {
                 let indent = lines[next].prefix { $0 == " " }.count
                 guard !blank, indent > first.indent, !list.items.isEmpty else { break }
-                list.items[list.items.count - 1].text += "\n" + lines[next].trimmingCharacters(in: .whitespaces)
+                list.items[list.items.count - 1].text += "\n" + String(lines[next].drop { $0 == " " || $0 == "\t" })
                 index = next + 1
             }
         }
@@ -66,7 +66,7 @@ struct MarkdownList {
     func plaintext(indent: String = "", inline: (String) -> String) -> String {
         items.map { item in
             let marker = item.number.map { "\($0). " } ?? "- "
-            let line = indent + marker + inline(item.text).replacingOccurrences(of: "\n", with: " ")
+            let line = indent + marker + Self.inlineText(item.text, breakText: "\n" + indent + String(repeating: " ", count: marker.count), inline: inline)
             let children = item.children.map { $0.plaintext(indent: indent + String(repeating: " ", count: marker.count), inline: inline) }
             return ([line] + children).joined(separator: "\n")
         }.joined(separator: "\n")
@@ -81,9 +81,18 @@ struct MarkdownList {
             let value = item.number.map { $0 == expected ? "" : " value=\"\($0)\"" } ?? ""
             if let number = item.number { expected = min(number, Int.max - 1) + 1 }
             let children = item.children.map { $0.html(inline: inline) }.joined(separator: "\n")
-            return "<li\(value)>\(inline(item.text).replacingOccurrences(of: "\n", with: " "))\(children.isEmpty ? "" : "\n" + children)</li>"
+            return "<li\(value)>\(Self.inlineText(item.text, breakText: "<br>", inline: inline))\(children.isEmpty ? "" : "\n" + children)</li>"
         }.joined(separator: "\n")
         return "<\(tag)\(attribute)>\n\(body)\n</\(tag)>"
+    }
+
+    private static func inlineText(_ text: String, breakText: String, inline: (String) -> String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        return lines.enumerated().map { index, line in
+            guard index + 1 < lines.count else { return inline(line) }
+            if line.hasSuffix("  ") { return inline(line.trimmingCharacters(in: .whitespaces)) + breakText }
+            return inline(line) + " "
+        }.joined()
     }
 
     var texts: [String] { items.flatMap { [$0.text] + $0.children.flatMap(\.texts) } }
