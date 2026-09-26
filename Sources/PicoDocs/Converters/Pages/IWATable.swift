@@ -292,7 +292,9 @@ enum IWATable {
                 }
                 start = index + 1
             } else if index == range.upperBound || isParagraphSeparator(body.units[index]) {
-                let listStyle = referenceID(at: start, in: body.listStyles)
+                let visibleStart = (start..<index).first { !isDroppedUnit(body.units[$0]) }
+                let listStyle = visibleStart == nil ? referenceID(at: start, in: body.listStyles)
+                    : majorityStyle(body.units, body.listStyles, start..<index, total: body.units.count, includeUnstyled: true)
                 let listKind = listStyle.flatMap { body.listMarkers[$0] }
                 switch renderParagraph(body, start ..< index, objects: objects) {
                 case .heading(let text)?:
@@ -301,7 +303,7 @@ enum IWATable {
                     lists.lastList = nil; lists.orderedList = nil
                 case .body(let text)?:
                     if let listKind {
-                        let (marker, tight) = try nextListMarker(listKind, style: listStyle, at: start, body, &lists)
+                        let (marker, tight) = try nextListMarker(listKind, style: listStyle, at: visibleStart ?? start, body, &lists)
                         if tight { parts += pendingEmpty }
                         pendingEmpty = []
                         parts.append((listItem(marker + " ", text), tight))
@@ -313,7 +315,7 @@ enum IWATable {
                 case nil:
                     if let listKind {
                         // An empty list item still takes a number (Pages shows its marker).
-                        let (marker, tight) = try nextListMarker(listKind, style: listStyle, at: start, body, &lists)
+                        let (marker, tight) = try nextListMarker(listKind, style: listStyle, at: visibleStart ?? start, body, &lists)
                         if !tight { pendingEmpty = [] }
                         pendingEmpty.append((marker, tight))
                     } else {
@@ -569,7 +571,7 @@ enum IWATable {
     /// and contiguous, so the runs overlapping `range` form a slice found by binary
     /// search.
     private static func majorityStyle(_ units: [UInt16], _ runs: [(offset: Int, id: UInt64?)],
-                                      _ range: Range<Int>, total: Int) -> UInt64? {
+                                      _ range: Range<Int>, total: Int, includeUnstyled: Bool = false) -> UInt64? {
         guard !runs.isEmpty else { return nil }
         var low = 0
         var high = runs.count - 1
@@ -584,12 +586,12 @@ enum IWATable {
         for index in first ..< runs.count {
             let run = runs[index]
             guard run.offset < range.upperBound else { break }
-            guard let id = run.id else { continue }
+            if run.id == nil && !includeUnstyled { continue }
             let runEnd = index + 1 < runs.count ? runs[index + 1].offset : total
             var overlap = 0
             for position in max(range.lowerBound, run.offset) ..< min(range.upperBound, runEnd)
             where !isDroppedUnit(units[position]) { overlap += 1 }
-            if overlap > bestOverlap { bestOverlap = overlap; best = id }
+            if overlap > bestOverlap { bestOverlap = overlap; best = run.id }
         }
         return best
     }

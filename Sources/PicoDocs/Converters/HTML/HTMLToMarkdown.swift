@@ -57,21 +57,14 @@ enum HTMLToMarkdown {
     private static func render(_ node: Node, into out: inout String, preserveWhitespace: Bool = false) {
         if let text = node as? TextNode {
             let whole = text.getWholeText()
-            var value = preserveWhitespace ? whole : collapseWhitespace(whole)
-            // Escape literal list text before adjacent DOM nodes are joined.
-            // Otherwise split text such as <span>1</span>. can create a block.
-            // Semantic tags still emit their own unescaped Markdown markers.
-            if !preserveWhitespace {
-                var ancestor = text.parent()
-                while let current = ancestor {
-                    if (current as? Element)?.tagName().lowercased() == "li" {
-                        value = value.map { #"\`*_{}[]<>()#+-.!|"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
-                        break
-                    }
-                    ancestor = current.parent()
-                }
+            // Canonical Markdown must distinguish literal source characters
+            // from markup emitted by semantic HTML tags.
+            var ancestor = text.parent(), inList = false
+            while let current = ancestor {
+                if (current as? Element)?.tagName().lowercased() == "li" { inList = true; break }
+                ancestor = current.parent()
             }
-            out += value
+            out += preserveWhitespace ? whole : escapeLiteral(collapseWhitespace(whole), blockSyntax: inList)
             return
         }
         guard let element = node as? Element else { return }
@@ -118,7 +111,7 @@ enum HTMLToMarkdown {
             out += (href.isEmpty || text.isEmpty) ? text : "[\(text)](\(href))"
 
         case "img":
-            let alt = (try? element.attr("alt")) ?? ""
+            let alt = escapeLiteral((try? element.attr("alt")) ?? "", blockSyntax: false)
             let src = resolvedURL(element, attribute: "src")
             if !src.isEmpty { out += "![\(alt)](\(src))" }
 
@@ -150,6 +143,23 @@ enum HTMLToMarkdown {
         default:
             renderChildren(of: element, into: &out, preserveWhitespace: preserveWhitespace)
         }
+    }
+
+    private static func escapeLiteral(_ text: String, blockSyntax: Bool) -> String {
+        let punctuation = blockSyntax ? #"\`*_{}[]<>()#+-.!|"# : #"\`*_{}[]<>"#
+        return text.map { punctuation.contains($0) ? "\\" + String($0) : String($0) }.joined()
+    }
+
+    /// Cell content already carries canonical inline escapes. Add only missing
+    /// pipe escapes; doubling existing backslashes would create visible slashes.
+    private static func escapeTablePipes(_ text: String) -> String {
+        var output = "", escaped = false
+        for character in text {
+            if character == "|", !escaped { output.append("\\") }
+            output.append(character)
+            escaped = character == "\\" && !escaped
+        }
+        return output
     }
 
     /// Resolves an element attribute to an absolute URL (against the parse base
@@ -192,7 +202,7 @@ enum HTMLToMarkdown {
                 // cells can't contain newlines) and escape pipes.
                 var rendered = ""
                 renderChildren(of: cell, into: &rendered)
-                return MarkdownTableCell.escapeDelimiters(
+                return escapeTablePipes(
                     collapseWhitespace(rendered).trimmingCharacters(in: .whitespaces)
                 )
             })

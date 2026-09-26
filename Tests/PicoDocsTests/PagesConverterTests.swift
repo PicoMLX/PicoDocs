@@ -14,6 +14,44 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func numericLiteralListTextMatchesAcceptedMarkerGrammar() async throws {
+        let result = try await PicoDocsEngine.convert(data: Self.makeListPagesFile(text: "1234567890. literal\n١. literal", style: .bullet, restarts: []), filename: "markers.pages")
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(!html.contains("<ol"))
+        for format in [ExportFileType.html, .plaintext] {
+            let text = try DocumentRenderer.render(result, to: format)
+            #expect(text.contains("1234567890. literal")); #expect(text.contains("١. literal"))
+        }
+    }
+
+    @Test func HTMLCanonicalTextAndNestedTablesDecodeOnce() throws {
+        let source = #"<p>\* regex and `literal`</p><p><img alt="\* image" src="image.png"></p><ul><li><table><tr><td>v1.2 | \* literal</td></tr></table></li></ul>"#
+        let converted = try HTMLToMarkdown.convert(html: source)
+        let result = ConverterResult(sections: [.init(markdown: converted.markdown)])
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            let text = try DocumentRenderer.render(result, to: format)
+            #expect(text.contains(#"\* regex and `literal`"#))
+            #expect(text.contains(#"\* image"#))
+            #expect(text.contains(#"v1.2 | \* literal"#))
+            #expect(!text.contains(#"v1\.2"#))
+        }
+    }
+
+    @Test func visiblePagesListStyleIgnoresDroppedControls() async throws {
+        for prior: UInt64? in [nil, 10] {
+            let text = "\u{0004}Visible"
+            let first = Self.varintField(1, 0) + (prior.map { Self.lengthField(2, Self.varintField(1, $0)) } ?? [])
+            let second = Self.varintField(1, 1) + Self.lengthField(2, Self.varintField(1, 11))
+            let runs = Self.lengthField(1, first) + Self.lengthField(1, second)
+            var storage = Self.varintField(1, 0) + Self.lengthField(3, Array(text.utf8)) + Self.lengthField(7, runs)
+            storage += Self.lengthField(6, Self.lengthField(1, Self.varintField(1, 1) + Self.varintField(2, 0) + Self.varintField(3, 7)))
+            let stream = Self.makeIWAStream(objects: [(1, 2001, storage, []), (10, 2023, Self.varintField(11, 2), []), (11, 2023, Self.varintField(11, 3), [])])
+            let data = Self.makeZip([(name: "Index/Document.iwa", data: Self.snappyFrame(stream))])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "sentinel.pages")
+            #expect(result.markdown() == "7. Visible")
+        }
+    }
+
     @Test func splitHTMLTextCannotCreateNestedMarkdownBlocks() throws {
         let converted = try HTMLToMarkdown.convert(html: "<ul><li><span>1</span>. literal</li><li><span>*</span> literal</li><li>path \\folder</li></ul>")
         let result = ConverterResult(sections: [.init(markdown: converted.markdown)])

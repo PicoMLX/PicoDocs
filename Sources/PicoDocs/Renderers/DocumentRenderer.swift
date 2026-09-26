@@ -633,8 +633,8 @@ public enum DocumentRenderer {
         // ordered: one-or-more digits, then ". "
         var index = line.startIndex
         var digits = 0
-        while index < line.endIndex, line[index].isNumber { digits += 1; index = line.index(after: index) }
-        if digits > 0, index < line.endIndex, line[index] == "." {
+        while index < line.endIndex, line[index].isASCII && line[index].isNumber { digits += 1; index = line.index(after: index) }
+        if (1...9).contains(digits), index < line.endIndex, line[index] == "." {
             let after = line.index(after: index)
             if after < line.endIndex, line[after] == " " { return .ordered }
         }
@@ -743,12 +743,13 @@ public enum DocumentRenderer {
         var result = ""
         var index = text.startIndex
         while index < text.endIndex {
-            if text[index] == "\\", text.index(after: index) < text.endIndex {
-                let next = text.index(after: index)
-                result.append(text[index]); result.append(text[next]); index = text.index(after: next)
-                continue
-            }
-            if text[index] == "`",
+            let next = text.index(after: index)
+            // Backslash escapes outside code cannot open a code span. Inside
+            // a real span, backslashes remain literal as required by Markdown.
+            if text[index] == "\\", next < text.endIndex {
+                result.append(text[index]); result.append(text[next])
+                index = text.index(after: next)
+            } else if text[index] == "`",
                let close = text[text.index(after: index)...].firstIndex(of: "`") {
                 spans.append(String(text[text.index(after: index)..<close]))
                 result += "\(codeOpen)\(spans.count - 1)\(codeClose)"
