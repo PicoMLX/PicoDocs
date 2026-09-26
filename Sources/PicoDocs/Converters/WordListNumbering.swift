@@ -23,6 +23,7 @@ final class WordListNumbering {
     }
 
     /// abstractNumId → ilvl → level definition.
+    private var numberingStyleLinks: [String: String] = [:]
     private var abstractLevels: [String: [Int: Level]] = [:]
     /// numId → (abstractNumId, ilvl → startOverride).
     private var numbers: [String: (abstract: String, overrides: [Int: Int])] = [:]
@@ -71,7 +72,7 @@ final class WordListNumbering {
             return numPr == nil ? nil : "- "   // unknown definition: keep the old bullet
         }
         let abstract = number.abstract
-        let definition = levelOverrides[numID]?[ilvl] ?? abstractLevels[abstract]?[ilvl]
+        let definition = effectiveLevel(numID: numID, level: ilvl)
         if let alias = resumeAlias, alias.original == numID {
             counters[numID] = counters[alias.replacement]
             markerWidths[numID] = markerWidths[alias.replacement]
@@ -85,7 +86,7 @@ final class WordListNumbering {
         // Default: restart after the previous level (or any higher ancestor).
         // Explicit restart=0 preserves counters across all ancestor items.
         for deeper in (ilvl + 1)..<9 {
-            let effective = levelOverrides[numID]?[deeper] ?? abstractLevels[abstract]?[deeper]
+            let effective = effectiveLevel(numID: numID, level: deeper)
             let trigger = effective?.restart ?? deeper
             if trigger > 0 && ilvl < trigger {
                 counters[numID]?[deeper] = nil
@@ -111,14 +112,24 @@ final class WordListNumbering {
         return String(repeating: " ", count: indent) + marker
     }
 
+    private func effectiveLevel(numID: String, level: Int, visited: Set<String> = []) -> Level? {
+        guard !visited.contains(numID), visited.count < 16, let number = numbers[numID] else { return nil }
+        if let direct = levelOverrides[numID]?[level] ?? abstractLevels[number.abstract]?[level] { return direct }
+        guard let style = numberingStyleLinks[number.abstract],
+              let linkedID = styleNumbering(style)?.numID,
+              let linked = effectiveLevel(numID: linkedID, level: level, visited: visited.union([numID])) else { return nil }
+        return Level(format: linked.format, start: numbers[linkedID]?.overrides[level] ?? linked.start, restart: linked.restart)
+    }
+
     // MARK: - Parsing
 
     private func parseNumbering(_ document: Document) {
         for abstract in (try? document.getElementsByTag("w:abstractNum").array()) ?? [] {
             guard let id = try? abstract.attr("w:abstractNumId"), !id.isEmpty else { continue }
+            numberingStyleLinks[id] = Self.child(of: abstract, named: "w:numstylelink").flatMap { try? $0.attr("w:val") }
             var levels: [Int: Level] = [:]
             for level in abstract.children().array() where level.tagName().lowercased() == "w:lvl" {
-                guard let ilvl = Int((try? level.attr("w:ilvl")) ?? "") else { continue }
+                guard let ilvl = Int((try? level.attr("w:ilvl")) ?? ""), (0...8).contains(ilvl) else { continue }
                 let format = Self.child(of: level, named: "w:numfmt").flatMap { try? $0.attr("w:val") } ?? "decimal"
                 let start = Self.child(of: level, named: "w:start").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) } ?? 1
                 let restart = Self.child(of: level, named: "w:lvlrestart").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }

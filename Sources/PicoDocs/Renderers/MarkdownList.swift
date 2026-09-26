@@ -17,8 +17,9 @@ struct MarkdownList {
     }
 
     private static func marker(_ line: String) -> Marker? {
-        let indent = line.prefix { $0 == " " }.count
-        let content = String(line.dropFirst(indent))
+        let whitespace = line.prefix { $0 == " " || $0 == "\t" }
+        let indent = whitespace.reduce(0) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
+        let content = String(line.dropFirst(whitespace.count))
         if let first = content.first, "-*+".contains(first),
            content.count == 1 || content.dropFirst().hasPrefix(" ") {
             return Marker(indent: indent, number: nil, text: String(content.dropFirst(2)))

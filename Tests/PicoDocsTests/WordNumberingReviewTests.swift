@@ -60,6 +60,32 @@ struct WordNumberingReviewTests {
         #expect(result.markdown().contains("5. e"))
     }
 
+    @Test func followupNumberingRegressions() async throws {
+        let numbering = """
+        <w:numbering \(ns)>
+        <w:abstractNum w:abstractNumId="1"><w:numStyleLink w:val="NumberingStyle"/></w:abstractNum>
+        <w:abstractNum w:abstractNumId="2"><w:lvl w:ilvl="-1"><w:lvlRestart w:val="1"/></w:lvl><w:lvl w:ilvl="0"><w:start w:val="5"/><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum>
+        <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+        <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>
+        </w:numbering>
+        """
+        let styles = "<w:styles \(ns)><w:style w:type=\"numbering\" w:styleId=\"NumberingStyle\"><w:pPr><w:numPr><w:numId w:val=\"2\"/></w:numPr></w:pPr></w:style></w:styles>"
+        func item(_ text: String) -> String {
+            "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>"
+        }
+        let body = item("Before") + "<w:tbl><w:tr><w:tc>" + item("Inside") + "</w:tc></w:tr></w:tbl>" + item("After")
+        let document = "<w:document \(ns)><w:body>\(body)</w:body></w:document>"
+        let data = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8)), (name: "word/styles.xml", data: Array(styles.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "linked.docx")
+        #expect(result.markdown().contains("5. Before"))
+        #expect(result.markdown().contains("7. After"))
+        for markdown in ["\t- item", "999999999999999999999999999999. item"] {
+            let content = ConverterResult(sections: [DocumentSection(markdown: markdown)])
+            #expect(try DocumentRenderer.render(content, to: .html).contains("item"))
+            #expect(try DocumentRenderer.render(content, to: .plaintext).contains("item"))
+        }
+    }
+
     @Test func looseNestedListsRenderWithSourceNumbers() throws {
         let result = ConverterResult(sections: [DocumentSection(markdown: "5. First\n\n   1. Child\n\n   2. Child two\n\n6. Second")])
         let html = try DocumentRenderer.render(result, to: .html)

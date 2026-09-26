@@ -107,7 +107,7 @@ public struct WordConverter: DocumentConverter {
                     blocks.append(markdown)
                 }
             case "w:tbl":
-                let table = renderTable(element, relationships: relationships)
+                let table = renderTable(element, relationships: relationships, numbering: numbering)
                 if !table.isEmpty { blocks.append(table) }
             case "w:sdt":
                 if let content = try? element.getElementsByTag("w:sdtContent").first() {
@@ -351,7 +351,7 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Tables
 
-    static func renderTable(_ table: Element, relationships: [String: String]) -> String {
+    static func renderTable(_ table: Element, relationships: [String: String], numbering: WordListNumbering? = nil) -> String {
         var rows: [[String]] = []
         for tr in table.children().array() where tr.tagName().lowercased() == "w:tr" {
             var cells: [String] = []
@@ -365,6 +365,14 @@ public struct WordConverter: DocumentConverter {
                 // own cells still render — see isInsideTextBox.)
                 for paragraph in (try? tc.getElementsByTag("w:p").array()) ?? [] {
                     if isInsideTextBox(paragraph, before: tc) { continue }
+                    // Table-cell text is flattened, but list state still participates
+                    // in the document sequence, including empty cell paragraphs.
+                    if let numbering {
+                        let properties = child(of: paragraph, named: "w:ppr")
+                        let numPr = properties.flatMap { child(of: $0, named: "w:numpr") }
+                        let style = properties.flatMap { child(of: $0, named: "w:pstyle") }.flatMap { try? $0.attr("w:val") }
+                        _ = numbering.prefix(numPr: numPr, style: style)
+                    }
                     let t = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }

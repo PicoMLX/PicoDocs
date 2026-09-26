@@ -512,6 +512,11 @@ public enum DocumentRenderer {
             }
             if !paragraph.isEmpty {
                 blocks.append(.paragraph(paragraph.joined(separator: "\n")))
+            } else {
+                // A structural-looking line rejected by the specialized parser
+                // must still be consumed (tabs, oversized numeric markers, etc.).
+                blocks.append(.paragraph(lines[i]))
+                i += 1
             }
         }
         return blocks
