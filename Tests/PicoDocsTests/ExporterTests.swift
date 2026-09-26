@@ -56,6 +56,31 @@ struct ExporterTests {
         #expect(try registry.write(ConverterResult(sections: [DocumentSection(markdown: "text")]), format: .docx) == Data("selected".utf8))
     }
 
+    @Test func followupExportReviewRegressions() async throws {
+        let fallback = ConverterResult(sections: [DocumentSection(markdown: "Recovered text"), DocumentSection(kind: .table, markdown: "| Cell |\n| --- |", slideNumber: 2)])
+        let pptx = try PicoDocsEngine.write(fallback, to: .pptx)
+        #expect(text(pptx, "ppt/slides/slide1.xml")?.contains("Recovered text") == true)
+        #expect(text(pptx, "ppt/slides/slide2.xml")?.contains("Cell") == true)
+        let csv = ConverterResult(sections: [DocumentSection(markdown: "value", metadata: ["csv": "value\n\"\""])])
+        let xlsx = try PicoDocsEngine.write(csv, to: .xlsx)
+        #expect(text(xlsx, "xl/worksheets/sheet1.xml")?.contains("r=\"2\"") == true)
+        let names = ConverterResult(sections: [DocumentSection(title: "AB", markdown: "x"), DocumentSection(title: "A\0B", markdown: "x"), DocumentSection(title: "\0", markdown: "x")])
+        let workbook = try #require(text(PicoDocsEngine.write(names, to: .xlsx), "xl/workbook.xml"))
+        #expect(workbook.contains("name=\"AB (2)\""))
+        #expect(workbook.contains("name=\"Sheet3\""))
+        let table = ConverterResult(sections: [DocumentSection(markdown: "| first<br>second |\n| --- |")])
+        #expect(try text(PicoDocsEngine.write(table, to: .xlsx), "xl/worksheets/sheet1.xml")?.contains("first\nsecond") == true)
+        for path in [#"C:\images\pic.png"#, "chart.a&b", "chart#1.png"] {
+            let image = DocumentSection(kind: .image, markdown: "", sourcePath: path, metadata: ["base64": Data([1, 2, 3]).base64EncodedString(), "mimeType": "image/png"])
+            let docx = try PicoDocsEngine.write(ConverterResult(sections: [image]), to: .docx)
+            #expect(text(docx, "word/document.xml")?.contains("<w:drawing>") == true)
+            let recovered = try await PicoDocsEngine.convert(data: docx, filename: "roundtrip.docx")
+            #expect(recovered.sections.contains { $0.kind == .image })
+            if path == "chart.a&b" { #expect(text(docx, "[Content_Types].xml")?.contains("a&amp;b") == true) }
+            if path == "chart#1.png" { #expect(text(docx, "word/_rels/document.xml.rels")?.contains("chart%231.png") == true) }
+        }
+    }
+
     // MARK: - Helpers
 
     /// Reads a single entry from an in-memory archive (test-side mirror of the

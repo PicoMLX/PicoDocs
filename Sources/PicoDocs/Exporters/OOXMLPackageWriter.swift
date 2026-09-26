@@ -83,7 +83,7 @@ struct OOXMLPackageWriter {
 
     /// Whether a scalar is allowed in an XML 1.0 document (tab/LF/CR, then the
     /// permitted BMP and supplementary ranges).
-    private static func isValidXMLScalar(_ scalar: Unicode.Scalar) -> Bool {
+    static func isValidXMLScalar(_ scalar: Unicode.Scalar) -> Bool {
         let v = scalar.value
         return v == 0x9 || v == 0xA || v == 0xD ||
             (v >= 0x20 && v <= 0xD7FF) ||

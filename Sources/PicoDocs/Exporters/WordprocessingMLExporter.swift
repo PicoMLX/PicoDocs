@@ -282,7 +282,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 relationships.append(Relationship(
                     id: relID,
                     type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
-                    target: "media/\(filename)",
+                    target: "media/\(filename.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))) ?? filename)",
                     external: false
                 ))
                 emittedMediaRel[filename] = relID
@@ -383,7 +383,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         <Default Extension="xml" ContentType="application/xml"/>
         """
         for ext in mediaExtensions.sorted() {
-            defaults += "<Default Extension=\"\(ext)\" ContentType=\"\(OfficeMediaType.mimeType(forExtension: ext))\"/>"
+            defaults += "<Default Extension=\"\(OOXMLPackageWriter.escapeAttribute(ext))\" ContentType=\"\(OfficeMediaType.mimeType(forExtension: ext))\"/>"
         }
         var overrides = "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>"
         if hasNumbering {

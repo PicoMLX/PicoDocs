@@ -64,6 +64,10 @@ public struct PPTXExporter: DocumentExporter {
                     groups.append([section])
                 }
             }
+            // Keynote's recovery path may carry text without slide provenance.
+            // Keep it as a leading slide rather than losing it when tables exist.
+            let unnumbered = result.sections.filter { $0.slideNumber == nil && $0.kind != .slide && $0.kind != .image }
+            if !unnumbered.isEmpty { groups.insert(unnumbered, at: 0) }
             return groups.map { sections in
                 Slide(title: sections.first(where: { $0.kind == .slide })?.title ?? "",
                       body: sections.flatMap { bodyLines(MarkdownBlockParser.parse($0.markdown)) })

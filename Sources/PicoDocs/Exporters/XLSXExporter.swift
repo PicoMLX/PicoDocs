@@ -74,7 +74,7 @@ public struct XLSXExporter: DocumentExporter {
             case .table(let tableRows):
                 // Cells carry inline Markdown (`**Total**`, `[label](url)`); write the
                 // visible value, as every other block does, not the syntax.
-                rows += tableRows.map { $0.map(plain) }
+                rows += tableRows.map { $0.map { plain($0.replacingOccurrences(of: "<br>", with: "\n")) } }
             case .heading(_, let text):
                 rows.append([plain(text)])
             case .paragraph(let text):
@@ -105,9 +105,10 @@ public struct XLSXExporter: DocumentExporter {
         var row: [String] = []
         var field = ""
         var inQuotes = false
+        var fieldStarted = false
         let chars = Array(csv)
         var i = 0
-        func endField() { row.append(field); field = "" }
+        func endField() { row.append(field); field = ""; fieldStarted = false }
         func endRow() { endField(); rows.append(row); row = [] }
         while i < chars.count {
             let c = chars[i]
@@ -119,7 +120,7 @@ public struct XLSXExporter: DocumentExporter {
                 field.append(c); i += 1
             } else {
                 switch c {
-                case "\"": inQuotes = true; i += 1
+                case "\"": fieldStarted = true; inQuotes = true; i += 1
                 case ",": endField(); i += 1
                 case "\r":
                     if i + 1 < chars.count, chars[i + 1] == "\n" { i += 1 }
@@ -130,7 +131,7 @@ public struct XLSXExporter: DocumentExporter {
             }
         }
         // Flush the trailing field/row unless the input ended exactly on a newline.
-        if !field.isEmpty || !row.isEmpty { endRow() }
+        if fieldStarted || !field.isEmpty || !row.isEmpty { endRow() }
         return rows
     }
 
@@ -158,7 +159,7 @@ public struct XLSXExporter: DocumentExporter {
         // emoji, skin-tone modifiers, family sequences — survive intact; rebuilding
         // a String from the scalar view re-segments them into single characters.
         let space: Unicode.Scalar = " "
-        let cleanedScalars = name.unicodeScalars.map { invalid.contains($0) ? space : $0 }
+        let cleanedScalars = name.unicodeScalars.filter(OOXMLPackageWriter.isValidXMLScalar).map { invalid.contains($0) ? space : $0 }
         let cleaned = String(String.UnicodeScalarView(cleanedScalars))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return String(cleaned.prefix(31)).trimmingCharacters(in: CharacterSet(charactersIn: "'"))

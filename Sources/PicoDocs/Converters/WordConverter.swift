@@ -594,6 +594,8 @@ public struct WordConverter: DocumentConverter {
     /// for a notes part stored in a subfolder). Normalizes segment-by-segment
     /// (single pass), so `.`/`..` are collapsed without any risk of looping.
     static func resolvePartPath(_ target: String, relativeTo baseDirectory: String) -> String {
+        // Relationship targets are package URIs, while ZIP entries use decoded names.
+        let target = target.removingPercentEncoding ?? target
         let combined: String
         if target.hasPrefix("/") {
             combined = String(target.dropFirst())
