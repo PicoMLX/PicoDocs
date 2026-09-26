@@ -57,7 +57,7 @@ enum HTMLToMarkdown {
     private static func render(_ node: Node, into out: inout String, preserveWhitespace: Bool = false) {
         if let text = node as? TextNode {
             let whole = text.getWholeText()
-            out += preserveWhitespace ? whole : collapseWhitespace(whole)
+            out += preserveWhitespace ? whole : collapseWhitespace(whole).map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
             return
         }
         guard let element = node as? Element else { return }
@@ -178,9 +178,7 @@ enum HTMLToMarkdown {
                 // cells can't contain newlines) and escape pipes.
                 var rendered = ""
                 renderChildren(of: cell, into: &rendered)
-                return MarkdownTableCell.escapeDelimiters(
-                    collapseWhitespace(rendered).trimmingCharacters(in: .whitespaces)
-                )
+                return collapseWhitespace(rendered).trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "|", with: "\\|")
             })
         }
         guard !rows.isEmpty else { return "" }
