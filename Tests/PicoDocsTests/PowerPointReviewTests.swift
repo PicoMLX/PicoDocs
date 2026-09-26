@@ -50,7 +50,7 @@ struct PowerPointReviewTests {
         let slide = "<deck:sld \(namespace)><deck:cSld><deck:spTree>\(FixtureBuilder.titleShape("Alias").replacingOccurrences(of: "p:", with: "deck:"))</deck:spTree></deck:cSld></deck:sld>"
         let presentation = "<deck:presentation \(namespace)><deck:sldIdLst><deck:sldId r:id=\"s\"/></deck:sldIdLst></deck:presentation>"
         let rels = FixtureBuilder.relationshipsXML([("s", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide", "slides/s.xml")])
-        let file = PagesConverterTests.makeZip([(name: "ppt/presentation.xml", data: Array(presentation.utf8)), (name: "ppt/_rels/presentation.xml.rels", data: Array(rels.utf8)), (name: "ppt/slides/s.xml", data: Array(slide.utf8))])
+        let file = PagesConverterTests.makeZip([(name: "[Content_Types].xml", data: Array("<Types/>".utf8)), (name: "ppt/presentation.xml", data: Array(presentation.utf8)), (name: "ppt/_rels/presentation.xml.rels", data: Array(rels.utf8)), (name: "ppt/slides/s.xml", data: Array(slide.utf8))])
         #expect(try await PicoDocsEngine.convert(data: file, filename: "alias.pptx").markdown() == "## Alias")
     }
 

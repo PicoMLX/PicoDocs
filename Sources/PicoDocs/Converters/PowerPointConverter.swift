@@ -40,6 +40,8 @@ public struct PowerPointConverter: DocumentConverter {
             throw PicoDocsError.fileCorrupted
         }
         let archive = PowerPointPackage(archive: zip)
+        _ = Self.contentType("", archive: archive)
+        try archive.check()
         guard let presentation = Self.xml(archive, path: "ppt/presentation.xml"), presentation.children().first()?.tagName().lowercased() == "p:presentation" else {
             try archive.check()
             throw PicoDocsError.fileCorrupted
@@ -55,6 +57,7 @@ public struct PowerPointConverter: DocumentConverter {
             let relationships = Self.relationships(archive, forPart: slidePath)
             var context = SlideContext(archive: archive, partPath: slidePath, relationships: relationships, images: images)
             context.defaultTextStyle = defaultTextStyle
+            context.placeholders = parts.placeholders
             // Layout and master supply inherited list formatting for placeholders.
             let layoutPath = Self.relatedPart(of: slidePath, type: "/slideLayout", relationships: relationships, archive: archive)
             context.layout = layoutPath.flatMap { parts.document($0, root: "p:sldlayout") }
@@ -104,9 +107,10 @@ public struct PowerPointConverter: DocumentConverter {
         var paths: [String] = []
         guard let root = presentation.children().first(), root.tagName().lowercased() == "p:presentation" else { throw PicoDocsError.fileCorrupted }
         let list = child(of: root, named: "p:sldidlst")
-        // A deck may have no slides, but slide IDs cannot live inside extensions.
-        if list == nil, !((try? presentation.getElementsByTag("p:sldId").isEmpty()) ?? true) { throw PicoDocsError.fileCorrupted }
-        for slideID in list?.children().array().filter({ $0.tagName().lowercased() == "p:sldid" }) ?? [] {
+        let direct = list?.children().array().filter { $0.tagName().lowercased() == "p:sldid" } ?? []
+        let all = (try? presentation.getElementsByTag("p:sldId").array()) ?? []
+        guard all.count == direct.count else { throw PicoDocsError.fileCorrupted }
+        for slideID in direct {
             guard let id = try? slideID.attr("r:id"), let relation = relationships[id], !relation.external, relation.type.hasSuffix("/slide") else { throw PicoDocsError.fileCorrupted }; let target = relation.target
             paths.append(WordConverter.resolvePartPath(target, relativeTo: "ppt"))
         }
@@ -140,6 +144,7 @@ public struct PowerPointConverter: DocumentConverter {
             let path = WordConverter.resolvePartPath(master.target, relativeTo: directory(of: notesPath))
             guard let document = parts.document(path, root: "p:notesmaster") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
             context.master = document
+            context.placeholders = parts.placeholders
         }
         let paragraphs = tree.children().array().filter { $0.tagName().lowercased() == "p:sp" }
             .filter { placeholderType(of: $0) == "body" }
@@ -180,12 +185,14 @@ public struct PowerPointConverter: DocumentConverter {
         var layout: Document?
         var master: Document?
         var defaultTextStyle: Element?
+        var placeholders = PlaceholderCache()
     }
 
     /// Parses each shared part (layouts, masters) once per deck.
     struct PartCache {
         let archive: PowerPointPackage
         private var documents: [String: Document?] = [:]
+        let placeholders = PlaceholderCache()
 
         init(archive: PowerPointPackage) { self.archive = archive }
 
@@ -239,8 +246,9 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     private static func hyperlink(_ click: Element?, context: SlideContext) -> String? {
-        guard let id = try? click?.attr("r:id"), !id.isEmpty,
-              let relation = context.relationships[id], relation.external else { return nil }
+        guard let id = try? click?.attr("r:id"), !id.isEmpty else { return nil }
+        guard let relation = context.relationships[id] else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
+        guard relation.external else { return nil }
         guard relation.type.hasSuffix("/hyperlink") else {
             context.archive.fail(PicoDocsError.fileCorrupted)
             return nil
@@ -380,10 +388,10 @@ public struct PowerPointConverter: DocumentConverter {
                 fallback = bodyLike && type != "subTitle" ? .bullet : nil
             }
             if let layout = context.layout {
-                sources.append(matchingPlaceholder(in: layout, type: type, index: index).flatMap(listStyle))
+                sources.append(matchingPlaceholder(in: layout, type: type, index: index, cache: context.placeholders).flatMap(listStyle))
             }
             if let master = context.master {
-                sources.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "").flatMap(listStyle))
+                sources.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap(listStyle))
                 let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
                 sources.append(try? master.getElementsByTag(style).first())
             }
@@ -407,9 +415,9 @@ public struct PowerPointConverter: DocumentConverter {
             let type = raw.isEmpty ? "obj" : raw
             let index = (try? placeholder.attr("idx")) ?? ""
             let bodyLike = ["obj", "body", "subTitle"].contains(type)
-            if let layout = context.layout { styles.append(matchingPlaceholder(in: layout, type: type, index: index).flatMap(listStyle)) }
+            if let layout = context.layout { styles.append(matchingPlaceholder(in: layout, type: type, index: index, cache: context.placeholders).flatMap(listStyle)) }
             if let master = context.master {
-                styles.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "").flatMap(listStyle))
+                styles.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap(listStyle))
                 let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
                 styles.append(try? master.getElementsByTag(style).first())
             }
@@ -427,34 +435,43 @@ public struct PowerPointConverter: DocumentConverter {
     /// The placeholder shape in a layout/master matching a slide placeholder: by
     /// `idx` when both have one, else by type (a typeless placeholder is "obj",
     /// which a master provides as "body").
-    private static func matchingPlaceholder(in part: Document, type: String, index: String) -> Element? {
-        guard let root = part.children().first(), let common = child(of: root, named: "p:csld"),
-              let tree = child(of: common, named: "p:sptree") else { return nil }
-        var shapes: [Element] = []
-        func collect(_ container: Element) {
-            for element in container.children().array() {
-                switch element.tagName().lowercased() {
-                case "p:sp": shapes.append(element)
-                case "p:grpsp": collect(element)
-                case "mc:alternatecontent": if let selected = selectedAlternateBranch(element) { collect(selected) }
-                default: break
+    final class PlaceholderCache {
+        private struct Index { var byID: [String: Element] = [:]; var byType: [String: Element] = [:] }
+        private var indexes: [ObjectIdentifier: Index] = [:]
+        private(set) var buildCount = 0
+
+        func match(in part: Document, type: String, index: String) -> Element? {
+            let key = ObjectIdentifier(part)
+            if indexes[key] == nil {
+                var result = Index()
+                func collect(_ container: Element) {
+                    for element in container.children().array() {
+                        switch element.tagName().lowercased() {
+                        case "p:sp":
+                            guard let ph = PowerPointConverter.placeholder(of: element) else { continue }
+                            let id = (try? ph.attr("idx")) ?? ""
+                            let raw = (try? ph.attr("type")) ?? ""
+                            let kind = raw.isEmpty ? "obj" : raw
+                            let equivalent = ["title", "ctrTitle"].contains(kind) ? "title" : (["body", "obj"].contains(kind) ? "body" : kind)
+                            if !id.isEmpty, result.byID[id] == nil { result.byID[id] = element }
+                            if result.byType[equivalent] == nil { result.byType[equivalent] = element }
+                        case "p:grpsp": collect(element)
+                        case "mc:alternatecontent": if let selected = PowerPointConverter.selectedAlternateBranch(element) { collect(selected) }
+                        default: break
+                        }
+                    }
                 }
+                if let root = part.children().first(), let common = PowerPointConverter.child(of: root, named: "p:csld"),
+                   let tree = PowerPointConverter.child(of: common, named: "p:sptree") { collect(tree) }
+                indexes[key] = result; buildCount += 1
             }
+            let equivalent = ["title", "ctrTitle"].contains(type) ? "title" : (["body", "obj"].contains(type) ? "body" : type)
+            return indexes[key]?.byID[index] ?? indexes[key]?.byType[equivalent]
         }
-        collect(tree)
-        func phType(_ shape: Element) -> String? {
-            guard let placeholder = placeholder(of: shape) else { return nil }
-            let type = (try? placeholder.attr("type")) ?? ""
-            return type.isEmpty ? "obj" : type
-        }
-        if !index.isEmpty, let match = shapes.first(where: { shape in
-            placeholder(of: shape).flatMap { try? $0.attr("idx") } == index
-        }) {
-            return match
-        }
-        let equivalent: Set<String> = type == "title" || type == "ctrTitle" ? ["title", "ctrTitle"]
-            : type == "obj" || type == "body" ? ["obj", "body"] : [type]
-        return shapes.first { phType($0).map(equivalent.contains) ?? false }
+    }
+
+    private static func matchingPlaceholder(in part: Document, type: String, index: String, cache: PlaceholderCache) -> Element? {
+        cache.match(in: part, type: type, index: index)
     }
 
     private static func listStyle(_ shape: Element) -> Element? {
@@ -772,13 +789,23 @@ public struct PowerPointConverter: DocumentConverter {
     static func contentType(_ path: String, archive: PowerPointPackage) -> String? {
         if archive.contentTypes == nil {
             var types: [String: String] = [:]
-            if let manifest = xml(archive, path: "[Content_Types].xml") {
-                for entry in (try? manifest.getElementsByTag("Override").array()) ?? [] {
-                    if let name = try? entry.attr("PartName"), let type = validatedMIME(try? entry.attr("ContentType")) { types[name] = type }
+            guard let manifest = xml(archive, path: "[Content_Types].xml"),
+                  let root = manifest.children().first(), root.tagName().lowercased() == "types" else {
+                archive.fail(PicoDocsError.fileCorrupted); return nil
+            }
+            for entry in root.children().array() {
+                let key: String
+                switch entry.tagName().lowercased() {
+                case "override":
+                    guard let name = try? entry.attr("PartName"), name.hasPrefix("/"), name.count > 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+                    key = name
+                case "default":
+                    guard let ext = try? entry.attr("Extension"), !ext.isEmpty else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+                    key = "." + ext.lowercased()
+                default: archive.fail(PicoDocsError.fileCorrupted); return nil
                 }
-                for entry in (try? manifest.getElementsByTag("Default").array()) ?? [] {
-                    if let ext = try? entry.attr("Extension"), let type = validatedMIME(try? entry.attr("ContentType")) { types["." + ext.lowercased()] = type }
-                }
+                guard entry.children().isEmpty(), let type = validatedMIME(try? entry.attr("ContentType")), types[key] == nil else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+                types[key] = type
             }
             archive.contentTypes = types
         }
@@ -829,7 +856,7 @@ public struct PowerPointConverter: DocumentConverter {
         var map: [String: Relationship] = [:]
         for element in document.children().first()?.children().array() ?? [] where element.tagName().lowercased() == "relationship" {
             guard let id = try? element.attr("Id"), let target = try? element.attr("Target"),
-                  !id.isEmpty, !target.isEmpty else { continue }
+                  !id.isEmpty, !target.isEmpty, let type = try? element.attr("Type"), !type.isEmpty else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
             guard map[id] == nil else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
             let external = ((try? element.attr("TargetMode")) ?? "").lowercased() == "external"
             if !external {
@@ -841,7 +868,7 @@ public struct PowerPointConverter: DocumentConverter {
                     } else if segment != "." { depth += 1 }
                 }
             }
-            map[id] = Relationship(type: (try? element.attr("Type")) ?? "", target: target, external: external)
+            map[id] = Relationship(type: type, target: target, external: external)
         }
         archive.relationshipMaps[part] = map
         return map

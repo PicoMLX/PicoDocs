@@ -1,9 +1,62 @@
 import Foundation
 import Testing
 import ZIPFoundation
+import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func extraSlideIDsAreRejectedAlongsideAValidDirectList() throws {
+        typealias B = PowerPointConverterTests
+        let deck = B.deck(slides:[.init(file:"s.xml",shapes:B.titleShape("Slide"))])
+        let package = PowerPointPackage(archive:try #require(Archive(data:deck,accessMode:.read)))
+        let source = "<p:presentation \(B.namespaces)><p:sldIdLst><p:sldId r:id=\"rIdSlide0\"/></p:sldIdLst><p:extLst><p:sldId r:id=\"rIdSlide0\"/></p:extLst></p:presentation>"
+        let document = try SwiftSoup.parse(source,"",SwiftSoup.Parser.xmlParser())
+        #expect(throws:PicoDocsError.fileCorrupted) { try PowerPointConverter.slidePaths(document,archive:package) }
+    }
+
+    @Test func unresolvedClicksAndIncompleteRelationshipsAreCorruption() async throws {
+        typealias B = PowerPointConverterTests
+        let run = B.shape(placeholder:nil,paragraphs:[#"<a:p><a:r><a:rPr><a:hlinkClick r:id="missing"/></a:rPr><a:t>Text</a:t></a:r></a:p>"#])
+        let shape = B.shape(placeholder:nil,paragraphs:["<a:p><a:r><a:t>Text</a:t></a:r></a:p>"]).replacingOccurrences(of:#"<p:cNvPr id="2" name="Shape"/>"#,with:#"<p:cNvPr id="2" name="Shape"><a:hlinkClick r:id="missing"/></p:cNvPr>"#)
+        for content in [run,shape] {
+            await #expect(throws:PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data:B.deck(slides:[.init(file:"s.xml",shapes:content)]),filename:"unresolved.pptx") }
+        }
+        for attributes in [#"Id="x" Type="type""#, #"Target="target" Type="type""#, #"Id="x" Target="target""#] {
+            let xml = "<Relationships><Relationship " + attributes + "/></Relationships>"
+            let data = PagesConverterTests.makeZip([(name:"ppt/slides/_rels/s.xml.rels",data:Array(xml.utf8))])
+            let package = PowerPointPackage(archive:try #require(Archive(data:data,accessMode:.read)))
+            #expect(PowerPointConverter.relationships(package,forPart:"ppt/slides/s.xml").isEmpty)
+            #expect(throws:PicoDocsError.fileCorrupted) { try package.check() }
+        }
+    }
+
+    @Test func invalidOrAbsentContentTypesFailValidation() throws {
+        let cases: [String?] = [nil,"<Types>","<Other/>",#"<Types><Wrapper><Default Extension="png" ContentType="image/png"/></Wrapper></Types>"#,#"<Types><Default Extension="png"/></Types>"#,#"<Types><Default Extension="png" ContentType="image/png&quot; onerror=&quot;x"/></Types>"#]
+        for source in cases {
+            var entries: [(name:String,data:[UInt8])] = [("dummy",[1])]
+            if let source { entries.append(("[Content_Types].xml",Array(source.utf8))) }
+            let package = PowerPointPackage(archive:try #require(Archive(data:PagesConverterTests.makeZip(entries),accessMode:.read)))
+            #expect(PowerPointConverter.contentType("ppt/media/a.bin",archive:package) == nil)
+            #expect(throws:PicoDocsError.fileCorrupted) { try package.check() }
+        }
+    }
+
+    @Test func placeholderIndexesAreReusedAcrossSharedPartLookups() throws {
+        typealias B = PowerPointConverterTests
+        let shape = B.shape(placeholder:#"<p:ph type="body" idx="1"/>"#,paragraphs:[])
+        let source = "<p:sldLayout \(B.namespaces)><p:cSld><p:spTree>" + shape + "</p:spTree></p:cSld></p:sldLayout>"
+        let data = PagesConverterTests.makeZip([(name:"l.xml",data:Array(source.utf8))])
+        let package = PowerPointPackage(archive:try #require(Archive(data:data,accessMode:.read)))
+        var cache = PowerPointConverter.PartCache(archive:package)
+        let firstResult = cache.document("l.xml",root:"p:sldlayout")
+        let first = try #require(firstResult)
+        for _ in 0..<100 { #expect(cache.placeholders.match(in:first,type:"body",index:"1") != nil) }
+        let secondResult = cache.document("l.xml",root:"p:sldlayout")
+        let second = try #require(secondResult)
+        #expect(cache.placeholders.match(in:second,type:"obj",index:"") != nil)
+        #expect(cache.placeholders.buildCount == 1)
+    }
+
     @Test func externalClicksRequireHyperlinkRelationships() async throws {
         typealias B = PowerPointConverterTests
         let type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
@@ -512,7 +565,7 @@ struct PowerPointFollowupTests {
             "<a:p>" + runs.map { "<a:r><a:t>\($0)</a:t></a:r>" }.joined() + "</a:p>"
         }
         let picture = #"<p:pic><p:nvPicPr><p:cNvPr descr="Image"/></p:nvPicPr><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic>"#
-        let manifest = #"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="png" ContentType="image/png&quot; onerror=&quot;alert(1)"/></Types>"#
+        let manifest = #"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="png" ContentType="image/png"/></Types>"#
         let data = B.deck(slides: [.init(file: "s.xml", shapes: B.shape(placeholder: nil, paragraphs: paragraphs) + picture,
             relationships: [("image", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "../media/p.png")])],
             extraParts: [("ppt/media/p.png", [1,2,3]), ("[Content_Types].xml", Array(manifest.utf8))])

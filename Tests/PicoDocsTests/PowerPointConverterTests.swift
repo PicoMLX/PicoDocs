@@ -274,6 +274,9 @@ struct PowerPointConverterTests {
     static func deck(slides: [Slide], order: [String]? = nil,
                      extraParts: [(name: String, data: [UInt8])] = [], notesBacklinks: Bool = true) -> Data {
         var extraParts = extraParts
+        if !extraParts.contains(where: { $0.name == "[Content_Types].xml" }) {
+            extraParts.append(("[Content_Types].xml", Array("<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>".utf8)))
+        }
         let order = order ?? slides.map(\.file)
         let ids = order.enumerated().map { "<p:sldId id=\"\(256 + $0.offset)\" r:id=\"rIdSlide\($0.offset)\"/>" }.joined()
         let presentation = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><p:presentation \(namespaces)><p:sldIdLst>\(ids)</p:sldIdLst></p:presentation>"
