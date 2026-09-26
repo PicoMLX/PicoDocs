@@ -100,7 +100,8 @@ public struct WordConverter: DocumentConverter {
         var blocks: [String] = []
         var previousList: MarkdownBlockParser.ListKind?
         var rootListInstance: String?
-        for element in container.children().array() {
+        var pending = Array(container.children().array().reversed())
+        while let element = pending.popLast() {
             try Task.checkCancellation()
             switch element.tagName().lowercased() {
             case "w:p":
@@ -120,9 +121,8 @@ public struct WordConverter: DocumentConverter {
                 let table = renderTable(element, relationships: relationships, numbering: numbering)
                 if !table.isEmpty { blocks.append(table) }
             case "w:sdt":
-                previousList = nil
-                if let content = try? element.getElementsByTag("w:sdtContent").first() {
-                    blocks.append(contentsOf: try renderBlocks(in: content, relationships: relationships, numbering: numbering))
+                if let content = element.children().first(where: { $0.tagName().lowercased() == "w:sdtcontent" }) {
+                    pending.append(contentsOf: content.children().array().reversed())
                 }
             default:
                 continue
@@ -212,7 +212,7 @@ public struct WordConverter: DocumentConverter {
         let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
         let prefix = numbering.map { $0.prefix(numPr: numPr, style: style) } ?? (numPr != nil ? "- " : nil)
         let text = escapeBlockStarts(renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces))
-        guard !text.isEmpty else { return nil }
+        guard !text.isEmpty else { return prefix }
 
         if let level = headingLevel(forStyle: style) {
             return String(repeating: "#", count: level) + " " + text
@@ -426,7 +426,11 @@ public struct WordConverter: DocumentConverter {
                 // own cells still render — see isInsideTextBox.)
                 for paragraph in (try? tc.getElementsByTag("w:p").array()) ?? [] {
                     if isInsideTextBox(paragraph, before: tc) { continue }
-                    let t = (renderParagraph(paragraph, relationships: relationships, numbering: numbering) ?? "").trimmingCharacters(in: .whitespaces)
+                    let properties = paragraph.children().first { $0.tagName().lowercased() == "w:ppr" }
+                    let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
+                    let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
+                    let prefix = numbering?.prefix(numPr: numPr, style: style)
+                    let t = ((prefix ?? "") + renderInline(paragraph, relationships: relationships)).trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
@@ -474,7 +478,9 @@ public struct WordConverter: DocumentConverter {
         for rel in (try? doc.getElementsByTag("Relationship").array()) ?? [] {
             guard let id = try? rel.attr("Id"), let target = try? rel.attr("Target"),
                   !id.isEmpty, !target.isEmpty else { continue }
-            map[id] = target
+            let isImage = ((try? rel.attr("Type")) ?? "").hasSuffix("/image")
+            let directory = ((path as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+            map[id] = isImage ? "/" + resolvePartPath(target, relativeTo: directory) : target
         }
         return map
     }
@@ -604,8 +610,8 @@ public struct WordConverter: DocumentConverter {
     /// strict failure.
     static func imageMarkdown(in drawing: Element, relationships: [String: String]) -> String {
         guard let target = imageTarget(in: drawing, relationships: relationships) else { return "" }
-        let filename = ((target.removingPercentEncoding ?? target) as NSString).lastPathComponent
-        return "![\(escapeLinkLabel(imageAltText(in: drawing)))](\(escapeLinkDestination(filename)))"
+        let path = resolvePartPath(target, relativeTo: "word")
+        return "![\(escapeLinkLabel(imageAltText(in: drawing)))](\(escapeLinkDestination(path)))"
     }
 
     /// The relationship Target (e.g. "media/image1.png") an image references via

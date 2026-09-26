@@ -245,7 +245,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                         let hardBreak = hasNext && (line.hasSuffix("  ") || line.hasSuffix("\\"))
                         let content = hardBreak
                             ? (line.hasSuffix("\\") ? String(line.dropLast()) : line.trimmingCharacters(in: .whitespaces))
-                            : line
+                            : (hasNext ? line.replacingOccurrences(of: "[ \t]+$", with: "", options: .regularExpression) : line)
                         out += textRun(content, bold: bold, italic: italic, monospace: false)
                         if hasNext {
                             out += hardBreak ? "<w:r><w:br/></w:r>" : textRun(" ", bold: bold, italic: italic, monospace: false)
@@ -442,9 +442,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
     }
 
     private static func relationshipURI(_ target: String) -> String {
-        let allowed = CharacterSet.urlFragmentAllowed.union(.urlQueryAllowed).union(.urlPathAllowed)
-            .union(CharacterSet(charactersIn: ":/?#[]@!$&'()*+,;=%"))
-        return target.addingPercentEncoding(withAllowedCharacters: allowed) ?? target
+        OOXMLPackageWriter.relationshipURI(target)
     }
 
     private static var stylesXML: String {

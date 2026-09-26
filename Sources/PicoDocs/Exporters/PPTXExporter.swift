@@ -166,7 +166,7 @@ public struct PPTXExporter: DocumentExporter {
             guard index + 1 < lines.count else { return line }
             if line.hasSuffix("\\") { return String(line.dropLast()) + "\n" }
             if line.hasSuffix("  ") { return line.trimmingCharacters(in: .whitespaces) + "\n" }
-            return line + " "
+            return line.replacingOccurrences(of: "[ \t]+$", with: "", options: .regularExpression) + " "
         }.joined()
     }
 
@@ -231,17 +231,17 @@ public struct PPTXExporter: DocumentExporter {
                 output += runs(children, bold: bold, italic: true, link: link, relationships: &relationships)
             case .link(let label, let destination):
                 let id = "hyperlink\(relationships.count + 1)"
-                let allowed = CharacterSet.urlFragmentAllowed.union(.urlQueryAllowed).union(.urlPathAllowed)
-                    .union(CharacterSet(charactersIn: ":/?#[]@!$&'()*+,;=%"))
-                let target = destination.addingPercentEncoding(withAllowedCharacters: allowed) ?? destination
+                let target = OOXMLPackageWriter.relationshipURI(destination)
                 relationships.append("<Relationship Id=\"\(id)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"\(OOXMLPackageWriter.escapeAttribute(target))\" TargetMode=\"External\"/>")
                 output += runs(label, bold: bold, italic: italic, link: id, relationships: &relationships)
             default:
                 let text = [node].plainText
                 var attributes = bold ? " b=\"1\"" : ""
                 if italic { attributes += " i=\"1\"" }
+                let font: String
+                if case .code = node { font = "<a:latin typeface=\"Courier New\"/>" } else { font = "" }
                 let hyperlink = link.map { "<a:hlinkClick r:id=\"\($0)\"/>" } ?? ""
-                let properties = attributes.isEmpty && hyperlink.isEmpty ? "" : "<a:rPr\(attributes)>\(hyperlink)</a:rPr>"
+                let properties = attributes.isEmpty && hyperlink.isEmpty && font.isEmpty ? "" : "<a:rPr\(attributes)>\(font)\(hyperlink)</a:rPr>"
                 output += text.components(separatedBy: "\n").map {
                     "<a:r>\(properties)<a:t>\(OOXMLPackageWriter.escape($0))</a:t></a:r>"
                 }.joined(separator: "<a:br/>")

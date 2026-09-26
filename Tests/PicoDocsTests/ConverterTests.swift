@@ -27,7 +27,7 @@ struct ConverterTests {
         let result = try await PicoDocsEngine.convert(data: Fixture.data("image", "docx"), filename: "image.docx")
         let md = result.markdown()
         #expect(md.contains("Before image."))
-        #expect(md.contains("![A red dot](image1.png)"))   // alt text + filename, inline at position
+        #expect(md.contains("![A red dot](word/media/image1.png)"))   // alt text + filename, inline at position
         // Referenced once: the .image section's bytes don't render a duplicate.
         #expect(md.components(separatedBy: "image1.png").count == 2)
         let image = result.sections.first { $0.kind == .image }
@@ -121,7 +121,7 @@ struct ConverterTests {
         let md = try await PicoDocsEngine.convert(
             data: Fixture.data("linked-image", "docx"), filename: "linked-image.docx"
         ).markdown()
-        #expect(md.contains("![A red dot](image1.png)"))
+        #expect(md.contains("![A red dot](word/media/image1.png)"))
         // We don't emit a nested linked image the renderers can't parse.
         #expect(!md.contains("https://example.com"))
     }

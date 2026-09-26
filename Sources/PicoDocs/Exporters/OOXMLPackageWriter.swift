@@ -16,6 +16,14 @@ import ZIPFoundation
 
 struct OOXMLPackageWriter {
 
+    /// Preserve valid URI escapes while encoding literal percent characters.
+    static func relationshipURI(_ target: String) -> String {
+        let protected = target.replacingOccurrences(of: "%(?![0-9A-Fa-f]{2})", with: "%25", options: .regularExpression)
+        let allowed = CharacterSet.urlFragmentAllowed.union(.urlQueryAllowed).union(.urlPathAllowed)
+            .union(CharacterSet(charactersIn: ":/?#[]@!$&'()*+,;=%"))
+        return protected.addingPercentEncoding(withAllowedCharacters: allowed) ?? protected
+    }
+
     private var archive: Archive
 
     init() throws {

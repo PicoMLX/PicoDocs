@@ -8,6 +8,80 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func importedImagesKeepPackageIdentity() async throws {
+        let namespaces = #"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main""#
+        let document = "<w:document \(namespaces)><w:body><w:p>" + ["a","b"].map { "<w:r><w:drawing><a:blip r:embed=\"\($0)\"/></w:drawing></w:r>" }.joined() + "</w:p></w:body></w:document>"
+        let rels = #"<Relationships><Relationship Id="a" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/charts/logo.png"/><Relationship Id="b" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/headers/logo.png"/></Relationships>"#
+        let data = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/_rels/document.xml.rels", data: Array(rels.utf8)), (name: "word/media/charts/logo.png", data: [1]), (name: "word/media/headers/logo.png", data: [2])])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "images.docx")
+        #expect(result.markdown().contains("word/media/charts/logo.png")); #expect(result.markdown().contains("word/media/headers/logo.png"))
+        let output = try PicoDocsEngine.write(result, to: .docx)
+        #expect(try xml(output, "word/document.xml").components(separatedBy: "<w:drawing>").count - 1 == 2)
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("base64,AQ==")); #expect(html.contains("base64,Ag=="))
+    }
+
+    @Test func tableBlockStylesAndContentControlsRemainStructural() async throws {
+        let ns = #"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#
+        let cells = ["Heading1","Quote","PicoCodeBlock"].map { "<w:tc><w:p><w:pPr><w:pStyle w:val=\"\($0)\"/></w:pPr><w:r><w:t>Cell \($0)</w:t></w:r></w:p></w:tc>" }.joined()
+        func item(_ text: String, level: Int) -> String { "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"\(level)\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>" }
+        let document = "<w:document \(ns)><w:body><w:tbl><w:tr>\(cells)</w:tr></w:tbl>" + item("Parent", level: 0) + "<w:sdt><w:sdtContent>" + item("Child", level: 1) + "</w:sdtContent></w:sdt>" + item("Next", level: 0) + "</w:body></w:document>"
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"decimal\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:numFmt w:val=\"bullet\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8))]), filename: "structure.docx")
+        #expect(result.markdown().contains("| Cell Heading1 | Cell Quote | Cell PicoCodeBlock |"))
+        #expect(result.markdown().contains("1. Parent\n   - Child\n2. Next"))
+        let output = try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml")
+        #expect(output.contains(#"<w:ilvl w:val="1"/>"#)); #expect(!output.contains("# Cell")); #expect(!output.contains("&gt; Cell")); #expect(!output.contains("```"))
+    }
+
+    @Test func emptyListItemsRoundTrip() async throws {
+        for source in ["-", "2.", "- first\n-\n- third"] {
+            let result = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(markdown: source, to: .docx), filename: "empty-item.docx")
+            let second = try PicoDocsEngine.write(result, to: .docx)
+            let count = try xml(second, "word/document.xml").components(separatedBy: "<w:numPr>").count - 1
+            #expect(count == (source.contains("first") ? 3 : 1))
+        }
+    }
+
+    @Test func spreadsheetTokensAndLiteralCrossFormatCells() async throws {
+        let literal = "*value* [label](url) _x000A_ _x005F_"
+        let source = ConverterResult(sections: [.init(kind: .sheet, markdown: "", metadata: ["csv": literal])])
+        let xlsx = try PicoDocsEngine.write(source, to: .xlsx)
+        let worksheet = try xml(xlsx, "xl/worksheets/sheet1.xml")
+        #expect(worksheet.contains("_x005F_x000A_ _x005F_x005F_"))
+        let result = try await PicoDocsEngine.convert(data: xlsx, filename: "tokens.xlsx")
+        #expect(result.sections.first?.metadata["csv"] == "\"" + literal + "\"")
+        for (format,path,tag) in [(ExportableFileType.docx,"word/document.xml","w:t"),(.pptx,"ppt/slides/slide1.xml","a:t")] {
+            let content = try xml(PicoDocsEngine.write(result, to: format), path)
+            let parsed = try SwiftSoup.parse(content, "", SwiftSoup.Parser.xmlParser())
+            let visible = try parsed.getElementsByTag(tag).array().map { $0.getChildNodes().compactMap { ($0 as? TextNode)?.getWholeText() }.joined() }.joined()
+            #expect(visible.contains(literal)); #expect(!content.contains("hyperlink")); #expect(!content.contains("hlinkClick"))
+        }
+        #expect(SpreadsheetMLText.decode(SpreadsheetMLText.encode("_x000A_\u{1}😀")) == "_x000A_\u{1}😀")
+    }
+
+    @Test func codeTypefaceSoftBreaksAndHyperlinkTargets() throws {
+        let code = try xml(PicoDocsEngine.write(markdown: "Use **[`code`](https://example.com)** here", to: .pptx), "ppt/slides/slide1.xml")
+        #expect(code.contains(#"<a:rPr b="1"><a:latin typeface="Courier New"/><a:hlinkClick"#))
+        for (format,path,tag) in [(ExportableFileType.docx,"word/document.xml","w:t"),(.pptx,"ppt/slides/slide1.xml","a:t")] {
+            let content = try xml(PicoDocsEngine.write(markdown: "one \ntwo", to: format), path)
+            let parsed = try SwiftSoup.parse(content, "", SwiftSoup.Parser.xmlParser())
+            let visible = try parsed.getElementsByTag(tag).array().map { $0.getChildNodes().compactMap { ($0 as? TextNode)?.getWholeText() }.joined() }.joined()
+            #expect(visible == "one two")
+        }
+        #if canImport(AppKit)
+        let attributed = AttributedStringDocumentBuilder.attributedString(from: ConverterResult(sections: [.init(markdown: "one \ntwo")]))
+        #expect(attributed.string.trimmingCharacters(in: .whitespacesAndNewlines) == "one two")
+        #endif
+        #expect(MarkdownInlineParser.parse("[^docs](https://example.com)") == [.link(label: [.text("^docs")], destination: "https://example.com")])
+        for (raw,escaped) in [("100%","100%25"),("%ZZ","%25ZZ"),("a%20b","a%20b")] {
+            for (format,path) in [(ExportableFileType.docx,"word/_rels/document.xml.rels"),(.pptx,"ppt/slides/_rels/slide1.xml.rels")] {
+                let rels = try xml(PicoDocsEngine.write(markdown: "[^docs](https://example.test/" + raw + ")", to: format), path)
+                #expect(rels.contains("https://example.test/" + escaped))
+            }
+        }
+    }
+
     @Test func sparseSpreadsheetCoordinatesSurviveOfficeRoundTrip() async throws {
         let base = try PicoDocsEngine.write(markdown: "| A | B | C |\n| --- | --- |", to: .xlsx)
         let archive = try #require(Archive(data: base, accessMode: .read))

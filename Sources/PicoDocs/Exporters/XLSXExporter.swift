@@ -234,7 +234,7 @@ public struct XLSXExporter: DocumentExporter {
             var cells = ""
             for (c, value) in row.enumerated() {
                 let ref = "\(columnName(c + 1))\(rowNumber)"
-                cells += "<c r=\"\(ref)\" t=\"inlineStr\"><is><t xml:space=\"preserve\">\(OOXMLPackageWriter.escape(value).replacingOccurrences(of: "\r", with: "&#13;"))</t></is></c>"
+                cells += "<c r=\"\(ref)\" t=\"inlineStr\"><is><t xml:space=\"preserve\">\(OOXMLPackageWriter.escape(SpreadsheetMLText.encode(value)).replacingOccurrences(of: "\r", with: "&#13;"))</t></is></c>"
             }
             data += "<row r=\"\(rowNumber)\">\(cells)</row>"
         }

@@ -114,7 +114,7 @@ enum AttributedStringDocumentBuilder {
             guard index + 1 < lines.count else { return line }
             if line.hasSuffix("\\") { return String(line.dropLast()) + "\n" }
             if line.hasSuffix("  ") { return line.trimmingCharacters(in: .whitespaces) + "\n" }
-            return line + " "
+            return line.replacingOccurrences(of: "[ \t]+$", with: "", options: .regularExpression) + " "
         }.joined()
     }
 

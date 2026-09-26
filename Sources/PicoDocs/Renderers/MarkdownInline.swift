@@ -111,6 +111,12 @@ enum MarkdownInlineParser {
             }
 
             if c == "[" {
+                // Link: [label](dest)
+                if let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: nextBracket[min(i + 1, chars.count)], parenCloses: parenCloses, nextAngle: nextAngle) {
+                    append(parsed.node)
+                    i = parsed.next
+                    continue
+                }
                 // Footnote reference: [^id]
                 if i + 1 < chars.count, chars[i + 1] == "^",
                    let close = nextBracket[min(i + 2, chars.count)] {
@@ -121,12 +127,7 @@ enum MarkdownInlineParser {
                         continue
                     }
                 }
-                // Link: [label](dest)
-                if let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: nextBracket[min(i + 1, chars.count)], parenCloses: parenCloses, nextAngle: nextAngle) {
-                    append(parsed.node)
-                    i = parsed.next
-                    continue
-                }
+
             }
 
             run.append(c)

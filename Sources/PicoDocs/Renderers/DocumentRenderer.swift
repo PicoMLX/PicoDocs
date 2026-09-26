@@ -153,13 +153,13 @@ public enum DocumentRenderer {
         }
         var result = html
         for section in imageSections {
-            guard let filename = imageRefName(for: section), basenameCounts[filename] == 1,
-                  let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
+            guard let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
             let mime = section.metadata["mimeType"] ?? "application/octet-stream"
-            result = result.replacingOccurrences(
-                of: "src=\"\(filename)\"",
-                with: "src=\"data:\(mime);base64,\(base64)\""
-            )
+            var references = section.sourcePath.map { [$0] } ?? []
+            if let filename = imageRefName(for: section), basenameCounts[filename] == 1 { references.append(filename) }
+            for reference in Set(references) {
+                result = result.replacingOccurrences(of: "src=\"\(escapeHTML(reference))\"", with: "src=\"data:\(mime);base64,\(base64)\"")
+            }
         }
         return result
     }
