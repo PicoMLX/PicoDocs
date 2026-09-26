@@ -8,6 +8,27 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func percentTripletsInImageNamesAreDecodedOnce() async throws {
+        for filename in ["sales%20chart.png", "literal%2Fname.png", "double%2520name.png"] {
+            let image = DocumentSection(kind: .image, markdown: "", sourcePath: filename, metadata: ["mimeType": "image/png", "base64": Data([1,2,3]).base64EncodedString()])
+            let first = try PicoDocsEngine.write(ConverterResult(sections: [image]), to: .docx)
+            let recovered = try await PicoDocsEngine.convert(data: first, filename: "images.docx")
+            let carrier = try #require(recovered.sections.first { $0.kind == .image })
+            #expect(carrier.sourcePath?.hasSuffix(filename) == true)
+            #expect(carrier.metadata["base64"] == Data([1,2,3]).base64EncodedString())
+            let second = try PicoDocsEngine.write(recovered, to: .docx)
+            #expect(try xml(second, "word/document.xml").contains("<w:drawing>"))
+        }
+    }
+
+    @Test func entirelyEmptyNamedWorkbookCanBeWritten() throws {
+        let result = ConverterResult(sections: [.init(title: "Template", kind: .sheet, markdown: "")])
+        let data = try PicoDocsEngine.write(result, to: .xlsx)
+        #expect(try xml(data, "xl/workbook.xml").contains(#"name="Template""#))
+        #expect(try xml(data, "xl/worksheets/sheet1.xml").contains("<sheetData>"))
+        #expect(throws: PicoDocsError.emptyDocument) { try PicoDocsEngine.write(result, to: .docx) }
+    }
+
     @Test func emphasizedCodeAndFencedCodeFonts() async throws {
         let data = try PicoDocsEngine.write(markdown: "**`bold`** *`italic`* ***`both`***", to: .docx)
         let recovered = try await PicoDocsEngine.convert(data: data, filename: "code.docx")

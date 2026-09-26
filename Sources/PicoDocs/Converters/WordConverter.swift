@@ -483,6 +483,8 @@ public struct WordConverter: DocumentConverter {
                   !id.isEmpty, !target.isEmpty else { continue }
             let isImage = ((try? rel.attr("Type")) ?? "").hasSuffix("/image")
             let directory = ((path as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+            // Image entries carry decoded package-absolute paths; consumers must
+            // not percent-decode these a second time. Hyperlinks retain their URI.
             map[id] = isImage ? "/" + resolvePartPath(target, relativeTo: directory) : target
         }
         return map
@@ -613,7 +615,7 @@ public struct WordConverter: DocumentConverter {
     /// strict failure.
     static func imageMarkdown(in drawing: Element, relationships: [String: String]) -> String {
         guard let target = imageTarget(in: drawing, relationships: relationships) else { return "" }
-        let path = resolvePartPath(target, relativeTo: "word")
+        let path = target.hasPrefix("/") ? String(target.dropFirst()) : resolvePartPath(target, relativeTo: "word")
         return "![\(escapeLiteralText(imageAltText(in: drawing)))](\(escapeLinkDestination(path)))"
     }
 
@@ -650,12 +652,13 @@ public struct WordConverter: DocumentConverter {
             if relId.isEmpty { relId = (try? element.attr("r:id")) ?? "" }
             guard !relId.isEmpty, let target = relationships[relId], !target.isEmpty else { continue }
 
-            let mediaPath = resolvePartPath(target, relativeTo: partDirectory)
+            // parseRelationships already decoded package-absolute image paths.
+            let mediaPath = target.hasPrefix("/") ? String(target.dropFirst()) : resolvePartPath(target, relativeTo: partDirectory)
             guard !seen.contains(mediaPath) else { continue }
             seen.insert(mediaPath)
 
             guard let bytes = readEntry(archive, path: mediaPath), !bytes.isEmpty else { continue }
-            let filename = ((target.removingPercentEncoding ?? target) as NSString).lastPathComponent
+            let filename = (mediaPath as NSString).lastPathComponent
             sections.append(DocumentSection(
                 title: filename,
                 kind: .image,
