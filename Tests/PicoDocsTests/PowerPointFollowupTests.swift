@@ -4,6 +4,44 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func repeatedMarkersContinueWithinOneMarkdownList() throws {
+        let result = ConverterResult(sections: [.init(markdown: "1. First\n1. Second\n1. Third\n10. Gap\n10. Next")])
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == "1. First\n2. Second\n3. Third\n10. Gap\n11. Next")
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(!html.contains(#"value="1""#)); #expect(html.contains(#"value="10""#))
+        let restarted = ConverterResult(sections: [.init(markdown: "1. First\n1. Second\n\n1. Restart")])
+        #expect(try DocumentRenderer.render(restarted, to: .plaintext) == "1. First\n2. Second\n\n1. Restart")
+    }
+
+    @Test func missingOrMisplacedShapeTreesAreCorrupt() async throws {
+        typealias B = PowerPointConverterTests
+        let data = B.deck(slides: [.init(file: "one.xml", shapes: B.titleShape("Good")), .init(file: "two.xml", shapes: "")])
+        let archive = try #require(Archive(data: data, accessMode: .read))
+        for content in ["", "<p:extLst><p:cSld><p:spTree/></p:cSld></p:extLst>"] {
+            var entries: [(name: String,data: [UInt8])] = []
+            for entry in archive {
+                var bytes = Data(); _ = try archive.extract(entry) { bytes.append($0) }
+                entries.append((entry.path, entry.path == "ppt/slides/two.xml" ? Array("<p:sld \(B.namespaces)>\(content)</p:sld>".utf8) : Array(bytes)))
+            }
+            await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(entries), filename: "bad-tree.pptx") }
+        }
+        let valid = try await PicoDocsEngine.convert(data: data, filename: "empty-slide.pptx")
+        #expect(valid.sections.count == 1)
+    }
+
+    @Test func cellsAndOtherPlaceholdersInheritTheirOwnListStyles() async throws {
+        typealias B = PowerPointConverterTests
+        let table = #"<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr><a:tc><a:txBody><a:lstStyle><a:lvl1pPr><a:buAutoNum type="arabicPeriod" startAt="4"/><a:defRPr b="1" i="1"/></a:lvl1pPr></a:lstStyle><a:p><a:r><a:t>Cell</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>Plain</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#
+        let shape = B.shape(placeholder: #"<p:ph type="chart"/>"#, paragraphs: ["<a:p><a:r><a:t>Caption</a:t></a:r></a:p>"])
+        let layout = "<p:sldLayout \(B.namespaces)><p:cSld><p:spTree/></p:cSld></p:sldLayout>"
+        let master = "<p:sldMaster \(B.namespaces)><p:cSld><p:spTree/></p:cSld><p:txStyles><p:otherStyle><a:lvl1pPr><a:buAutoNum type=\"arabicPeriod\" startAt=\"7\"/></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>"
+        let rels = B.relationshipsXML([("master","http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster","../slideMasters/m.xml")])
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: table + shape, relationships: [("layout","http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout","../slideLayouts/l.xml")])], extraParts: [("ppt/slideLayouts/l.xml",Array(layout.utf8)),("ppt/slideLayouts/_rels/l.xml.rels",Array(rels.utf8)),("ppt/slideMasters/m.xml",Array(master.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "styles.pptx")
+        #expect(result.markdown().contains("| 4. ***Cell*** | Plain |"))
+        #expect(result.markdown().contains("7. Caption"))
+    }
+
     @Test func changedExplicitStartsRestartWhileOmittedStartsContinue() async throws {
         typealias B = PowerPointConverterTests
         let starts: [Int?] = [1,1,10,nil,10,3,3]

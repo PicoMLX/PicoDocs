@@ -66,9 +66,19 @@ struct MarkdownList {
         return list
     }
 
+    private var displayedNumbers: [Int?] {
+        var previousSource: Int?, previousDisplay: Int?
+        return items.map { item in
+            guard let number = item.number else { return nil }
+            let displayed = number == previousSource ? previousDisplay.map { min($0, Int.max - 1) + 1 } ?? number : number
+            previousSource = number; previousDisplay = displayed
+            return displayed
+        }
+    }
+
     func plaintext(indent: String = "", inline: (String) -> String) -> String {
-        items.map { item in
-            let marker = item.number.map { "\($0). " } ?? "- "
+        zip(items, displayedNumbers).map { item, displayed in
+            let marker = displayed.map { "\($0). " } ?? "- "
             let line = indent + marker + Self.inlineText(item.text, breakText: "\n" + indent + String(repeating: " ", count: marker.count), inline: inline)
             let children = item.children.map { $0.plaintext(indent: indent + String(repeating: " ", count: marker.count), inline: inline) }
             return ([line] + children).joined(separator: "\n")
@@ -80,9 +90,9 @@ struct MarkdownList {
         let start = items.first?.number ?? 1
         let attribute = ordered && start != 1 ? " start=\"\(start)\"" : ""
         var expected = start
-        let body = items.map { item in
-            let value = item.number.map { $0 == expected ? "" : " value=\"\($0)\"" } ?? ""
-            if let number = item.number { expected = min(number, Int.max - 1) + 1 }
+        let body = zip(items, displayedNumbers).map { item, displayed in
+            let value = displayed.map { $0 == expected ? "" : " value=\"\($0)\"" } ?? ""
+            if let number = displayed { expected = min(number, Int.max - 1) + 1 }
             let children = item.children.map { $0.html(inline: inline) }.joined(separator: "\n")
             return "<li\(value)>\(Self.inlineText(item.text, breakText: "<br>", inline: inline))\(children.isEmpty ? "" : "\n" + children)</li>"
         }.joined(separator: "\n")

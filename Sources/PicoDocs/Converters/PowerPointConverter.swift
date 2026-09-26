@@ -196,7 +196,11 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// A slide's title (from its title placeholder) and its other content blocks.
     static func renderSlide(_ slide: Document, context: inout SlideContext) -> (title: String?, blocks: [String]) {
-        guard let tree = try? slide.getElementsByTag("p:spTree").first() else { return (nil, []) }
+        guard let root = slide.children().first(), root.tagName().lowercased() == "p:sld",
+              let common = child(of: root, named: "p:csld"), let tree = child(of: common, named: "p:sptree") else {
+            context.archive.fail(PicoDocsError.fileCorrupted)
+            return (nil, [])
+        }
         var title: String?
         var blocks: [String] = []
         renderShapes(in: tree, title: &title, blocks: &blocks, context: &context)
@@ -333,10 +337,8 @@ public struct PowerPointConverter: DocumentConverter {
             }
             if let master = context.master {
                 sources.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "").flatMap(listStyle))
-                if bodyLike {
-                    let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : "p:bodyStyle"
-                    sources.append(try? master.getElementsByTag(style).first())
-                }
+                let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
+                sources.append(try? master.getElementsByTag(style).first())
             }
         }
         sources.append(context.defaultTextStyle)
@@ -630,7 +632,17 @@ public struct PowerPointConverter: DocumentConverter {
                 let merged = isOn(cell, "hMerge") || isOn(cell, "vMerge")
                 var text = ""
                 if !merged, let body = textBody(ofCell: cell) {
-                    text = renderParagraphs(body, inherited: noInheritance, context: &context).joined(separator: "\n")
+                    let style = child(of: body, named: "a:lststyle")
+                    let inherited = (0..<9).map { level -> Bullet? in
+                        guard let style else { return nil }
+                        return bullet(in: child(of: style, named: "a:lvl\(level + 1)ppr")) ?? bullet(in: child(of: style, named: "a:defppr"))
+                    }
+                    context.runDefaults = (0..<9).map { level in
+                        guard let style else { return [] }
+                        return [child(of: style, named: "a:lvl\(level + 1)ppr"), child(of: style, named: "a:defppr")]
+                            .compactMap { $0.flatMap { child(of: $0, named: "a:defrpr") } }
+                    }
+                    text = renderParagraphs(body, inherited: inherited, context: &context).joined(separator: "\n")
                 }
                 cells.append(text.replacingOccurrences(of: "|", with: "\\|").replacingOccurrences(of: "\n", with: "<br>"))
             }
