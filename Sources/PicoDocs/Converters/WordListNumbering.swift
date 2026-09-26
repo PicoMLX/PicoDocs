@@ -128,7 +128,7 @@ final class WordListNumbering {
                 marker = "- " + escaped + " "
             }
         }
-        let indent = (0..<ilvl).reduce(0) { $0 + (markerWidths[numID]?[$1] ?? 2) }
+        let indent = (0..<ilvl).reduce(0) { $0 + (markerWidths[numID]?[$1] ?? 0) }
         markerWidths[numID, default: [:]][ilvl] = marker.hasPrefix("- ") ? 2 : marker.count
         return String(repeating: " ", count: indent) + marker
     }
@@ -233,6 +233,13 @@ final class WordListNumbering {
     }
 
     private static func formattedNumber(_ value: Int, format: String) -> String {
+        if format == "ordinal" {
+            let lastTwo = abs(value % 100)
+            let suffix: String
+            if (11...13).contains(lastTwo) { suffix = "th" }
+            else { suffix = [1: "st", 2: "nd", 3: "rd"][abs(value % 10)] ?? "th" }
+            return String(value) + suffix
+        }
         if format == "decimalZero", (0...9).contains(value) { return "0" + String(value) }
         guard value > 0 else { return String(value) }
         if format == "lowerLetter" || format == "upperLetter" {

@@ -5,6 +5,25 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func ordinalLabelsAndOrphanLevelsRemainVisibleLists() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"2\"><w:numFmt w:val=\"ordinal\"/><w:lvlText w:val=\"%3.\"/></w:lvl><w:lvl w:ilvl=\"3\"><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        func paragraph(_ text: String, level: Int) -> String {
+            "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"\(level)\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>"
+        }
+        let body = (1...23).map { paragraph("Item \($0)", level: 2) }.joined() + paragraph("Child", level: 3)
+        let document = "<w:document \(ns)><w:body>\(body)</w:body></w:document>"
+        let data = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "ordinal.docx")
+        #expect(result.markdown().hasPrefix("- 1st. Item 1"))
+        for label in ["2nd.", "3rd.", "4th.", "11th.", "12th.", "13th.", "21st.", "22nd.", "23rd."] { #expect(result.markdown().contains(label)) }
+        #expect(!result.markdown().contains("    - "))
+        #expect(result.markdown().contains("\n  1. Child"))
+        for format in [ExportFileType.html, .plaintext] {
+            let text = try DocumentRenderer.render(result, to: format)
+            #expect(text.contains("1st. Item 1")); #expect(text.contains("23rd. Item 23"))
+        }
+    }
+
     @Test func sectionBreakClearsLibreOfficeAliasesAndKeepsDecimalZero() throws {
         let numbering = "<w:numbering \(ns) xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\"><w:abstractNum w:abstractNumId=\"1\" w15:restartNumberingAfterBreak=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"decimalZero\"/><w:lvlText w:val=\"Section %1:\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num><w:num w:numId=\"2\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"0\"><w:startOverride w:val=\"7\"/></w:lvlOverride></w:num></w:numbering>"
         let data = PagesConverterTests.makeZip([(name: "word/numbering.xml", data: Array(numbering.utf8)), (name: "docProps/app.xml", data: Array("<Properties><Application>LibreOffice</Application></Properties>".utf8))])
