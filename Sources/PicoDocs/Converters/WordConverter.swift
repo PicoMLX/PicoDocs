@@ -203,12 +203,12 @@ public struct WordConverter: DocumentConverter {
         let style = properties.flatMap { child(of: $0, named: "w:pstyle") }.flatMap { try? $0.attr("w:val") }
         let numPr = properties.flatMap { child(of: $0, named: "w:numpr") }
         let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return nil }
+        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style) } ?? (numPr != nil ? "- " : nil)
+        guard !text.isEmpty else { return prefix }
 
         if let level = headingLevel(forStyle: style) {
             return String(repeating: "#", count: level) + " " + text
         }
-        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style) } ?? (numPr != nil ? "- " : nil)
         guard let prefix else { return text }
         // Keep a multi-line item (manual `w:br`) inside the item.
         let continuation = "\n" + String(repeating: " ", count: prefix.count)

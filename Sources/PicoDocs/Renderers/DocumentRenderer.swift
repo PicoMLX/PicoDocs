@@ -60,12 +60,8 @@ public enum DocumentRenderer {
                 out.append("---")
             case .blockquote(let lines):
                 out.append(lines.map { stripInline($0, footnoteNumbers: numbers) }.joined(separator: "\n"))
-            case .list(let ordered, let items):
-                let rendered = items.enumerated().map { index, item in
-                    let marker = ordered ? "\(index + 1). " : "- "
-                    return marker + stripInline(item, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: " ")
-                }
-                out.append(rendered.joined(separator: "\n"))
+            case .list(let list):
+                out.append(list.plaintext { stripInline($0, footnoteNumbers: numbers) })
             case .table(let rows):
                 out.append(rows.map { $0.map { stripInline($0, footnoteNumbers: numbers) }.joined(separator: "\t") }.joined(separator: "\n"))
             }
@@ -107,10 +103,8 @@ public enum DocumentRenderer {
             case .blockquote(let lines):
                 let inner = lines.map { inlineHTML($0, footnoteNumbers: numbers) }.joined(separator: "<br>\n")
                 blocks.append("<blockquote>\(inner)</blockquote>")
-            case .list(let ordered, let items):
-                let tag = ordered ? "ol" : "ul"
-                let lis = items.map { "<li>\(inlineHTML($0, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: " "))</li>" }
-                blocks.append("<\(tag)>\n\(lis.joined(separator: "\n"))\n</\(tag)>")
+            case .list(let list):
+                blocks.append(list.html { inlineHTML($0, footnoteNumbers: numbers) })
             case .table(let rows):
                 blocks.append(renderHTMLTable(rows, footnoteNumbers: numbers))
             }
@@ -309,7 +303,7 @@ public enum DocumentRenderer {
             case .heading(_, let text): scan(text)
             case .paragraph(let text): scan(text)
             case .blockquote(let lines): lines.forEach(scan)
-            case .list(_, let items): items.forEach(scan)
+            case .list(let list): list.texts.forEach(scan)
             case .table(let rows): rows.forEach { $0.forEach(scan) }
             }
         }
@@ -436,7 +430,7 @@ public enum DocumentRenderer {
         case paragraph(String)
         case code(String)
         case blockquote([String])
-        case list(ordered: Bool, items: [String])
+        case list(MarkdownList)
         case table([[String]])
         case rule
     }
@@ -501,21 +495,8 @@ public enum DocumentRenderer {
                 blocks.append(.blockquote(inner)); continue
             }
 
-            if listMarker(trimmed) != nil {
-                let ordered = listMarker(trimmed) == .ordered
-                var items: [String] = []
-                while i < lines.count {
-                    let itemLine = lines[i].trimmingCharacters(in: .whitespaces)
-                    if let marker = listMarker(itemLine), (marker == .ordered) == ordered {
-                        items.append(stripListMarker(itemLine)); i += 1
-                    } else if !isBlank(lines[i]), lines[i].hasPrefix("  "), !items.isEmpty {
-                        items[items.count - 1] += "\n" + lines[i].trimmingCharacters(in: .whitespaces)
-                        i += 1
-                    } else {
-                        break
-                    }
-                }
-                blocks.append(.list(ordered: ordered, items: items)); continue
+            if let list = MarkdownList.parse(lines, index: &i) {
+                blocks.append(.list(list)); continue
             }
 
             // Paragraph: gather until a blank line or a structural line.
