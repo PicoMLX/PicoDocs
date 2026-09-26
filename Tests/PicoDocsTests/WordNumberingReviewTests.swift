@@ -5,6 +5,22 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func discardedPrefixesDoNotBecomeVisibleParents() async throws {
+        let levels = (0...2).map { "<w:lvl w:ilvl=\"\($0)\"><w:numFmt w:val=\"decimal\"/></w:lvl>" }.joined()
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\">\(levels)</w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        func paragraph(_ text: String, level: Int, style: String = "") -> String {
+            "<w:p><w:pPr>\(style)<w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"\(level)\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>"
+        }
+        for discarded in ["<w:tbl><w:tr><w:tc>" + paragraph("Table item", level: 1) + "</w:tc></w:tr></w:tbl>", paragraph("Heading", level: 1, style: "<w:pStyle w:val=\"Heading1\"/>")] {
+            let document = "<w:document \(ns)><w:body>" + paragraph("Parent", level: 0) + discarded + paragraph("Child", level: 2) + paragraph("Next level one", level: 1) + "</w:body></w:document>"
+            let data = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8))])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "discarded.docx")
+            #expect(result.markdown().contains("\n   1. Child"))
+            #expect(!result.markdown().contains("\n      1. Child"))
+            #expect(result.markdown().contains("2. Next level one"))
+        }
+    }
+
     @Test func ordinalLabelsAndOrphanLevelsRemainVisibleLists() async throws {
         let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"2\"><w:numFmt w:val=\"ordinal\"/><w:lvlText w:val=\"%3.\"/></w:lvl><w:lvl w:ilvl=\"3\"><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
         func paragraph(_ text: String, level: Int) -> String {

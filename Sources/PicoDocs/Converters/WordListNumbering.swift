@@ -66,7 +66,7 @@ final class WordListNumbering {
     /// The Markdown prefix (indent + marker) for a paragraph, or nil when it isn't
     /// a list item. `numPr` is the paragraph's own `w:numPr`, if any; `style` its
     /// `w:pStyle`, whose (inherited) numbering applies when the paragraph has none.
-    func prefix(numPr: Element?, style: String?) -> String? {
+    func prefix(numPr: Element?, style: String?, visibleMarker: Bool = true) -> String? {
         var numID = numPr.flatMap { Self.child(of: $0, named: "w:numid") }.flatMap { try? $0.attr("w:val") }
         var level = numPr.flatMap { Self.child(of: $0, named: "w:ilvl") }.flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
         if numID == nil || level == nil, let inherited = styleNumbering(style) {
@@ -129,7 +129,7 @@ final class WordListNumbering {
             }
         }
         let indent = (0..<ilvl).reduce(0) { $0 + (markerWidths[numID]?[$1] ?? 0) }
-        markerWidths[numID, default: [:]][ilvl] = marker.hasPrefix("- ") ? 2 : marker.count
+        if visibleMarker { markerWidths[numID, default: [:]][ilvl] = marker.hasPrefix("- ") ? 2 : marker.count }
         return String(repeating: " ", count: indent) + marker
     }
 

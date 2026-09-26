@@ -208,7 +208,7 @@ public struct WordConverter: DocumentConverter {
         let style = properties.flatMap { child(of: $0, named: "w:pstyle") }.flatMap { try? $0.attr("w:val") }
         let numPr = properties.flatMap { child(of: $0, named: "w:numpr") }
         let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
-        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style) } ?? (numPr != nil ? "- " : nil)
+        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style, visibleMarker: text.isEmpty || headingLevel(forStyle: style) == nil) } ?? (numPr != nil ? "- " : nil)
         guard !text.isEmpty else { return prefix }
 
         if let level = headingLevel(forStyle: style) {
@@ -385,7 +385,7 @@ public struct WordConverter: DocumentConverter {
                         let properties = child(of: paragraph, named: "w:ppr")
                         let numPr = properties.flatMap { child(of: $0, named: "w:numpr") }
                         let style = properties.flatMap { child(of: $0, named: "w:pstyle") }.flatMap { try? $0.attr("w:val") }
-                        _ = numbering.prefix(numPr: numPr, style: style)
+                        _ = numbering.prefix(numPr: numPr, style: style, visibleMarker: false)
                     }
                     let t = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
