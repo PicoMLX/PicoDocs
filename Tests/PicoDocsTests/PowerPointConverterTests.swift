@@ -272,7 +272,8 @@ struct PowerPointConverterTests {
     /// A minimal PPTX package: `ppt/presentation.xml` listing `order` (default:
     /// the slides as given) through its relationships, plus each slide part.
     static func deck(slides: [Slide], order: [String]? = nil,
-                     extraParts: [(name: String, data: [UInt8])] = []) -> Data {
+                     extraParts: [(name: String, data: [UInt8])] = [], notesBacklinks: Bool = true) -> Data {
+        var extraParts = extraParts
         let order = order ?? slides.map(\.file)
         let ids = order.enumerated().map { "<p:sldId id=\"\(256 + $0.offset)\" r:id=\"rIdSlide\($0.offset)\"/>" }.joined()
         let presentation = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><p:presentation \(namespaces)><p:sldIdLst>\(ids)</p:sldIdLst></p:presentation>"
@@ -290,6 +291,20 @@ struct PowerPointConverterTests {
             parts.append(("ppt/slides/\(slide.file)", Array(xml.utf8)))
             if !slide.relationships.isEmpty {
                 parts.append(("ppt/slides/_rels/\(slide.file).rels", Array(relationshipsXML(slide.relationships).utf8)))
+            }
+        }
+        if notesBacklinks {
+            for slide in slides {
+                for relation in slide.relationships where relation.type.hasSuffix("/notesSlide") {
+                    let notePath = WordConverter.resolvePartPath(relation.target, relativeTo: "ppt/slides")
+                    let directory = (notePath as NSString).deletingLastPathComponent
+                    let relPath = directory + "/_rels/" + (notePath as NSString).lastPathComponent + ".rels"
+                    let backlink = "<Relationship Id=\"sourceSlide\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"/ppt/slides/\(slide.file)\"/>"
+                    if let index = extraParts.firstIndex(where: { $0.name == relPath }) {
+                        let xml = String(decoding: extraParts[index].data, as: UTF8.self)
+                        if !xml.contains("relationships/slide\"") { extraParts[index].data = Array(xml.replacingOccurrences(of: "</Relationships>", with: backlink + "</Relationships>").utf8) }
+                    } else { extraParts.append((relPath, Array(("<Relationships>" + backlink + "</Relationships>").utf8))) }
+                }
             }
         }
         return PagesConverterTests.makeZip(parts + extraParts)

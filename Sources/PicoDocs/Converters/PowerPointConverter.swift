@@ -56,10 +56,10 @@ public struct PowerPointConverter: DocumentConverter {
             var context = SlideContext(archive: archive, partPath: slidePath, relationships: relationships, images: images)
             context.defaultTextStyle = defaultTextStyle
             // Layout and master supply inherited list formatting for placeholders.
-            let layoutPath = Self.relatedPart(of: slidePath, type: "/slideLayout", relationships: relationships)
+            let layoutPath = Self.relatedPart(of: slidePath, type: "/slideLayout", relationships: relationships, archive: archive)
             context.layout = layoutPath.flatMap { parts.document($0, root: "p:sldlayout") }
             context.master = layoutPath
-                .flatMap { Self.relatedPart(of: $0, type: "/slideMaster", relationships: Self.relationships(archive, forPart: $0)) }
+                .flatMap { Self.relatedPart(of: $0, type: "/slideMaster", relationships: Self.relationships(archive, forPart: $0), archive: archive) }
                 .flatMap { parts.document($0, root: "p:sldmaster") }
             let rendered = Self.renderSlide(slide, context: &context)
             images = context.images
@@ -115,7 +115,9 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// Speaker notes for a slide, from its notes-slide part's body placeholder.
     static func notes(forSlide slidePath: String, relationships: [String: Relationship], archive: PowerPointPackage, parts: inout PartCache) -> String? {
-        guard let relation = relationships.values.first(where: { $0.type.hasSuffix("/notesSlide") }) else { return nil }
+        let noteRelations = relationships.values.filter { $0.type.hasSuffix("/notesSlide") }
+        guard noteRelations.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+        guard let relation = noteRelations.first else { return nil }
         guard !relation.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         let target = relation.target
         let notesPath = WordConverter.resolvePartPath(target, relativeTo: directory(of: slidePath))
@@ -126,7 +128,14 @@ public struct PowerPointConverter: DocumentConverter {
                                    relationships: Self.relationships(archive, forPart: notesPath),
                                    images: ImageCollector(), embedsImages: false)
         let notesRels = Self.relationships(archive, forPart: notesPath)
-        if let master = notesRels.values.first(where: { $0.type.hasSuffix("/notesMaster") }) {
+        let backlinks = notesRels.values.filter { $0.type.hasSuffix("/slide") }
+        guard backlinks.count == 1, let backlink = backlinks.first, !backlink.external,
+              WordConverter.resolvePartPath(backlink.target, relativeTo: directory(of: notesPath)) == slidePath else {
+            archive.fail(PicoDocsError.fileCorrupted); return nil
+        }
+        let masters = notesRels.values.filter { $0.type.hasSuffix("/notesMaster") }
+        guard masters.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+        if let master = masters.first {
             guard !master.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
             let path = WordConverter.resolvePartPath(master.target, relativeTo: directory(of: notesPath))
             guard let document = parts.document(path, root: "p:notesmaster") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
@@ -203,9 +212,12 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     /// The part a relationship of `type` (e.g. "/slideLayout") points to.
-    static func relatedPart(of part: String, type: String, relationships: [String: Relationship]) -> String? {
-        relationships.values.first { $0.type.hasSuffix(type) }
-            .map { WordConverter.resolvePartPath($0.target, relativeTo: directory(of: part)) }
+    static func relatedPart(of part: String, type: String, relationships: [String: Relationship], archive: PowerPointPackage) -> String? {
+        let matches = relationships.values.filter { $0.type.hasSuffix(type) }
+        guard matches.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+        guard let relation = matches.first else { return nil }
+        guard !relation.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+        return WordConverter.resolvePartPath(relation.target, relativeTo: directory(of: part))
     }
 
     /// A slide's title (from its title placeholder) and its other content blocks.
@@ -266,7 +278,7 @@ public struct PowerPointConverter: DocumentConverter {
                 let paragraphs = renderParagraphs(body, inherited: inherited, context: &context)
                 if !paragraphs.isEmpty { blocks.append(paragraphs.joined(separator: "\n\n")) }
             case "p:graphicframe":
-                if let table = try? shape.getElementsByTag("a:tbl").first() {
+                if let table = selectedDescendant(in: shape, named: "a:tbl") {
                     context.runDefaults = Array(repeating: [], count: 9)
                     let markdown = renderTable(table, context: &context)
                     if !markdown.isEmpty { blocks.append(markdown) }
@@ -294,13 +306,13 @@ public struct PowerPointConverter: DocumentConverter {
         } ?? branches.first { $0.tagName().lowercased() == "mc:fallback" }
     }
 
-    private static func pictureBlip(in element: Element) -> Element? {
-        if element.tagName().lowercased() == "a:blip" { return element }
+    private static func selectedDescendant(in element: Element, named name: String) -> Element? {
+        if element.tagName().lowercased() == name { return element }
         if element.tagName().lowercased() == "mc:alternatecontent" {
-            return selectedAlternateBranch(element).flatMap { pictureBlip(in: $0) }
+            return selectedAlternateBranch(element).flatMap { selectedDescendant(in: $0, named: name) }
         }
         for child in element.children().array() {
-            if let blip = pictureBlip(in: child) { return blip }
+            if let blip = selectedDescendant(in: child, named: name) { return blip }
         }
         return nil
     }
@@ -696,7 +708,7 @@ public struct PowerPointConverter: DocumentConverter {
     /// An inline image reference for a picture (alt text from its `descr`, else
     /// `name`), registering its bytes as an `.image` section.
     static func pictureMarkdown(_ picture: Element, context: inout SlideContext) -> String? {
-        guard let fill = child(of: picture, named: "p:blipfill"), let blip = pictureBlip(in: fill),
+        guard let fill = child(of: picture, named: "p:blipfill"), let blip = selectedDescendant(in: fill, named: "a:blip"),
               let id = try? blip.attr("r:embed"), !id.isEmpty else { return nil }
         guard let relation = context.relationships[id], !relation.external, relation.type.hasSuffix("/image") else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
         let target = relation.target

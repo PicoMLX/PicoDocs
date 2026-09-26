@@ -409,9 +409,9 @@ public enum DocumentRenderer {
                 // (second row), so all-dash data rows elsewhere are preserved.
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { stripInline(MarkdownTableCell.decodeBreaks($0)) }
+                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.decodeBreaks($0) }
                     if !(rowIndex == 1 && isTableSeparatorRow(cells)) {
-                        rows.append(cells.map { csvField($0) }.joined(separator: ","))
+                        rows.append(cells.map { csvField(stripInline($0)) }.joined(separator: ","))
                     }
                     rowIndex += 1
                     i += 1
@@ -610,25 +610,14 @@ public enum DocumentRenderer {
     /// don't rewrite Markdown metacharacters inside code.
     private static func extractCodeSpans(_ text: String) -> (text: String, spans: [String]) {
         var spans: [String] = []
-        var result = ""
-        var index = text.startIndex
-        while index < text.endIndex {
-            let next = text.index(after: index)
-            // Backslash escapes outside code cannot open a code span. Inside
-            // a real span, backslashes remain literal as required by Markdown.
-            if text[index] == "\\", next < text.endIndex {
-                result.append(text[index]); result.append(text[next])
-                index = text.index(after: next)
-            } else if text[index] == "`",
-               let close = text[text.index(after: index)...].firstIndex(of: "`") {
-                spans.append(String(text[text.index(after: index)..<close]))
-                result += "\(codeOpen)\(spans.count - 1)\(codeClose)"
-                index = text.index(after: close)
-            } else {
-                result.append(text[index])
-                index = text.index(after: index)
+        let result = MarkdownTableCell.mapCodeSpans(text, keepDelimiters: false, code: { raw in
+            var content = raw.replacingOccurrences(of: "\r\n", with: " ").replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ")
+            if content.hasPrefix(" "), content.hasSuffix(" "), content.contains(where: { $0 != " " }) {
+                content = String(content.dropFirst().dropLast())
             }
-        }
+            spans.append(content)
+            return "\(codeOpen)\(spans.count - 1)\(codeClose)"
+        }, plain: { $0 })
         return (result, spans)
     }
 

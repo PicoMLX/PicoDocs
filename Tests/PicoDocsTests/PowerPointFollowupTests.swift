@@ -4,6 +4,53 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func codeAndDestinationsProtectTableBreakMarkers() throws {
+        for cell in ["`<br>`", "``<br>``"] {
+            let result = ConverterResult(sections:[.init(markdown:"| " + cell + " |\n| --- |")])
+            #expect(try DocumentRenderer.render(result,to:.plaintext).contains("<br>"))
+            #expect(try DocumentRenderer.render(result,to:.html).contains("<code>&lt;br&gt;</code>"))
+            #expect(try DocumentRenderer.render(result,to:.csv).contains("<br>"))
+        }
+        #expect(MarkdownTableCell.decodeBreaks("`<br>` [link](https://example.com/<br>)<br>tail") == "`<br>` [link](https://example.com/<br>)\ntail")
+        for cell in [#"\-\-\-"#, "*---*", "`---`"] {
+            let result = ConverterResult(sections:[.init(markdown:"| Header |\n| " + cell + " |")])
+            #expect(try DocumentRenderer.render(result,to:.csv).contains("---"))
+        }
+    }
+
+    @Test func graphicFrameTablesSelectSupportedFallbacks() async throws {
+        typealias B = PowerPointConverterTests
+        func table(_ text: String) -> String { "<a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>" + text + "</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl>" }
+        let shape = "<p:graphicFrame><a:graphic><mc:AlternateContent><mc:Choice Requires=\"p14\">" + table("Wrong") + "</mc:Choice><mc:Fallback>" + table("Right") + "</mc:Fallback></mc:AlternateContent></a:graphic></p:graphicFrame>"
+        let result = try await PicoDocsEngine.convert(data:B.deck(slides:[.init(file:"s.xml",shapes:shape)]),filename:"table-choice.pptx")
+        #expect(result.markdown().contains("Right")); #expect(!result.markdown().contains("Wrong"))
+    }
+
+    @Test func externalInheritancePartsAreRejected() throws {
+        typealias B = PowerPointConverterTests
+        let data = PagesConverterTests.makeZip([(name:"ppt/layout.xml",data:Array("<p:sldLayout \(B.namespaces)><p:cSld><p:spTree/></p:cSld></p:sldLayout>".utf8))])
+        for suffix in ["/slideLayout", "/slideMaster"] {
+            let package = PowerPointPackage(archive:try #require(Archive(data:data,accessMode:.read)))
+            let relationships = ["external":PowerPointConverter.Relationship(type:"http://schemas.openxmlformats.org/officeDocument/2006/relationships" + suffix,target:"../layout.xml",external:true)]
+            #expect(PowerPointConverter.relatedPart(of:"ppt/slides/s.xml",type:suffix,relationships:relationships,archive:package) == nil)
+            #expect(throws:PicoDocsError.fileCorrupted) { try package.check() }
+        }
+    }
+
+    @Test func notesRequireOneConsistentInternalBacklink() async throws {
+        typealias B = PowerPointConverterTests
+        let type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+        let notes = "<p:notes \(B.namespaces)><p:cSld><p:spTree>" + B.shape(placeholder:#"<p:ph type="body"/>"#,paragraphs:["<a:p><a:r><a:t>Note</a:t></a:r></a:p>"]) + "</p:spTree></p:cSld></p:notes>"
+        let variants: [[(id:String,type:String,target:String)]] = [[],[("back",type + "slide","../slides/other.xml")],[("back",type + "slide","../slides/s.xml\" TargetMode=\"External")],[("back",type + "slide","../slides/s.xml"),("again",type + "slide","../slides/s.xml")]]
+        for backlinks in variants {
+            let parts = [(name:"ppt/notesSlides/n.xml",data:Array(notes.utf8)),(name:"ppt/notesSlides/_rels/n.xml.rels",data:Array(B.relationshipsXML(backlinks).utf8))]
+            let data = B.deck(slides:[.init(file:"s.xml",shapes:B.titleShape("Slide"),relationships:[("notes",type + "notesSlide","../notesSlides/n.xml")])],extraParts:parts,notesBacklinks:false)
+            await #expect(throws:PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data:data,filename:"bad-backlink.pptx") }
+        }
+        let duplicated = B.deck(slides:[.init(file:"s.xml",shapes:B.titleShape("Slide"),relationships:[("first",type + "notesSlide","../notesSlides/n.xml"),("second",type + "notesSlide","../notesSlides/n.xml")])],extraParts:[("ppt/notesSlides/n.xml",Array(notes.utf8))])
+        await #expect(throws:PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data:duplicated,filename:"two-notes.pptx") }
+    }
+
     @Test func HTMLTableTextKeepsLiteralInlinePunctuation() async throws {
         let source = "<table><tr><td>Value</td></tr><tr><td>*stars* `code` [label](target) <strong>Bold</strong></td></tr></table>"
         let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "literal.html")
@@ -196,7 +243,7 @@ struct PowerPointFollowupTests {
         typealias B = PowerPointConverterTests
         let notes = "<p:notes \(B.namespaces)><p:cSld><p:spTree>" + B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: ["<a:p><a:r><a:t>Note</a:t></a:r></a:p>"]) + "</p:spTree></p:cSld></p:notes>"
         let master = "<p:notesMaster \(B.namespaces)><p:cSld><p:spTree/></p:cSld>" + #"<p:notesStyle><a:lvl1pPr><a:buAutoNum type="arabicPeriod" startAt="3"/><a:defRPr b="1" i="1"/></a:lvl1pPr></p:notesStyle></p:notesMaster>"#
-        let rels = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster", "../notesMasters/m.xml")])
+        let rels = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster", "../notesMasters/m.xml"), ("slide", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide", "../slides/s.xml")])
         let entries = [(name: "ppt/notesSlides/n.xml", data: Array(notes.utf8)), (name: "ppt/notesSlides/_rels/n.xml.rels", data: Array(rels.utf8)), (name: "ppt/notesMasters/m.xml", data: Array(master.utf8))]
         let package = PowerPointPackage(archive: try #require(Archive(data: PagesConverterTests.makeZip(entries), accessMode: .read)))
         var cache = PowerPointConverter.PartCache(archive: package)
@@ -257,7 +304,7 @@ struct PowerPointFollowupTests {
         typealias B = PowerPointConverterTests
         let notes = "<p:notes \(B.namespaces)><p:cSld><p:spTree>" + B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: ["<a:p><a:r><a:t>Note</a:t></a:r></a:p>"]) + "</p:spTree></p:cSld></p:notes>"
         let master = "<p:notesMaster \(B.namespaces)><p:cSld><p:spTree/></p:cSld></p:notesMaster>"
-        let rels = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster", "../notesMasters/m.xml")])
+        let rels = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster", "../notesMasters/m.xml"), ("slide", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide", "../slides/s.xml")])
         let entries = [(name: "ppt/notesSlides/n.xml", data: Array(notes.utf8)), (name: "ppt/notesSlides/_rels/n.xml.rels", data: Array(rels.utf8)), (name: "ppt/notesMasters/m.xml", data: Array(master.utf8))]
         let package = PowerPointPackage(archive: try #require(Archive(data: PagesConverterTests.makeZip(entries), accessMode: .read)), totalLimit: entries.reduce(0) { $0 + $1.data.count })
         var cache = PowerPointConverter.PartCache(archive: package)

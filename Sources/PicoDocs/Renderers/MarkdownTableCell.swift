@@ -12,6 +12,40 @@
 import Foundation
 
 enum MarkdownTableCell {
+    /// Transform semantic code spans separately from canonical literal text.
+    static func mapCodeSpans(_ text: String, keepDelimiters: Bool = true, code: (String) -> String, plain: (String) -> String) -> String {
+        let chars = Array(text)
+        var runs: [(Int, Int)] = [], index = 0
+        while index < chars.count {
+            if chars[index] == "`" {
+                let start = index
+                while index < chars.count, chars[index] == "`" { index += 1 }
+                runs.append((start, index - start))
+            } else { index += 1 }
+        }
+        var closers: [Int: (Int, Int)] = [:], next: [Int: Int] = [:]
+        for (start, length) in runs.reversed() {
+            if let close = next[length] { closers[start] = (close, length) }
+            next[length] = start
+        }
+        index = 0
+        var buffer = "", output = ""
+        while index < chars.count {
+            if chars[index] == "\\", index + 1 < chars.count {
+                buffer.append(chars[index]); buffer.append(chars[index + 1]); index += 2
+            } else if chars[index] == "`", let (close, length) = closers[index] {
+                output += plain(buffer); buffer = ""
+                let delimiter = keepDelimiters ? String(repeating: "`", count: length) : ""
+                output += delimiter + code(String(chars[(index + length)..<close])) + delimiter
+                index = close + length
+            } else {
+                buffer.append(chars[index]); index += 1
+            }
+        }
+        return output + plain(buffer)
+    }
+
+
 
     /// Escapes the characters that are structural in a pipe-table cell: a literal
     /// backslash (`\` -> `\\`, done first) and the pipe delimiter (`|` -> `\|`).
@@ -25,17 +59,33 @@ enum MarkdownTableCell {
 
     /// Decode canonical breaks without interpreting an escaped literal marker.
     static func decodeBreaks(_ text: String) -> String {
-        var output = ""
-        var index = text.startIndex
-        while index < text.endIndex {
-            if text[index] == "\\" {
-                output.append(text[index]); index = text.index(after: index)
-                if index < text.endIndex { output.append(text[index]); index = text.index(after: index) }
-            } else if text[index...].hasPrefix("<br>") {
-                output.append("\n"); index = text.index(index, offsetBy: 4)
-            } else { output.append(text[index]); index = text.index(after: index) }
-        }
-        return output
+        var brackets = 0, destinationDepth = 0
+        return mapCodeSpans(text, code: { $0 }, plain: { plain in
+            var output = "", index = plain.startIndex
+            while index < plain.endIndex {
+                let character = plain[index]
+                let next = plain.index(after: index)
+                if character == "\\" {
+                    output.append(character); index = next
+                    if index < plain.endIndex { output.append(plain[index]); index = plain.index(after: index) }
+                    continue
+                }
+                if destinationDepth > 0 {
+                    if character == "(" { destinationDepth += 1 }
+                    if character == ")" { destinationDepth -= 1 }
+                } else if character == "[" { brackets += 1 }
+                else if character == "]", brackets > 0 {
+                    brackets -= 1
+                    if next < plain.endIndex, plain[next] == "(" {
+                        destinationDepth = 1; output += "]("; index = plain.index(after: next); continue
+                    }
+                } else if plain[index...].hasPrefix("<br>") {
+                    output.append("\n"); index = plain.index(index, offsetBy: 4); continue
+                }
+                output.append(character); index = next
+            }
+            return output
+        })
     }
 
     /// Inverse of `escapeDelimiters`: turns `\\` back into `\` and `\|` into `|`,
