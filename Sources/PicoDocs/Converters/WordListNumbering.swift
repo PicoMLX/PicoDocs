@@ -102,6 +102,12 @@ final class WordListNumbering {
         }
         markerWidths[numID] = markerWidths[numID]?.filter { $0.key < ilvl }
 
+        // Invisible and bullet levels still participate in compound numbering.
+        let start = number.overrides[ilvl] ?? definition?.start ?? 1
+        let previous = counters[numID]?[ilvl]
+        let count = previous.map { min($0, Int.max - 1) + 1 } ?? start
+        counters[numID, default: [:]][ilvl] = count
+
         var marker: String
         switch definition?.format ?? "bullet" {
         case "none":
@@ -109,10 +115,6 @@ final class WordListNumbering {
         case "bullet":
             marker = "- "
         default:
-            let start = number.overrides[ilvl] ?? definition?.start ?? 1
-            let previous = counters[numID]?[ilvl]
-            let count = previous.map { min($0, Int.max - 1) + 1 } ?? start
-            counters[numID, default: [:]][ilvl] = count
             let simple = Self.formattedNumber(count, format: definition?.format ?? "decimal") + "."
             var label = definition?.text ?? simple
             for level in 0...8 {

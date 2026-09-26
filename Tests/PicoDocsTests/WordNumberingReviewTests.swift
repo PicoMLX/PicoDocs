@@ -5,6 +5,20 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func hiddenParentCountersAdvanceBeforeMarkerSuppression() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"none\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1.%2.\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        func paragraph(_ text: String, level: Int) -> String {
+            "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"\(level)\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>"
+        }
+        let document = "<w:document \(ns)><w:body>" + paragraph("Parent A", level: 0) + paragraph("Child A", level: 1) + paragraph("Parent B", level: 0) + paragraph("Child B", level: 1) + "</w:body></w:document>"
+        let data = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "hidden.docx")
+        #expect(result.markdown().contains("1.1. Child A"))
+        #expect(result.markdown().contains("2.1. Child B"))
+        #expect(!result.markdown().contains("1. Parent A"))
+        #expect(!result.markdown().contains("2. Parent B"))
+    }
+
     @Test func tableEscapesAreCanonicalAndDecodedOnce() async throws {
         let csv = try await PicoDocsEngine.convert(data: Data("value\n\\* regex".utf8), filename: "literal.csv")
         let document = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>\* regex</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
