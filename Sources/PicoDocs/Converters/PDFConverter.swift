@@ -112,20 +112,7 @@ public struct PDFConverter: DocumentConverter {
             throw PicoDocsError.emptyDocument
         }
 
-        // The renderer joins pages into one Markdown stream. Match that context
-        // while retaining page provenance and OCR metadata on each section.
-        let escapeCounts = MarkdownLiteral.backslashEscapeCounts(sections.map(\.markdown).joined(separator: "\n\n"))
-        var sourceOffset = 0
-        for index in sections.indices {
-            var units: [UInt16] = []
-            for unit in sections[index].markdown.utf16 {
-                units.append(unit)
-                units += Array(repeating: 0x5C, count: escapeCounts[sourceOffset])
-                sourceOffset += 1
-            }
-            sections[index].markdown = String(decoding: units, as: UTF16.self)
-            sourceOffset += 2
-        }
+        sections = MarkdownLiteral.escapeSectionBackslashes(sections)
 
         let attributes = document.documentAttributes
         let title = (attributes?[PDFDocumentAttribute.titleAttribute] as? String)?

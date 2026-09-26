@@ -109,7 +109,7 @@ public struct KeynoteConverter: DocumentConverter {
             if !slide.text.isEmpty {
                 sections.append(DocumentSection(
                     kind: .slide,
-                    markdown: MarkdownLiteral.escapeBackslashes(slide.text),
+                    markdown: slide.text,
                     sourcePath: slide.name,
                     slideNumber: index + 1
                 ))
@@ -136,12 +136,12 @@ public struct KeynoteConverter: DocumentConverter {
                 if !text.isEmpty { pieces.append(text) }
             }
             let cleaned = Self.normalize(pieces.joined(separator: "\n\n"))
-            if !cleaned.isEmpty { sections.insert(DocumentSection(kind: .body, markdown: MarkdownLiteral.escapeBackslashes(cleaned)), at: 0) }
+            if !cleaned.isEmpty { sections.insert(DocumentSection(kind: .body, markdown: cleaned), at: 0) }
         }
 
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
         let title = (info.filename?.isEmpty == false) ? info.filename : nil
-        return ConverterResult(title: title, sections: sections)
+        return ConverterResult(title: title, sections: MarkdownLiteral.escapeSectionBackslashes(sections))
     }
 
     // MARK: - Slide identification

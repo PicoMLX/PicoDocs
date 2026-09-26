@@ -23,6 +23,17 @@ import PDFKit
 
 @Suite("OCR (Vision)")
 struct OCRTests {
+    @Test func recognizedFrameTextSharesCodeContextAndRetainsPageGaps() throws {
+        let sections = ImageOCRConverter.sections(from:["```","",#"a\*b"#,"```"],filename:"frames.tiff")
+        #expect(sections.map(\.pageRange) == [1...1,3...3,4...4])
+        #expect(sections.allSatisfy { $0.metadata["extractionMethod"] == "vision-ocr" })
+        let result = ConverterResult(sections:sections)
+        for format in [ExportFileType.html,.plaintext] {
+            let text = try DocumentRenderer.render(result,to:format)
+            #expect(text.contains(#"a\*b"#)); #expect(!text.contains(#"a\\*b"#))
+        }
+    }
+
     @Test func PDFCodeFencesSpanPageBoundaries() async throws {
         let data = NSMutableData()
         let consumer = CGDataConsumer(data: data as CFMutableData)!

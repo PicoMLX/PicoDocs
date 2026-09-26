@@ -55,10 +55,37 @@ enum MarkdownLiteral {
                 let start = i, escapedStart = j
                 while i < source.count, source[i] == 0x5C { i += 1 }
                 while j < escaped.count, escaped[j] == 0x5C { j += 1 }
-                counts[start] = j - escapedStart - (i - start)
+                let added = j - escapedStart - (i - start)
+                if added > 0 {
+                    // Keep each source slash paired with its own escape copy, so
+                    // generated style/link delimiters cannot split the pair.
+                    for index in start..<i { counts[index] = 1 }
+                    counts[i - 1] += added - (i - start)
+                }
             } else { i += 1; j += 1 }
         }
         return counts
+    }
+
+    /// Escape the same joined stream that ConverterResult renders, retaining
+    /// section provenance and already-generated table/image Markdown.
+    static func escapeSectionBackslashes(_ sections: [DocumentSection]) -> [DocumentSection] {
+        var result = sections
+        let counts = backslashEscapeCounts(sections.filter { $0.kind != .image }.map(\.markdown).joined(separator: "\n\n"))
+        var offset = 0
+        for index in result.indices where result[index].kind != .image {
+            let source = Array(result[index].markdown.utf16)
+            if result[index].kind != .table {
+                var units: [UInt16] = []
+                for (local, unit) in source.enumerated() {
+                    units.append(unit)
+                    units += Array(repeating: 0x5C, count: counts[offset + local])
+                }
+                result[index].markdown = String(decoding: units, as: UTF16.self)
+            }
+            offset += source.count + 2
+        }
+        return result
     }
 
     static func escapeBlockStart(_ line: String) -> String {

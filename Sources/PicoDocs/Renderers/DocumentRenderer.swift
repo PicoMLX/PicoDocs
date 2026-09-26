@@ -559,9 +559,8 @@ public enum DocumentRenderer {
                 && (listMarker(lines[next].trimmingCharacters(in: .whitespaces)) ?? bareListMarker(lines[next].trimmingCharacters(in: .whitespaces))) == leadingBare
             var following = next
             while following < lines.count, isBlank(lines[following]) { following += 1 }
-            let nestedTable = following < lines.count && indentWidth(lines[following]) >= indentWidth(line) + trimmed.count + 1
-                && lines[following].trimmingCharacters(in: .whitespaces).hasPrefix("|")
-            let confirmedBare = leadingBare != nil && (adjacent || nestedTable)
+            let continuation = following < lines.count && indentWidth(lines[following]) >= prospectiveContent
+            let confirmedBare = leadingBare != nil && (adjacent || continuation)
             if listMarker(trimmed) != nil || confirmedBare {
                 let ordered = (listMarker(trimmed) ?? leadingBare) == .ordered
                 let start = ordered ? listStart(trimmed) : 1

@@ -14,6 +14,25 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func bareItemsAcceptAllContentColumnContinuations() throws {
+        for continuation in ["# Heading", "> Quote", "prose", "- child", "```\n   code\n   ```"] {
+            let source = "1.\n   " + continuation + "\n2. Next"
+            let html = try DocumentRenderer.render(ConverterResult(sections:[.init(markdown:source)]),to:.html)
+            #expect(html.components(separatedBy:"<ol").count - 1 == 1)
+            #expect(!html.contains("<p>1.</p>"))
+            #expect(html.contains("Next"))
+        }
+    }
+
+    @Test func slashPairsSurviveSeparateRTFStyles() async throws {
+        let rtf = #"{\rtf1\ansi \b \\\b0 \\tail}"#
+        let result = try await PicoDocsEngine.convert(data:Data(rtf.utf8),filename:"boundary.rtf")
+        #expect(try DocumentRenderer.render(result,to:.plaintext) == #"\\tail"#)
+        #expect(try DocumentRenderer.render(result,to:.html).contains(#"<strong>\</strong>\tail"#))
+        // The same UTF-16 map is used by Pages character-style and link runs.
+        #expect(MarkdownLiteral.backslashEscapeCounts(#"\\tail"#).prefix(2) == [1,1])
+    }
+
     @Test func alternateBodyComponentKeepsCodeAndPairedEscapes() async throws {
         let source = "`a\\*b`\n\n\\*literal\\*\n\n```\nc\\*d\n```"
         let data = Self.makeZip([(name:"Index/Alternate.iwa",data:Self.snappyFrame(Self.makeIWAStream(runs:[source])))])
