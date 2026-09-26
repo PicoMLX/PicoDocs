@@ -14,6 +14,67 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func structuralContinuationNeedsTheContentColumn() throws {
+        for suffix in ["  | A |\n  | --- |", "  # Heading"] {
+            let result = ConverterResult(sections: [.init(markdown: "1234. item\n" + suffix)])
+            let html = try DocumentRenderer.render(result, to: .html)
+            let listEnd = try #require(html.range(of: "</ol>"))
+            let block = try #require(html.range(of: suffix.contains("|") ? "<table>" : "<h1>"))
+            #expect(listEnd.lowerBound < block.lowerBound)
+        }
+    }
+
+    @Test func escapeSentinelsStayLiteralInTextAndCode() throws {
+        let literal = "\u{E006}0\u{E007}"
+        for text in [literal, "`" + literal + "`"] {
+            let result = ConverterResult(sections: [.init(markdown: #"\* "# + text)])
+            for format in [ExportFileType.html, .plaintext] {
+                #expect(try DocumentRenderer.render(result, to: format).contains(literal))
+            }
+        }
+    }
+
+    @Test func formattedDashRowsRemainCSVData() throws {
+        for cell in ["`---`", "*---*", #"\-\-\-"#] {
+            let result = ConverterResult(sections: [.init(markdown: "| Header |\n| " + cell + " |")])
+            #expect(try DocumentRenderer.render(result, to: .csv).contains("---"))
+        }
+    }
+
+    @Test func listInheritanceRevisitsShorterPaths() throws {
+        var storage = Self.varintField(1, 0) + Self.lengthField(3, Array("Item".utf8))
+        storage += Self.lengthField(7, Self.lengthField(1, Self.varintField(1, 0) + Self.lengthField(2, Self.varintField(1, 10))))
+        func parents(_ ids: [UInt64]) -> [UInt8] {
+            Self.lengthField(1, ids.flatMap { Self.lengthField(3, Self.varintField(1, $0)) })
+        }
+        var objects: [(id: UInt64,type: UInt64,payload: [UInt8],references: [UInt64])] = [(1,2001,storage,[])]
+        objects.append((10,2023,parents([11,73]),[]))
+        for id in UInt64(11)...72 { objects.append((id,2023,parents([id+1]),[])) }
+        objects.append((73,2023,parents([74]),[]))
+        objects.append((74,2023,Self.varintField(11,3),[]))
+        let stream = Self.makeIWAStream(objects: objects)
+        #expect(try IWATable.bodyMarkdown(documentStream: stream, in: [stream]) == "1. Item")
+    }
+
+    @Test func verbatimCodeKeepsOriginalBackslashes() async throws {
+        let source = #"before \* `a\*b` and ``c\d``"# + "\n\n```\n" + #"x\*y"# + "\n```\n" + #"after \*"#
+        let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "code.txt")
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            let output = try DocumentRenderer.render(result, to: format)
+            #expect(output.contains(#"a\*b"#)); #expect(!output.contains(#"a\\*b"#))
+            #expect(output.contains(#"c\d"#)); #expect(output.contains(#"x\*y"#))
+            #expect(output.contains(#"before \*"#)); #expect(output.contains(#"after \*"#))
+        }
+    }
+
+    @Test func tableParagraphUsesItsVisibleSuffixListStyle() async throws {
+        let data = Self.makeListPagesFile(text: "First\n\u{0004}\u{FFFC}Tail\nNext", style: .ordered, restarts: [(8,7),(13,0)], tableCell: "Cell", styleChange: 8)
+        let result = try await PicoDocsEngine.convert(data: data, filename: "split.pages")
+        #expect(result.markdown().contains("7.\n"))
+        #expect(result.markdown().contains("8. Next"))
+        #expect(!result.markdown().contains("2.\n"))
+    }
+
     @Test func longBareMarkerOnlyConfirmsAnAttachedTable() throws {
         let prose = ConverterResult(sections: [.init(markdown: "1234.\n\n  | A |\n  | --- |")])
         let html = try DocumentRenderer.render(prose, to: .html)

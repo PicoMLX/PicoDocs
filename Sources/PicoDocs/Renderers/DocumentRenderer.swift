@@ -463,9 +463,9 @@ public enum DocumentRenderer {
                 // (second row), so all-dash data rows elsewhere are preserved.
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { stripInline(MarkdownTableCell.decodeCodePipes($0)) }
+                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.decodeCodePipes($0) }
                     if !(rowIndex == 1 && isTableSeparatorRow(cells)) {
-                        rows.append(cells.map { csvField($0) }.joined(separator: ","))
+                        rows.append(cells.map { csvField(stripInline($0)) }.joined(separator: ","))
                     }
                     rowIndex += 1
                     i += 1
@@ -585,7 +585,7 @@ public enum DocumentRenderer {
                         guard next < lines.count, indentWidth(lines[next]) >= contentColumn else { break }
                         items[items.count - 1] += "\n"
                         i = next
-                    } else if !isBlank(raw), indent >= base + 2, !items.isEmpty {
+                    } else if !isBlank(raw), indent >= contentColumn, !items.isEmpty {
                         items[items.count - 1] += "\n" + String(raw.dropFirst(min(indent, contentColumn)))
                         i += 1
                     } else {
@@ -805,10 +805,11 @@ public enum DocumentRenderer {
                 : "<a href=\"\(escapeHTML(link.url))\">\(applyEmphasisHTML(escapeHTML(link.label)))</a>"
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: tag)
         }
+        result = restoreEscapes(result, escaped: escaped, html: true)
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
         }
-        return restoreEscapes(result, escaped: escaped, html: true)
+        return result
     }
 
     private static func applyEmphasisHTML(_ text: String) -> String {
@@ -834,10 +835,11 @@ public enum DocumentRenderer {
         for (index, link) in links.enumerated() {
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: applyEmphasisStrip(link.label))
         }
+        result = restoreEscapes(result, escaped: escaped, html: false)
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: span)
         }
-        return restoreEscapes(result, escaped: escaped, html: false)
+        return result
     }
 
     private static func applyEmphasisStrip(_ text: String) -> String {
@@ -853,7 +855,11 @@ public enum DocumentRenderer {
         var index = text.startIndex
         while index < text.endIndex {
             let next = text.index(after: index)
-            if text[index] == "\\", next < text.endIndex,
+            if text[index] == "\u{E006}" || text[index] == "\u{E007}" {
+                escaped.append(String(text[index]))
+                out += "\u{E006}\(escaped.count - 1)\u{E007}"
+                index = next
+            } else if text[index] == "\\", next < text.endIndex,
                #"\`*_{}[]<>()#+-.!|"#.contains(text[next]) {
                 escaped.append(String(text[next]))
                 out += "\u{E006}\(escaped.count - 1)\u{E007}"

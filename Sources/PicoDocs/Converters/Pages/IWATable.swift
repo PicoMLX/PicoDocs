@@ -294,9 +294,16 @@ enum IWATable {
                 }
                 start = index + 1
             } else if index == range.upperBound || isParagraphSeparator(body.units[index]) {
-                let visibleStart = (start..<index).first { !isDroppedUnit(body.units[$0]) }
-                let listStyle = visibleStart == nil ? referenceID(at: start, in: body.listStyles)
-                    : majorityStyle(body.units, body.listStyles, start..<index, total: body.units.count, includeUnstyled: true)
+                // Attachments split rendering, but style/restart semantics belong
+                // to the complete source paragraph, including its post-table text.
+                var paragraphStart = start
+                while paragraphStart > 0, !isParagraphSeparator(body.units[paragraphStart - 1]) { paragraphStart -= 1 }
+                var paragraphEnd = index
+                while paragraphEnd < body.units.count, !isParagraphSeparator(body.units[paragraphEnd]) { paragraphEnd += 1 }
+                let paragraphRange = paragraphStart..<paragraphEnd
+                let visibleStart = paragraphRange.first { !isDroppedUnit(body.units[$0]) }
+                let listStyle = visibleStart == nil ? referenceID(at: paragraphStart, in: body.listStyles)
+                    : majorityStyle(body.units, body.listStyles, paragraphRange, total: body.units.count, includeUnstyled: true)
                 let listKind = listStyle.flatMap { body.listMarkers[$0] }
                 switch renderParagraph(body, start ..< index, objects: objects) {
                 case .heading(let text)?:
@@ -720,15 +727,16 @@ enum IWATable {
     /// carrying its own resolves through the parent chain (as names/traits do).
     /// Nesting levels beyond the first aren't resolved yet, so nested items render flat.
     private static func listMarker(of listStyleID: UInt64, in objects: [UInt64: IWAArchive.Object], remainingWork: inout Int) -> ListMarker? {
-        // Iterative DFS preserves parent precedence, visits shared ancestors once,
+        // Iterative DFS preserves parent precedence, revisits ancestors only at a shorter depth,
         // and bounds work on hostile acyclic graphs as well as cycles.
         var pending: [(UInt64, Int)] = [(listStyleID, 0)]
-        var seen: Set<UInt64> = []
+        var seen: [UInt64: Int] = [:]
         var remaining = 4096
         while let (id, depth) = pending.popLast(), remaining > 0, remainingWork > 0 {
             remaining -= 1
             remainingWork -= 1
-            guard depth < 64, seen.insert(id).inserted, let object = objects[id] else { continue }
+            guard depth < 64, depth < (seen[id] ?? Int.max), let object = objects[id] else { continue }
+            seen[id] = depth
             var hasMarker = false
             var reader = ProtobufReader(object.payload)
             markerFields: while let field = reader.next() {
@@ -750,7 +758,7 @@ enum IWATable {
                 }
             }
             if !hasMarker {
-                for parent in styleArchive(object).parents.reversed() where !seen.contains(parent) {
+                for parent in styleArchive(object).parents.reversed() where depth + 1 < (seen[parent] ?? Int.max) {
                     guard pending.count < 4096 else { break }
                     pending.append((parent, depth + 1))
                 }
