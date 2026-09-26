@@ -58,13 +58,14 @@ enum HTMLToMarkdown {
         if let text = node as? TextNode {
             let whole = text.getWholeText()
             var value = preserveWhitespace ? whole : collapseWhitespace(whole)
-            // Escape block syntax only when it originates in literal list text.
-            // Tags such as h2/blockquote/ul keep their semantic Markdown markers.
-            if !preserveWhitespace, out.split(separator: "\n", omittingEmptySubsequences: false).last?.allSatisfy({ $0.isWhitespace }) ?? true {
+            // Escape literal list text before adjacent DOM nodes are joined.
+            // Otherwise split text such as <span>1</span>. can create a block.
+            // Semantic tags still emit their own unescaped Markdown markers.
+            if !preserveWhitespace {
                 var ancestor = text.parent()
                 while let current = ancestor {
                     if (current as? Element)?.tagName().lowercased() == "li" {
-                        value = MarkdownLiteral.escapeBlockStart(value)
+                        value = value.map { #"\`*_{}[]<>()#+-.!|"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
                         break
                     }
                     ancestor = current.parent()

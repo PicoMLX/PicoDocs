@@ -14,6 +14,16 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func splitHTMLTextCannotCreateNestedMarkdownBlocks() throws {
+        let converted = try HTMLToMarkdown.convert(html: "<ul><li><span>1</span>. literal</li><li><span>*</span> literal</li><li>path \\folder</li></ul>")
+        let result = ConverterResult(sections: [.init(markdown: converted.markdown)])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(!html.contains("<ol"))
+        #expect(html.components(separatedBy: "<li>").count - 1 == 3)
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains("1. literal"))
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains("* literal"))
+    }
+
     @Test func literalHTMLListPrefixesAndSemanticNestedBlocks() throws {
         let source = "<ul><li># literal</li><li>&gt; literal</li><li>| literal |</li><li>```</li><li>---</li><li>- literal</li><li><span>#</span> split</li></ul>"
         let converted = try HTMLToMarkdown.convert(html: source)
