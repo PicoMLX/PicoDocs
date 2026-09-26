@@ -5,9 +5,56 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func decimalTabSuffixControlsNestingAndPlaintextPadding() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:suff w:val=\"tab\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        func paragraph(_ level: Int, _ content: String) -> String { "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"\(level)\"/></w:numPr></w:pPr><w:r>\(content)</w:r></w:p>" }
+        let document = "<w:document \(ns)><w:body>" + paragraph(0,"<w:t>Parent</w:t><w:br/><w:t>Continued</w:t>") + paragraph(1,"<w:t>Child</w:t>") + "</w:body></w:document>"
+        let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml",data: Array(document.utf8)),(name: "word/numbering.xml",data: Array(numbering.utf8))]), filename: "tabs.docx")
+        #expect(result.markdown().contains("1.\tParent  \n    Continued"))
+        #expect(result.markdown().contains("\n    1. Child"))
+        #expect(try DocumentRenderer.render(result, to: .plaintext).hasPrefix("1.\tParent"))
+        #expect(try DocumentRenderer.render(result, to: .html).components(separatedBy: "<ol").count - 1 == 2)
+    }
+
+    @Test func wrappedTextBoxesRemainInNumberingOrder() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        func item(_ text: String) -> String { "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>" }
+        let document = "<w:document \(ns)><w:body>" + item("Before") + "<w:customXml><w:ins><w:p><w:r><w:drawing><w:txbxContent>" + item("Box") + "</w:txbxContent></w:drawing></w:r></w:p></w:ins></w:customXml>" + item("After") + "</w:body></w:document>"
+        let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml",data: Array(document.utf8)),(name: "word/numbering.xml",data: Array(numbering.utf8))]), filename: "wrapped.docx")
+        for text in ["1. Before","2. Box","3. After"] { #expect(result.markdown().contains(text)) }
+        #expect(result.markdown().components(separatedBy: "Box").count == 2)
+    }
+
+    @Test func linkedSectionRestartsDefaultZeroAndLongLabels() throws {
+        let numbering = """
+        <w:numbering \(ns) xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">
+        <w:abstractNum w:abstractNumId="1"><w:numStyleLink w:val="Linked"/></w:abstractNum>
+        <w:abstractNum w:abstractNumId="2" w15:restartNumberingAfterBreak="1"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>
+        <w:abstractNum w:abstractNumId="3" w15:restartNumberingAfterBreak="0"><w:numStyleLink w:val="Linked"/></w:abstractNum>
+        <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+        <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>
+        <w:num w:numId="3"><w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="1000000000"/></w:lvlOverride></w:num>
+        <w:num w:numId="4"><w:abstractNumId w:val="3"/></w:num>
+        </w:numbering>
+        """
+        let styles = "<w:styles \(ns)><w:style w:styleId=\"Linked\"><w:pPr><w:numPr><w:numId w:val=\"2\"/></w:numPr></w:pPr></w:style></w:styles>"
+        let archive = try #require(Archive(data: PagesConverterTests.makeZip([(name: "word/numbering.xml",data: Array(numbering.utf8)),(name: "word/styles.xml",data: Array(styles.utf8))]), accessMode: .read))
+        let resolver = WordListNumbering(archive: archive)
+        func prefix(_ id: Int) throws -> String? {
+            let document = try SwiftSoup.parse("<w:numPr \(ns)><w:numId w:val=\"\(id)\"/></w:numPr>", "", SwiftSoup.Parser.xmlParser())
+            return resolver.prefix(numPr: try document.getElementsByTag("w:numPr").first(), style: nil)
+        }
+        #expect(try prefix(1) == "0. "); #expect(try prefix(1) == "1. ")
+        #expect(try prefix(4) == "0. ")
+        resolver.sectionBreak()
+        #expect(try prefix(1) == "0. "); #expect(try prefix(4) == "1. ")
+        #expect(try prefix(3) == "- 1000000000. ")
+        #expect(MarkdownList.isOrderedMarker("1000000000. Item") == nil)
+    }
+
     @Test func inheritedNumberingUsesParagraphLanguageAndSuffixes() async throws {
         for (suffix, expected) in [("nothing", "un.Item"), ("space", "un. Item"), ("tab", "un.\tItem")] {
-            let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"cardinalText\"/><w:lvlText w:val=\"%1.\"/><w:suff w:val=\"\(suffix)\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+            let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"cardinalText\"/><w:lvlText w:val=\"%1.\"/><w:suff w:val=\"\(suffix)\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
             let styles = "<w:styles \(ns)><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val=\"en-US\"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:styleId=\"List\"><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr></w:style></w:styles>"
             let document = "<w:document \(ns)><w:body><w:p><w:pPr><w:pStyle w:val=\"List\"/><w:rPr><w:lang w:val=\"fr-FR\"/></w:rPr></w:pPr><w:r><w:t>Item</w:t></w:r></w:p></w:body></w:document>"
             let data = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8)), (name: "word/styles.xml", data: Array(styles.utf8))])
@@ -18,7 +65,7 @@ struct WordNumberingReviewTests {
     }
 
     @Test func decimalNoSuffixSurvivesOverrides() async throws {
-        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"decimal\"/><w:suff w:val=\"space\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"0\"><w:lvl w:ilvl=\"0\"><w:suff w:val=\"nothing\"/></w:lvl></w:lvlOverride></w:num></w:numbering>"
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:suff w:val=\"space\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"0\"><w:lvl w:ilvl=\"0\"><w:suff w:val=\"nothing\"/></w:lvl></w:lvlOverride></w:num></w:numbering>"
         let document = "<w:document \(ns)><w:body><w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>Item</w:t></w:r></w:p></w:body></w:document>"
         let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8))]), filename: "suffix.docx")
         #expect(result.markdown() == "- 1.Item")
@@ -26,7 +73,7 @@ struct WordNumberingReviewTests {
     }
 
     @Test func textBoxCountersFollowAnchorsAndSectionBreaks() async throws {
-        let numbering = "<w:numbering \(ns) xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\"><w:abstractNum w:abstractNumId=\"1\" w15:restartNumberingAfterBreak=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        let numbering = "<w:numbering \(ns) xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\"><w:abstractNum w:abstractNumId=\"1\" w15:restartNumberingAfterBreak=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
         func item(_ text: String) -> String { "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>" }
         for table in [false,true] {
             let anchor = "<w:p><w:r><w:drawing><w:txbxContent>" + item("Box") + "</w:txbxContent></w:drawing></w:r></w:p>"
@@ -40,7 +87,7 @@ struct WordNumberingReviewTests {
 
     @Test func literalLabelsLegalNumberingAndLocalizedText() async throws {
         func convert(format: String, label: String, start: Int = 1, language: String = "en-US", extra: String = "", override: String = "") async throws -> ConverterResult {
-            let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"upperRoman\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:start w:val=\"\(start)\"/><w:numFmt w:val=\"\(format)\"/><w:lvlText w:val=\"\(label)\"/>\(extra)</w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/>\(override)</w:num></w:numbering>"
+            let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"upperRoman\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:start w:val=\"\(start)\"/><w:numFmt w:val=\"\(format)\"/><w:lvlText w:val=\"\(label)\"/>\(extra)</w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/>\(override)</w:num></w:numbering>"
             let document = "<w:document \(ns)><w:body><w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>Item</w:t></w:r></w:p></w:body></w:document>"
             let styles = "<w:styles \(ns)><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val=\"\(language)\"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"
             return try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8)), (name: "word/styles.xml", data: Array(styles.utf8))]), filename: "labels.docx")
@@ -68,7 +115,7 @@ struct WordNumberingReviewTests {
     }
 
     @Test func discardedPrefixesDoNotBecomeVisibleParents() async throws {
-        let levels = (0...2).map { "<w:lvl w:ilvl=\"\($0)\"><w:numFmt w:val=\"decimal\"/></w:lvl>" }.joined()
+        let levels = (0...2).map { "<w:lvl w:ilvl=\"\($0)\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/></w:lvl>" }.joined()
         let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\">\(levels)</w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
         func paragraph(_ text: String, level: Int, style: String = "") -> String {
             "<w:p><w:pPr>\(style)<w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"\(level)\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>"
@@ -84,7 +131,7 @@ struct WordNumberingReviewTests {
     }
 
     @Test func ordinalLabelsAndOrphanLevelsRemainVisibleLists() async throws {
-        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"2\"><w:numFmt w:val=\"ordinal\"/><w:lvlText w:val=\"%3.\"/></w:lvl><w:lvl w:ilvl=\"3\"><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"2\"><w:start w:val=\"1\"/><w:numFmt w:val=\"ordinal\"/><w:lvlText w:val=\"%3.\"/></w:lvl><w:lvl w:ilvl=\"3\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
         func paragraph(_ text: String, level: Int) -> String {
             "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"\(level)\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>"
         }
@@ -103,7 +150,7 @@ struct WordNumberingReviewTests {
     }
 
     @Test func sectionBreakClearsLibreOfficeAliasesAndKeepsDecimalZero() throws {
-        let numbering = "<w:numbering \(ns) xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\"><w:abstractNum w:abstractNumId=\"1\" w15:restartNumberingAfterBreak=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"decimalZero\"/><w:lvlText w:val=\"Section %1:\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num><w:num w:numId=\"2\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"0\"><w:startOverride w:val=\"7\"/></w:lvlOverride></w:num></w:numbering>"
+        let numbering = "<w:numbering \(ns) xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\"><w:abstractNum w:abstractNumId=\"1\" w15:restartNumberingAfterBreak=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimalZero\"/><w:lvlText w:val=\"Section %1:\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num><w:num w:numId=\"2\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"0\"><w:startOverride w:val=\"7\"/></w:lvlOverride></w:num></w:numbering>"
         let data = PagesConverterTests.makeZip([(name: "word/numbering.xml", data: Array(numbering.utf8)), (name: "docProps/app.xml", data: Array("<Properties><Application>LibreOffice</Application></Properties>".utf8))])
         let resolver = WordListNumbering(archive: try #require(Archive(data: data, accessMode: .read)))
         func prefix(_ id: Int) throws -> String? {
@@ -134,7 +181,7 @@ struct WordNumberingReviewTests {
     }
 
     @Test func hiddenParentCountersAdvanceBeforeMarkerSuppression() async throws {
-        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"none\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1.%2.\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"none\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1.%2.\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
         func paragraph(_ text: String, level: Int) -> String {
             "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"\(level)\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>"
         }
@@ -164,8 +211,8 @@ struct WordNumberingReviewTests {
         let numbering = """
         <w:numbering \(ns) xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">
         <w:abstractNum w:abstractNumId="1" w15:restartNumberingAfterBreak="1">
-        <w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="Article %1:"/></w:lvl>
-        <w:lvl w:ilvl="1"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/></w:lvl>
+        <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="Article %1:"/></w:lvl>
+        <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/></w:lvl>
         </w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
         </w:numbering>
         """
@@ -214,9 +261,9 @@ struct WordNumberingReviewTests {
 
     @Test func concreteCountersOverridesDefaultsAndRestarts() throws {
         let levels = """
-        <w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl>
-        <w:lvl w:ilvl="1"><w:numFmt w:val="decimal"/><w:lvlRestart w:val="0"/></w:lvl>
-        <w:lvl w:ilvl="2"><w:numFmt w:val="decimal"/><w:lvlRestart w:val="1"/></w:lvl>
+        <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/></w:lvl>
+        <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlRestart w:val="0"/></w:lvl>
+        <w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlRestart w:val="1"/></w:lvl>
         """
         let numbering = """
         <w:numbering \(ns)><w:abstractNum w:abstractNumId="1">\(levels)</w:abstractNum>
@@ -254,7 +301,7 @@ struct WordNumberingReviewTests {
     }
 
     @Test func emptyItemsAndHeadingsConsumeNumbers() async throws {
-        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
         func paragraph(_ text: String, style: String = "") -> String {
             "<w:p><w:pPr>\(style)<w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>"
         }
@@ -269,7 +316,7 @@ struct WordNumberingReviewTests {
         let numbering = """
         <w:numbering \(ns)>
         <w:abstractNum w:abstractNumId="1"><w:numStyleLink w:val="NumberingStyle"/></w:abstractNum>
-        <w:abstractNum w:abstractNumId="2"><w:lvl w:ilvl="-1"><w:lvlRestart w:val="1"/></w:lvl><w:lvl w:ilvl="0"><w:start w:val="5"/><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum>
+        <w:abstractNum w:abstractNumId="2"><w:lvl w:ilvl="-1"><w:start w:val="1"/><w:lvlRestart w:val="1"/></w:lvl><w:lvl w:ilvl="0"><w:start w:val="5"/><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum>
         <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
         <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>
         </w:numbering>
@@ -294,9 +341,9 @@ struct WordNumberingReviewTests {
     @Test func linkedOverridesAliasesAndRelocatedParts() throws {
         let numbering = """
         <w:numbering \(ns)>
-        <w:abstractNum w:abstractNumId="001"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="decimal"/><w:lvlRestart w:val="0"/></w:lvl></w:abstractNum>
+        <w:abstractNum w:abstractNumId="001"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/></w:lvl><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlRestart w:val="0"/></w:lvl></w:abstractNum>
         <w:abstractNum w:abstractNumId="2"><w:numStyleLink w:val="Linked"/></w:abstractNum>
-        <w:abstractNum w:abstractNumId="3"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/></w:lvl></w:abstractNum>
+        <w:abstractNum w:abstractNumId="3"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/></w:lvl></w:abstractNum>
         <w:num w:numId="001"><w:abstractNumId w:val="1"/></w:num>
         <w:num w:numId="2"><w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride></w:num>
         <w:num w:numId="3"><w:abstractNumId w:val="2"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:lvlRestart w:val="0"/></w:lvl></w:lvlOverride></w:num>

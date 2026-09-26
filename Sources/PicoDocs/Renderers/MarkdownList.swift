@@ -4,13 +4,15 @@ import Foundation
 struct MarkdownList {
     struct Item {
         let number: Int?
+        let padding: String
         enum Content {
             case text(String)
             case list(MarkdownList)
         }
         var content: [Content]
-        init(number: Int?, text: String) {
+        init(number: Int?, text: String, padding: String = " ") {
             self.number = number
+            self.padding = padding
             content = [.text(text)]
         }
         mutating func appendText(_ text: String) {
@@ -27,6 +29,7 @@ struct MarkdownList {
         let contentIndent: Int
         let number: Int?
         let text: String
+        let padding: String
     }
 
     private static func marker(_ line: String) -> Marker? {
@@ -39,7 +42,7 @@ struct MarkdownList {
             number = nil; markerWidth = 1
         } else {
             let digits = content.prefix { $0.isASCII && $0.isNumber }
-            guard !digits.isEmpty, let value = Int(digits), content.dropFirst(digits.count).first == "." else { return nil }
+            guard (1...9).contains(digits.count), let value = Int(digits), content.dropFirst(digits.count).first == "." else { return nil }
             number = value; markerWidth = digits.count + 1
         }
         let tail = content.dropFirst(markerWidth)
@@ -48,7 +51,7 @@ struct MarkdownList {
         let contentIndent = padding.isEmpty ? indent + markerWidth + 1 : padding.reduce(indent + markerWidth) {
             $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1
         }
-        return Marker(indent: indent, contentIndent: contentIndent, number: number, text: String(tail.dropFirst(padding.count)))
+        return Marker(indent: indent, contentIndent: contentIndent, number: number, text: String(tail.dropFirst(padding.count)), padding: padding.isEmpty ? " " : String(padding))
     }
 
     static func isOrderedMarker(_ line: String) -> Bool? { marker(line).map { $0.number != nil } }
@@ -69,7 +72,7 @@ struct MarkdownList {
                     // An explicit restart following a blank line opens a new list.
                     if blank, !list.items.isEmpty, current.number == first.number, list.ordered { break }
                     index = next + 1
-                    list.items.append(Item(number: current.number, text: current.text))
+                    list.items.append(Item(number: current.number, text: current.text, padding: current.padding))
                     contentIndent = current.contentIndent
                 } else {
                     guard !list.items.isEmpty else { break }
@@ -90,8 +93,9 @@ struct MarkdownList {
 
     func plaintext(indent: String = "", inline: (String) -> String) -> String {
         items.map { item in
-            let marker = item.number.map { "\($0). " } ?? "- "
-            let continuation = indent + String(repeating: " ", count: marker.count)
+            let marker = item.number.map { "\($0)." + item.padding } ?? "-" + item.padding
+            let width = (indent + marker).reduce(0) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
+            let continuation = String(repeating: " ", count: width)
             return item.content.enumerated().map { index, content in
                 switch content {
                 case .text(let text):

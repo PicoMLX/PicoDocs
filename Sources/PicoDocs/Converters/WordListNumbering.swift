@@ -40,7 +40,7 @@ final class WordListNumbering {
     private var styleLanguages: [String: String] = [:]
     private var defaultStyle: String?
     private var documentDefaults: (numID: String?, level: Int?)?
-    private var restartAfterBreak: Set<String> = []
+    private var restartAfterBreak: [String: Bool] = [:]
     private var isLibreOffice = false
     private var lastInstance: [String: String] = [:]
     private var resumeAlias: (original: String, replacement: String)?
@@ -108,7 +108,7 @@ final class WordListNumbering {
         markerWidths[numID] = markerWidths[numID]?.filter { $0.key < ilvl }
 
         // Invisible and bullet levels still participate in compound numbering.
-        let start = number.overrides[ilvl] ?? definition?.start ?? 1
+        let start = number.overrides[ilvl] ?? definition?.start ?? 0
         let previous = counters[numID]?[ilvl]
         let count = previous.map { min($0, Int.max - 1) + 1 } ?? start
         counters[numID, default: [:]][ilvl] = count
@@ -125,18 +125,18 @@ final class WordListNumbering {
             var label = definition?.text ?? simple
             for level in 0...8 {
                 let effective = effectiveLevel(numID: numID, level: level)
-                let value = counters[numID]?[level] ?? numbers[numID]?.overrides[level] ?? effective?.start ?? 1
+                let value = counters[numID]?[level] ?? numbers[numID]?.overrides[level] ?? effective?.start ?? 0
                 label = label.replacingOccurrences(of: "%\(level + 1)", with: Self.formattedNumber(value, format: definition?.legal == true ? "decimal" : (effective?.format ?? "decimal"), language: definition?.language ?? effective?.language ?? language))
             }
             let suffix = definition?.suffix == "nothing" ? "" : (definition?.suffix == "tab" ? "\t" : " ")
-            if label == "\(count).", !suffix.isEmpty { marker = label + suffix }
+            if label == "\(count).", String(count).count <= 9, !suffix.isEmpty { marker = label + suffix }
             else {
                 let escaped = label.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
                 marker = "- " + escaped + suffix
             }
         }
         let indent = (0..<ilvl).reduce(0) { $0 + (markerWidths[numID]?[$1] ?? 0) }
-        if visibleMarker { markerWidths[numID, default: [:]][ilvl] = marker.hasPrefix("- ") ? 2 : marker.count }
+        if visibleMarker { markerWidths[numID, default: [:]][ilvl] = marker.hasPrefix("- ") ? 2 : Self.displayWidth(marker, startingAt: indent) - indent }
         return String(repeating: " ", count: indent) + marker
     }
 
@@ -150,7 +150,7 @@ final class WordListNumbering {
         }
         guard let override = levelOverrides[numID]?[level] else { return base }
         return Level(format: override.format ?? base?.format ?? "decimal",
-                     start: override.start ?? base?.start ?? 1,
+                     start: override.start ?? base?.start ?? 0,
                      restart: override.restart ?? base?.restart, text: override.text ?? base?.text, legal: override.legal ?? base?.legal ?? false, language: override.language ?? base?.language, suffix: override.suffix ?? base?.suffix)
     }
 
@@ -159,13 +159,13 @@ final class WordListNumbering {
     private func parseNumbering(_ document: Document) {
         for abstract in (try? document.getElementsByTag("w:abstractNum").array()) ?? [] {
             guard let id = Self.canonicalID(try? abstract.attr("w:abstractNumId")) else { continue }
-            if ["1", "true", "on"].contains((try? abstract.attr("w15:restartNumberingAfterBreak")) ?? "") { restartAfterBreak.insert(id) }
+            if abstract.hasAttr("w15:restartNumberingAfterBreak") { restartAfterBreak[id] = ["1", "true", "on"].contains((try? abstract.attr("w15:restartNumberingAfterBreak")) ?? "") }
             numberingStyleLinks[id] = Self.child(of: abstract, named: "w:numstylelink").flatMap { try? $0.attr("w:val") }
             var levels: [Int: Level] = [:]
             for level in abstract.children().array() where level.tagName().lowercased() == "w:lvl" {
                 guard let ilvl = Int((try? level.attr("w:ilvl")) ?? ""), (0...8).contains(ilvl) else { continue }
                 let format = Self.child(of: level, named: "w:numfmt").flatMap { try? $0.attr("w:val") } ?? "decimal"
-                let start = Self.child(of: level, named: "w:start").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) } ?? 1
+                let start = Self.child(of: level, named: "w:start").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) } ?? 0
                 let restart = Self.child(of: level, named: "w:lvlrestart").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
                 levels[ilvl] = Level(format: format, start: max(0, start), restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil }, text: Self.child(of: level, named: "w:lvltext").flatMap { try? $0.attr("w:val") }, legal: Self.legal(in: level) ?? false, language: Self.language(in: level), suffix: Self.child(of: level, named: "w:suff").flatMap { try? $0.attr("w:val") })
             }
@@ -233,12 +233,24 @@ final class WordListNumbering {
         return numID == nil && level == nil ? nil : (numID, level)
     }
 
-    func sectionBreak() {
-        for (id, number) in numbers where restartAfterBreak.contains(number.abstract) {
-            counters[id] = nil
-            markerWidths[id] = nil
+    static func displayWidth(_ text: String, startingAt column: Int = 0) -> Int {
+        text.reduce(column) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
+    }
+
+    private func restartsAfterSection(_ numID: String) -> Bool {
+        var current: String? = numID, seen: Set<String> = []
+        for _ in 0..<16 {
+            guard let id = current, seen.insert(id).inserted, let number = numbers[id] else { break }
+            if let restart = restartAfterBreak[number.abstract] { return restart }
+            current = numberingStyleLinks[number.abstract].flatMap { Self.canonicalID(styleNumbering($0)?.numID) }
         }
-        lastInstance = lastInstance.filter { !restartAfterBreak.contains($0.key) }
+        return false
+    }
+
+    func sectionBreak() {
+        let affected = Set(numbers.keys.filter(restartsAfterSection))
+        for id in affected { counters[id] = nil; markerWidths[id] = nil }
+        lastInstance = lastInstance.filter { !affected.contains($0.value) }
         resumeAlias = nil
     }
 

@@ -120,6 +120,8 @@ public struct WordConverter: DocumentConverter {
                 if let content = try? element.getElementsByTag("w:sdtContent").first() {
                     blocks.append(contentsOf: try renderBlocks(in: content, relationships: relationships, numbering: numbering))
                 }
+            case "w:customxml", "w:ins", "w:moveto", "w:smarttag":
+                blocks += try renderBlocks(in: element, relationships: relationships, numbering: numbering)
             default:
                 continue
             }
@@ -218,7 +220,7 @@ public struct WordConverter: DocumentConverter {
         }
         guard let prefix else { return text }
         // Keep a multi-line item (manual `w:br`) inside the item.
-        let continuation = "\n" + String(repeating: " ", count: prefix.count)
+        let continuation = "\n" + String(repeating: " ", count: WordListNumbering.displayWidth(prefix))
         let lines = text.components(separatedBy: "\n")
         return prefix + lines.enumerated().map { index, line in
             guard index > 0 else { return line }
