@@ -101,7 +101,11 @@ public struct PowerPointConverter: DocumentConverter {
     static func slidePaths(_ presentation: Document, archive: PowerPointPackage) throws -> [String] {
         let relationships = relationships(archive, forPart: "ppt/presentation.xml")
         var paths: [String] = []
-        for slideID in (try? presentation.getElementsByTag("p:sldId").array()) ?? [] {
+        guard let root = presentation.children().first(), root.tagName().lowercased() == "p:presentation" else { throw PicoDocsError.fileCorrupted }
+        let list = child(of: root, named: "p:sldidlst")
+        // A deck may have no slides, but slide IDs cannot live inside extensions.
+        if list == nil, !((try? presentation.getElementsByTag("p:sldId").isEmpty()) ?? true) { throw PicoDocsError.fileCorrupted }
+        for slideID in list?.children().array().filter({ $0.tagName().lowercased() == "p:sldid" }) ?? [] {
             guard let id = try? slideID.attr("r:id"), let relation = relationships[id], !relation.external, relation.type.hasSuffix("/slide") else { throw PicoDocsError.fileCorrupted }; let target = relation.target
             paths.append(WordConverter.resolvePartPath(target, relativeTo: "ppt"))
         }
@@ -115,6 +119,8 @@ public struct PowerPointConverter: DocumentConverter {
         let target = relation.target
         let notesPath = WordConverter.resolvePartPath(target, relativeTo: directory(of: slidePath))
         guard let notes = parts.document(notesPath, root: "p:notes") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+        guard let root = notes.children().first(), let common = child(of: root, named: "p:csld"),
+              let tree = child(of: common, named: "p:sptree") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         var context = SlideContext(archive: archive, partPath: notesPath,
                                    relationships: Self.relationships(archive, forPart: notesPath),
                                    images: ImageCollector(), embedsImages: false)
@@ -125,7 +131,7 @@ public struct PowerPointConverter: DocumentConverter {
             guard let document = parts.document(path, root: "p:notesmaster") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
             context.master = document
         }
-        let paragraphs = ((try? notes.getElementsByTag("p:sp").array()) ?? [])
+        let paragraphs = tree.children().array().filter { $0.tagName().lowercased() == "p:sp" }
             .filter { placeholderType(of: $0) == "body" }
             .flatMap { shape in
                 context.defaultLink = shapeLink(shape, context: context)

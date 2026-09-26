@@ -45,7 +45,7 @@ struct MarkdownList {
                 if list.items.isEmpty || current.indent < contentIndent {
                     guard (current.number != nil) == list.ordered else { break }
                     // An explicit restart following a blank line opens a new list.
-                    if blank, !list.items.isEmpty, current.number == first.number, list.ordered { break }
+                    if blank, !list.items.isEmpty, (!list.ordered || current.number == first.number) { break }
                     index = next + 1
                     list.items.append(Item(number: current.number, text: current.text))
                     contentIndent = current.contentIndent

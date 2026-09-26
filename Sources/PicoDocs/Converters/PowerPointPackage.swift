@@ -60,6 +60,8 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
     private var unknownPrefixes: [String: String] = [:]
     private var output = ""
     private var hasError = false
+    private var outputBytes = 0
+    private var maximumOutputBytes = 64 * 1024 * 1024
     private static let prefixes = [
         "http://schemas.openxmlformats.org/presentationml/2006/main": "p",
         "http://schemas.openxmlformats.org/drawingml/2006/main": "a",
@@ -73,9 +75,10 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         "http://schemas.openxmlformats.org/package/2006/content-types": ""
     ]
 
-    static func normalize(_ data: Data) -> String? {
+    static func normalize(_ data: Data, maximumOutputBytes: Int = 64 * 1024 * 1024) -> String? {
         let parser = XMLParser(data: data)
         let delegate = PowerPointXML()
+        delegate.maximumOutputBytes = maximumOutputBytes
         parser.delegate = delegate
         parser.shouldResolveExternalEntities = false
         guard parser.parse(), !delegate.hasError, !Task.isCancelled else { return nil }
@@ -108,27 +111,54 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         scopes.append(scope)
         let tag = name(elementName, scope: scope)
         names.append(tag)
-        output += "<" + tag
+        append("<" + tag, parser: parser)
         for (key, value) in attributes where key != "xmlns" && !key.hasPrefix("xmlns:") {
             var value = value
             if key == "Requires" {
                 value = value.split(separator: " ").map { Self.prefixes[scope[String($0)] ?? ""] ?? "unsupported" }.joined(separator: " ")
             }
-            output += " \(name(key, scope: scope, attribute: true))=\"\(Self.escape(value))\""
+            append(" \(name(key, scope: scope, attribute: true))=\"", parser: parser)
+            appendEscaped(value, attribute: true, parser: parser)
+            append("\"", parser: parser)
         }
-        output += ">"
+        append(">", parser: parser)
     }
 
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
-        if let name = names.popLast() { output += "</" + name + ">" }
+        if let name = names.popLast() { append("</" + name + ">", parser: parser) }
         if scopes.count > 1 { scopes.removeLast() }
     }
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        if Task.isCancelled { parser.abortParsing(); return }
-        output += Self.escape(string)
+        appendEscaped(string, parser: parser)
     }
-    func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) { output += Self.escape(String(decoding: CDATABlock, as: UTF8.self)) }
-    private static func escape(_ text: String) -> String {
-        text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
+    func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
+        appendEscaped(String(decoding: CDATABlock, as: UTF8.self), parser: parser)
+    }
+    private func append(_ text: String, parser: XMLParser) {
+        guard !hasError else { return }
+        let bytes = text.utf8.count
+        guard !Task.isCancelled, bytes <= maximumOutputBytes - outputBytes else {
+            hasError = true; parser.abortParsing(); return
+        }
+        output += text; outputBytes += bytes
+    }
+    private func appendEscaped(_ text: String, attribute: Bool = false, parser: XMLParser) {
+        // Escape in bounded chunks: neither character data nor attributes can
+        // allocate an expanded copy larger than the DOM input budget.
+        var chunk = ""
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "&": chunk += "&amp;"
+            case "<": chunk += "&lt;"
+            case ">": chunk += "&gt;"
+            case "\"" where attribute: chunk += "&quot;"
+            default: chunk.unicodeScalars.append(scalar)
+            }
+            if chunk.utf8.count >= 4096 {
+                append(chunk, parser: parser); chunk = ""
+                if hasError { return }
+            }
+        }
+        append(chunk, parser: parser)
     }
 }
