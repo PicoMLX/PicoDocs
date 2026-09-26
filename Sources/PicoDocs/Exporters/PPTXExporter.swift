@@ -51,11 +51,22 @@ public struct PPTXExporter: DocumentExporter {
     struct Slide { let title: String; let body: [String] }
 
     private static func slides(from result: ConverterResult) -> [Slide] {
-        // Explicit slide sections map 1:1.
-        let slideSections = result.sections.filter { $0.kind == .slide }
-        if !slideSections.isEmpty {
-            return slideSections.map { section in
-                Slide(title: section.title ?? "", body: bodyLines(MarkdownBlockParser.parse(section.markdown)))
+        // Preserve associated tables, including slides containing only tables.
+        let explicit = result.sections.filter { $0.kind == .slide || ($0.slideNumber != nil && $0.kind != .image) }
+        if !explicit.isEmpty {
+            var groups: [[DocumentSection]] = []
+            var indices: [Int: Int] = [:]
+            for section in explicit {
+                if let number = section.slideNumber, let index = indices[number] {
+                    groups[index].append(section)
+                } else {
+                    if let number = section.slideNumber { indices[number] = groups.count }
+                    groups.append([section])
+                }
+            }
+            return groups.map { sections in
+                Slide(title: sections.first(where: { $0.kind == .slide })?.title ?? "",
+                      body: sections.flatMap { bodyLines(MarkdownBlockParser.parse($0.markdown)) })
             }
         }
 

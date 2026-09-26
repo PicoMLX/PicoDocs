@@ -180,45 +180,28 @@ enum MarkdownInlineParser {
 
     // MARK: - Emphasis
 
-    /// `***`/`**`/`*` matchers, compiled once (the expensive part). `parseEmphasis`
-    /// recurses over every inline run, so rebuilding these per call was needless CPU;
-    /// the patterns are constant and known-valid, hence `try!`. `NSRegularExpression`
-    /// is immutable/thread-safe once built, so `nonisolated(unsafe)` is sound here —
-    /// and it keeps non-`Sendable` closures out of global state (the wraps are cheap
-    /// and stay local to the call).
-    nonisolated(unsafe) private static let emphasisRegexes: [NSRegularExpression] = [
-        try! NSRegularExpression(pattern: "\\*\\*\\*(.+?)\\*\\*\\*"),
-        try! NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*"),
-        try! NSRegularExpression(pattern: "\\*(.+?)\\*"),
-    ]
+    private static let emphasisRegex = try! NSRegularExpression(
+        pattern: #"\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|\*(.+?)\*"#)
 
-    /// Parses `***`/`**`/`*` emphasis into nested nodes, preferring (at the same
-    /// position) the longest delimiter — mirroring the renderer's pass order so
-    /// `***x***` becomes strong(emphasis(x)).
     static func parseEmphasis(_ text: String) -> [MarkdownInline] {
-        guard !text.isEmpty else { return [] }
-        let wraps: [([MarkdownInline]) -> MarkdownInline] = [
-            { .strong([.emphasis($0)]) },
-            { .strong($0) },
-            { .emphasis($0) },
-        ]
         let ns = text as NSString
-        var best: (full: Range<String.Index>, inner: String, wrap: ([MarkdownInline]) -> MarkdownInline)?
-        for (regex, wrap) in zip(emphasisRegexes, wraps) {
-            guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
-                  let full = Range(match.range, in: text),
-                  let inner = Range(match.range(at: 1), in: text) else { continue }
-            // Strictly-less keeps the first (longest) pattern at a tie position.
-            if best == nil || full.lowerBound < best!.full.lowerBound {
-                best = (full, String(text[inner]), wrap)
-            }
-        }
-        guard let match = best else { return [.text(text)] }
         var nodes: [MarkdownInline] = []
-        let prefix = String(text[text.startIndex..<match.full.lowerBound])
-        if !prefix.isEmpty { nodes.append(.text(prefix)) }
-        nodes.append(match.wrap(parseEmphasis(match.inner)))
-        nodes.append(contentsOf: parseEmphasis(String(text[match.full.upperBound...])))
+        var offset = 0
+        for match in emphasisRegex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            if match.range.location > offset {
+                nodes.append(.text(ns.substring(with: NSRange(location: offset, length: match.range.location - offset))))
+            }
+            for group in 1...3 where match.range(at: group).location != NSNotFound {
+                let children = parseEmphasis(ns.substring(with: match.range(at: group)))
+                switch group {
+                case 1: nodes.append(.strong([.emphasis(children)]))
+                case 2: nodes.append(.strong(children))
+                default: nodes.append(.emphasis(children))
+                }
+            }
+            offset = NSMaxRange(match.range)
+        }
+        if offset < ns.length { nodes.append(.text(ns.substring(from: offset))) }
         return nodes
     }
 

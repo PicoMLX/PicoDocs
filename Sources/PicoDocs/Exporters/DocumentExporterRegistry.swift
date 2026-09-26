@@ -21,6 +21,8 @@ public struct DocumentExporterRegistry: Sendable {
 
     /// Standard priorities. Lower is tried first (more specific wins).
     public enum Priority {
+        /// An explicitly selected exporter takes precedence over built-ins.
+        public static let override: Double = -10
         public static let specific: Double = 0
         public static let generic: Double = 10
     }

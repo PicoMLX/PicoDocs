@@ -132,15 +132,24 @@ public enum PicoDocsEngine {
         var sections = result.sections
         var refs: [DocumentSection] = []
         var generatedCount = 0
+        let identities = sections.filter { $0.kind == .image }.compactMap {
+            [$0.sourcePath, $0.title].compactMap { $0 }.first { !$0.isEmpty }
+        }
+        let counts = Dictionary(identities.map { ($0, 1) }, uniquingKeysWith: +)
+        var used = Set(identities)
         for index in sections.indices where sections[index].kind == .image {
             let section = sections[index]
             var reference = [section.sourcePath, section.title]
                 .compactMap { $0 }
                 .first { !$0.isEmpty }
-            if reference == nil {
-                generatedCount += 1
+            if reference == nil || counts[reference ?? "", default: 0] > 1 {
                 let ext = OfficeMediaType.fileExtension(forMIME: section.metadata["mimeType"] ?? "")
-                let generated = "image-\(generatedCount).\(ext)"
+                var generated: String
+                repeat {
+                    generatedCount += 1
+                    generated = "image-\(generatedCount).\(ext)"
+                } while used.contains(generated)
+                used.insert(generated)
                 sections[index].sourcePath = generated
                 reference = generated
             }

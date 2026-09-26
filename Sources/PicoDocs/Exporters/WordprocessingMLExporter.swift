@@ -217,7 +217,18 @@ public struct WordprocessingMLExporter: DocumentExporter {
             for node in nodes {
                 switch node {
                 case .text(let s):
-                    out += textRun(s, bold: bold, italic: italic, monospace: false)
+                    let lines = s.components(separatedBy: "\n")
+                    for (index, line) in lines.enumerated() {
+                        let hasNext = index + 1 < lines.count
+                        let hardBreak = hasNext && (line.hasSuffix("  ") || line.hasSuffix("\\"))
+                        let content = hardBreak
+                            ? (line.hasSuffix("\\") ? String(line.dropLast()) : line.trimmingCharacters(in: .whitespaces))
+                            : line
+                        out += textRun(content, bold: bold, italic: italic, monospace: false)
+                        if hasNext {
+                            out += hardBreak ? "<w:r><w:br/></w:r>" : textRun(" ", bold: bold, italic: italic, monospace: false)
+                        }
+                    }
                 case .code(let s):
                     out += textRun(s, bold: bold, italic: italic, monospace: true)
                 case .strong(let children):

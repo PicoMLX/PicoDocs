@@ -161,7 +161,7 @@ public struct XLSXExporter: DocumentExporter {
         let cleanedScalars = name.unicodeScalars.map { invalid.contains($0) ? space : $0 }
         let cleaned = String(String.UnicodeScalarView(cleanedScalars))
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return String(cleaned.prefix(31))
+        return String(cleaned.prefix(31)).trimmingCharacters(in: CharacterSet(charactersIn: "'"))
     }
 
     // MARK: - Package parts

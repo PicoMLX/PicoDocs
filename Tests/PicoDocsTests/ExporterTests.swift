@@ -16,6 +16,46 @@ import ZIPFoundation
 @Suite("Exporters (Markdown/ConverterResult -> office files)")
 struct ExporterTests {
 
+    @Test func reviewedExportRegressions() throws {
+        let slides = ConverterResult(sections: [
+            DocumentSection(title: "First", kind: .slide, markdown: "Body", slideNumber: 1),
+            DocumentSection(kind: .table, markdown: "| Attached |\n| --- |\n| Data |", slideNumber: 1),
+            DocumentSection(kind: .table, markdown: "| Table only |\n| --- |\n| More |", slideNumber: 2)
+        ])
+        let pptx = try PicoDocsEngine.write(slides, to: .pptx)
+        #expect(text(pptx, "ppt/slides/slide1.xml")?.contains("Attached") == true)
+        #expect(text(pptx, "ppt/slides/slide2.xml")?.contains("Table only") == true)
+
+        let image = DocumentSection(title: "same.png", kind: .image, markdown: "",
+                                    metadata: ["mimeType": "image/png", "base64": Data([1, 2, 3]).base64EncodedString()])
+        let docx = try PicoDocsEngine.write(ConverterResult(sections: [image, image]), to: .docx)
+        let xml = try #require(text(docx, "word/document.xml"))
+        #expect(xml.components(separatedBy: "<w:drawing>").count == 3)
+
+        let hard = try PicoDocsEngine.write(markdown: "first  \nsecond\nthird", to: .docx)
+        let breaks = try #require(text(hard, "word/document.xml"))
+        #expect(breaks.components(separatedBy: "<w:br/>").count == 2)
+        #expect(breaks.contains("second"))
+
+        let xlsx = try PicoDocsEngine.write(ConverterResult(sections: [
+            DocumentSection(title: "'Budget'", markdown: "value"),
+            DocumentSection(title: "Budget", markdown: "value")
+        ]), to: .xlsx)
+        let workbook = try #require(text(xlsx, "xl/workbook.xml"))
+        #expect(workbook.contains("name=\"Budget\""))
+        #expect(workbook.contains("name=\"Budget (2)\""))
+        #expect(MarkdownInlineParser.parse(String(repeating: "*value* ", count: 10_000)).plainText == String(repeating: "value ", count: 10_000))
+    }
+
+    @Test func explicitExporterOverrideWins() throws {
+        struct SelectedExporter: DocumentExporter {
+            func accepts(_ format: ExportableFileType) -> Bool { format == .docx }
+            func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data { Data("selected".utf8) }
+        }
+        let registry = DocumentExporterRegistry.default.registering(SelectedExporter(), priority: DocumentExporterRegistry.Priority.override)
+        #expect(try registry.write(ConverterResult(sections: [DocumentSection(markdown: "text")]), format: .docx) == Data("selected".utf8))
+    }
+
     // MARK: - Helpers
 
     /// Reads a single entry from an in-memory archive (test-side mirror of the

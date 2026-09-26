@@ -9,7 +9,7 @@
 //  already moved *off* the `NSAttributedString` DOCX path on the read side because
 //  it was "lossy, font-size heading guessing, and a hard throw on iOS"
 //  (`WordConverter.swift`), so this is kept only for opt-in use and comparison
-//  testing — register it explicitly via `registry.registering(...)` if you want it.
+//  testing — register it explicitly via `DocumentExporterRegistry.default.registering(AttributedStringDOCXExporter(), priority: DocumentExporterRegistry.Priority.override)` if you want it.
 //
 //  `.officeOpenXML` writing is macOS-only; on other Apple platforms this throws
 //  `.platformUnavailable` so a registry can fall through.
