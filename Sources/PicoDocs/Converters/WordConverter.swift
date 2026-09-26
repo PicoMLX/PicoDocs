@@ -36,10 +36,7 @@ public struct WordConverter: DocumentConverter {
         }
 
         let numbering = WordListNumbering(archive: archive)
-        var blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering)
-        // Text boxes (shapes with text) store their content in `w:txbxContent`
-        // outside the normal block flow; extract it and append as body blocks.
-        blocks += try Self.extractTextBoxes(from: body, relationships: relationships, numbering: numbering)
+        let blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering)
         var markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Footnote/endnote text lives in separate parts; append the referenced
@@ -109,11 +106,16 @@ public struct WordConverter: DocumentConverter {
                 if let markdown = renderParagraph(element, relationships: relationships, numbering: numbering), !markdown.isEmpty {
                     blocks.append(markdown)
                 }
+                blocks += try extractTextBoxes(from: element, relationships: relationships, numbering: numbering)
             case "w:sectpr":
                 numbering?.sectionBreak()
             case "w:tbl":
-                let table = renderTable(element, relationships: relationships, numbering: numbering)
+                var boxes: [String] = []
+                let table = try renderTable(element, relationships: relationships, numbering: numbering) { paragraph in
+                    boxes += try extractTextBoxes(from: paragraph, relationships: relationships, numbering: numbering)
+                }
                 if !table.isEmpty { blocks.append(table) }
+                blocks += boxes
             case "w:sdt":
                 if let content = try? element.getElementsByTag("w:sdtContent").first() {
                     blocks.append(contentsOf: try renderBlocks(in: content, relationships: relationships, numbering: numbering))
@@ -136,7 +138,7 @@ public struct WordConverter: DocumentConverter {
         // Iterate the Elements sequence directly (no intermediate array copy).
         guard let textBoxes = try? body.getElementsByTag("w:txbxContent") else { return blocks }
         for txbx in textBoxes {
-            if !shouldRenderTextBox(txbx) { continue }
+            if !shouldRenderTextBox(txbx) || isInsideTextBox(txbx, before: body) { continue }
             blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships, numbering: numbering))
         }
         return blocks
@@ -208,7 +210,7 @@ public struct WordConverter: DocumentConverter {
         let style = properties.flatMap { child(of: $0, named: "w:pstyle") }.flatMap { try? $0.attr("w:val") }
         let numPr = properties.flatMap { child(of: $0, named: "w:numpr") }
         let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
-        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style, visibleMarker: text.isEmpty || headingLevel(forStyle: style) == nil) } ?? (numPr != nil ? "- " : nil)
+        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style, visibleMarker: text.isEmpty || headingLevel(forStyle: style) == nil, paragraphProperties: properties) } ?? (numPr != nil ? "- " : nil)
         guard !text.isEmpty else { return prefix }
 
         if let level = headingLevel(forStyle: style) {
@@ -365,7 +367,7 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Tables
 
-    static func renderTable(_ table: Element, relationships: [String: String], numbering: WordListNumbering? = nil) -> String {
+    static func renderTable(_ table: Element, relationships: [String: String], numbering: WordListNumbering? = nil, textBoxes: ((Element) throws -> Void)? = nil) throws -> String {
         var rows: [[String]] = []
         for tr in table.children().array() where tr.tagName().lowercased() == "w:tr" {
             var cells: [String] = []
@@ -385,10 +387,11 @@ public struct WordConverter: DocumentConverter {
                         let properties = child(of: paragraph, named: "w:ppr")
                         let numPr = properties.flatMap { child(of: $0, named: "w:numpr") }
                         let style = properties.flatMap { child(of: $0, named: "w:pstyle") }.flatMap { try? $0.attr("w:val") }
-                        _ = numbering.prefix(numPr: numPr, style: style, visibleMarker: false)
+                        _ = numbering.prefix(numPr: numPr, style: style, visibleMarker: false, paragraphProperties: properties)
                     }
                     let t = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
+                    try textBoxes?(paragraph)
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
                 cells.append(cellText.replacingOccurrences(of: "|", with: "\\|")

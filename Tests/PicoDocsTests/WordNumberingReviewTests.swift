@@ -5,6 +5,39 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func inheritedNumberingUsesParagraphLanguageAndSuffixes() async throws {
+        for (suffix, expected) in [("nothing", "un.Item"), ("space", "un. Item"), ("tab", "un.\tItem")] {
+            let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"cardinalText\"/><w:lvlText w:val=\"%1.\"/><w:suff w:val=\"\(suffix)\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+            let styles = "<w:styles \(ns)><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val=\"en-US\"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:styleId=\"List\"><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr></w:style></w:styles>"
+            let document = "<w:document \(ns)><w:body><w:p><w:pPr><w:pStyle w:val=\"List\"/><w:rPr><w:lang w:val=\"fr-FR\"/></w:rPr></w:pPr><w:r><w:t>Item</w:t></w:r></w:p></w:body></w:document>"
+            let data = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8)), (name: "word/styles.xml", data: Array(styles.utf8))])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "language.docx")
+            #expect(result.markdown().contains(expected))
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(expected))
+        }
+    }
+
+    @Test func decimalNoSuffixSurvivesOverrides() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"decimal\"/><w:suff w:val=\"space\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"0\"><w:lvl w:ilvl=\"0\"><w:suff w:val=\"nothing\"/></w:lvl></w:lvlOverride></w:num></w:numbering>"
+        let document = "<w:document \(ns)><w:body><w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>Item</w:t></w:r></w:p></w:body></w:document>"
+        let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8))]), filename: "suffix.docx")
+        #expect(result.markdown() == "- 1.Item")
+        for format in [ExportFileType.plaintext,.html] { #expect(try DocumentRenderer.render(result, to: format).contains("1.Item")) }
+    }
+
+    @Test func textBoxCountersFollowAnchorsAndSectionBreaks() async throws {
+        let numbering = "<w:numbering \(ns) xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\"><w:abstractNum w:abstractNumId=\"1\" w15:restartNumberingAfterBreak=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        func item(_ text: String) -> String { "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>" }
+        for table in [false,true] {
+            let anchor = "<w:p><w:r><w:drawing><w:txbxContent>" + item("Box") + "</w:txbxContent></w:drawing></w:r></w:p>"
+            let block = table ? "<w:tbl><w:tr><w:tc>" + anchor + "</w:tc></w:tr></w:tbl>" : anchor
+            let document = "<w:document \(ns)><w:body>" + item("Before") + block + item("After") + "<w:p><w:pPr><w:sectPr/></w:pPr></w:p>" + item("Reset") + "</w:body></w:document>"
+            let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8))]), filename: "anchor.docx")
+            for expected in ["1. Before", "2. Box", "3. After", "1. Reset"] { #expect(result.markdown().contains(expected)) }
+            #expect(result.markdown().components(separatedBy: "Box").count == 2)
+        }
+    }
+
     @Test func literalLabelsLegalNumberingAndLocalizedText() async throws {
         func convert(format: String, label: String, start: Int = 1, language: String = "en-US", extra: String = "", override: String = "") async throws -> ConverterResult {
             let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"upperRoman\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:start w:val=\"\(start)\"/><w:numFmt w:val=\"\(format)\"/><w:lvlText w:val=\"\(label)\"/>\(extra)</w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/>\(override)</w:num></w:numbering>"

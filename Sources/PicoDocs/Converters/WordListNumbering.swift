@@ -23,6 +23,7 @@ final class WordListNumbering {
         var text: String? = nil
         var legal = false
         var language: String? = nil
+        var suffix: String? = nil
     }
 
     /// abstractNumId → ilvl → level definition.
@@ -43,7 +44,7 @@ final class WordListNumbering {
     private var isLibreOffice = false
     private var lastInstance: [String: String] = [:]
     private var resumeAlias: (original: String, replacement: String)?
-    private struct PartialLevel { let format: String?; let start: Int?; let restart: Int?; var text: String? = nil; var legal: Bool? = nil; var language: String? = nil }
+    private struct PartialLevel { let format: String?; let start: Int?; let restart: Int?; var text: String? = nil; var legal: Bool? = nil; var language: String? = nil; var suffix: String? = nil }
     private var levelOverrides: [String: [Int: PartialLevel]] = [:]
 
     /// Whether `numbering.xml` was found; without it, list paragraphs fall back
@@ -70,7 +71,7 @@ final class WordListNumbering {
     /// The Markdown prefix (indent + marker) for a paragraph, or nil when it isn't
     /// a list item. `numPr` is the paragraph's own `w:numPr`, if any; `style` its
     /// `w:pStyle`, whose (inherited) numbering applies when the paragraph has none.
-    func prefix(numPr: Element?, style: String?, visibleMarker: Bool = true) -> String? {
+    func prefix(numPr: Element?, style: String?, visibleMarker: Bool = true, paragraphProperties: Element? = nil) -> String? {
         var numID = numPr.flatMap { Self.child(of: $0, named: "w:numid") }.flatMap { try? $0.attr("w:val") }
         var level = numPr.flatMap { Self.child(of: $0, named: "w:ilvl") }.flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
         if numID == nil || level == nil, let inherited = styleNumbering(style) {
@@ -112,7 +113,7 @@ final class WordListNumbering {
         let count = previous.map { min($0, Int.max - 1) + 1 } ?? start
         counters[numID, default: [:]][ilvl] = count
 
-        let language = Self.language(in: numPr?.parent()) ?? styleLanguage(style)
+        let language = Self.language(in: paragraphProperties ?? numPr?.parent()) ?? styleLanguage(style)
         var marker: String
         switch definition?.format ?? "bullet" {
         case "none":
@@ -127,10 +128,11 @@ final class WordListNumbering {
                 let value = counters[numID]?[level] ?? numbers[numID]?.overrides[level] ?? effective?.start ?? 1
                 label = label.replacingOccurrences(of: "%\(level + 1)", with: Self.formattedNumber(value, format: definition?.legal == true ? "decimal" : (effective?.format ?? "decimal"), language: definition?.language ?? effective?.language ?? language))
             }
-            if label == "\(count)." { marker = label + " " }
+            let suffix = definition?.suffix == "nothing" ? "" : (definition?.suffix == "tab" ? "\t" : " ")
+            if label == "\(count).", !suffix.isEmpty { marker = label + suffix }
             else {
                 let escaped = label.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
-                marker = "- " + escaped + " "
+                marker = "- " + escaped + suffix
             }
         }
         let indent = (0..<ilvl).reduce(0) { $0 + (markerWidths[numID]?[$1] ?? 0) }
@@ -144,12 +146,12 @@ final class WordListNumbering {
         if base == nil, let style = numberingStyleLinks[number.abstract],
            let linkedID = Self.canonicalID(styleNumbering(style)?.numID),
            let linked = effectiveLevel(numID: linkedID, level: level, visited: visited.union([numID])) {
-            base = Level(format: linked.format, start: numbers[linkedID]?.overrides[level] ?? linked.start, restart: linked.restart, text: linked.text, legal: linked.legal, language: linked.language)
+            base = Level(format: linked.format, start: numbers[linkedID]?.overrides[level] ?? linked.start, restart: linked.restart, text: linked.text, legal: linked.legal, language: linked.language, suffix: linked.suffix)
         }
         guard let override = levelOverrides[numID]?[level] else { return base }
         return Level(format: override.format ?? base?.format ?? "decimal",
                      start: override.start ?? base?.start ?? 1,
-                     restart: override.restart ?? base?.restart, text: override.text ?? base?.text, legal: override.legal ?? base?.legal ?? false, language: override.language ?? base?.language)
+                     restart: override.restart ?? base?.restart, text: override.text ?? base?.text, legal: override.legal ?? base?.legal ?? false, language: override.language ?? base?.language, suffix: override.suffix ?? base?.suffix)
     }
 
     // MARK: - Parsing
@@ -165,7 +167,7 @@ final class WordListNumbering {
                 let format = Self.child(of: level, named: "w:numfmt").flatMap { try? $0.attr("w:val") } ?? "decimal"
                 let start = Self.child(of: level, named: "w:start").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) } ?? 1
                 let restart = Self.child(of: level, named: "w:lvlrestart").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
-                levels[ilvl] = Level(format: format, start: max(0, start), restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil }, text: Self.child(of: level, named: "w:lvltext").flatMap { try? $0.attr("w:val") }, legal: Self.legal(in: level) ?? false, language: Self.language(in: level))
+                levels[ilvl] = Level(format: format, start: max(0, start), restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil }, text: Self.child(of: level, named: "w:lvltext").flatMap { try? $0.attr("w:val") }, legal: Self.legal(in: level) ?? false, language: Self.language(in: level), suffix: Self.child(of: level, named: "w:suff").flatMap { try? $0.attr("w:val") })
             }
             abstractLevels[id] = levels
         }
@@ -183,7 +185,7 @@ final class WordListNumbering {
                     let format = Self.child(of: level, named: "w:numfmt").flatMap { try? $0.attr("w:val") }
                     let start = Self.child(of: level, named: "w:start").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
                     let restart = Self.child(of: level, named: "w:lvlrestart").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
-                    levelOverrides[id, default: [:]][ilvl] = PartialLevel(format: format, start: start.map { max(0, $0) }, restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil }, text: Self.child(of: level, named: "w:lvltext").flatMap { try? $0.attr("w:val") }, legal: Self.legal(in: level), language: Self.language(in: level))
+                    levelOverrides[id, default: [:]][ilvl] = PartialLevel(format: format, start: start.map { max(0, $0) }, restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil }, text: Self.child(of: level, named: "w:lvltext").flatMap { try? $0.attr("w:val") }, legal: Self.legal(in: level), language: Self.language(in: level), suffix: Self.child(of: level, named: "w:suff").flatMap { try? $0.attr("w:val") })
                 }
             }
             numbers[id] = (abstract, overrides)
