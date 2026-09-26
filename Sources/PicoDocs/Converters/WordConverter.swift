@@ -382,8 +382,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     private static func escapeLinkLabel(_ text: String) -> String {
-        text.replacingOccurrences(of: "[", with: "\\[")
-            .replacingOccurrences(of: "]", with: "\\]")
+        MarkdownTableCell.mapCodeSpans(text, code: { $0 }, plain: { MarkdownLiteral.escapeStructural($0, characters: "[]") })
     }
 
     /// Whether `text` is exactly a single Markdown image (produced by an image
@@ -419,6 +418,8 @@ public struct WordConverter: DocumentConverter {
                 // own cells still render — see isInsideTextBox.)
                 for paragraph in (try? tc.getElementsByTag("w:p").array()) ?? [] {
                     if isInsideTextBox(paragraph, before: tc) { continue }
+                    let hidden = paragraph.parents().prefix { $0 !== tc }.contains { ["w:del", "w:movefrom"].contains($0.tagName().lowercased()) }
+                    if hidden { continue }
                     // Table-cell text is flattened, but list state still participates
                     // in the document sequence, including empty cell paragraphs.
                     if let numbering {
@@ -432,7 +433,7 @@ public struct WordConverter: DocumentConverter {
                     try textBoxes?(paragraph)
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
-                cells.append(cellText.replacingOccurrences(of: "|", with: "\\|")
+                cells.append(MarkdownTableCell.mapCodeSpans(cellText, code: { MarkdownTableCell.codePipes($0, encoding: true) }, plain: { MarkdownLiteral.escapeStructural($0, characters: "|") })
                     .replacingOccurrences(of: "\r\n", with: "<br>")
                     .replacingOccurrences(of: "\r", with: "<br>")
                     .replacingOccurrences(of: "\n", with: "<br>"))

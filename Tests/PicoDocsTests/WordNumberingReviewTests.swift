@@ -5,6 +5,67 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func escapedWordLinkLabelsAndTablePipesStayLiteral() async throws {
+        let type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+        let rels = "<Relationships><Relationship Id=\"link\" Type=\"\(type)\" Target=\"https://example.com\" TargetMode=\"External\"/></Relationships>"
+        let doc = "<w:document \(ns) xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:body><w:p><w:hyperlink r:id=\"link\"><w:r><w:t>a\\]b</w:t></w:r></w:hyperlink></w:p></w:body></w:document>"
+        let linked = try await PicoDocsEngine.convert(data:PagesConverterTests.makeZip([(name:"word/document.xml",data:Array(doc.utf8)),(name:"word/_rels/document.xml.rels",data:Array(rels.utf8))]),filename:"label.docx")
+        #expect(try DocumentRenderer.render(linked,to:.plaintext) == #"a\]b"#)
+        #expect(try DocumentRenderer.render(linked,to:.html).contains(#"href="https://example.com">a\]b</a>"#))
+        for value in [#"\|"#, #"`\\|`"#] {
+            let xml = "<w:document \(ns)><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>\(value)</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"
+            let result = try await PicoDocsEngine.convert(data:PagesConverterTests.makeZip([(name:"word/document.xml",data:Array(xml.utf8))]),filename:"pipe.docx")
+            let expected = value.replacingOccurrences(of:"`",with:"")
+            let html = try DocumentRenderer.render(result,to:.html)
+            #expect(html.components(separatedBy:"<th>").count - 1 == 1)
+            #expect(html.contains(expected))
+            #expect(try DocumentRenderer.render(result,to:.csv) == expected)
+        }
+    }
+
+    @Test func inlineCodeCannotCrossRTFParagraphBoundaries() async throws {
+        let result = try await PicoDocsEngine.convert(data:Data(#"{\rtf1\ansi `a\\*\par b`}"#.utf8),filename:"blocks.rtf")
+        for format in [ExportFileType.html,.plaintext] {
+            #expect(try DocumentRenderer.render(result,to:format).contains(#"`a\*"#))
+        }
+    }
+
+    @Test func HTMLProseEscapesRemainLiteralAndCodeRemainsVerbatim() async throws {
+        let source = #"<p>literal \* regex</p><p><b>\</b>\tail</p><pre>a\*b</pre><code>c\*d</code>"#
+        let result = try await PicoDocsEngine.convert(data:Data(source.utf8),filename:"literal.html")
+        for format in [ExportFileType.html,.plaintext] {
+            let output = try DocumentRenderer.render(result,to:format)
+            #expect(output.contains(#"literal \* regex"#)); #expect(output.contains(#"a\*b"#)); #expect(output.contains(#"c\*d"#))
+        }
+        #expect(try DocumentRenderer.render(result,to:.plaintext).contains(#"\\tail"#))
+    }
+
+    @Test func arbitraryOrderedRestartsKeepSeparateLists() throws {
+        for source in ["5. A\n\n1. B", "5. A\n\n9. B"] {
+            let result = ConverterResult(sections:[.init(markdown:source)])
+            #expect(try DocumentRenderer.render(result,to:.html).components(separatedBy:"<ol").count - 1 == 2)
+        }
+    }
+
+    @Test func nullLevelTextAndStyleAssociationsPreserveCounters() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:lvlText w:null=\"1\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:start w:val=\"1\"/><w:numFmt w:val=\"lowerLetter\"/><w:pStyle w:val=\"MyList\"/><w:lvlText w:val=\"%1.%2.\"/><w:suff w:val=\"space\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        let styles = "<w:styles \(ns)><w:style w:styleId=\"MyList\"><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr></w:style></w:styles>"
+        let doc = "<w:document \(ns)><w:body><w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"0\"/></w:numPr></w:pPr><w:r><w:t>Hidden marker</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val=\"MyList\"/></w:pPr><w:r><w:t>Child</w:t></w:r></w:p></w:body></w:document>"
+        let result = try await PicoDocsEngine.convert(data:PagesConverterTests.makeZip([(name:"word/document.xml",data:Array(doc.utf8)),(name:"word/numbering.xml",data:Array(numbering.utf8)),(name:"word/styles.xml",data:Array(styles.utf8))]),filename:"styles.docx")
+        #expect(result.markdown().hasPrefix("Hidden marker"))
+        #expect(result.markdown().contains("1.a. Child"))
+    }
+
+    @Test func deletedTableItemsDoNotAdvanceVisibleNumbering() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:suff w:val=\"space\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        func item(_ text: String) -> String { "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>" }
+        for wrapper in ["w:del","w:moveFrom"] {
+            let doc = "<w:document \(ns)><w:body><w:tbl><w:tr><w:tc><\(wrapper)>" + item("Deleted") + "</\(wrapper)></w:tc></w:tr></w:tbl>" + item("Visible") + "</w:body></w:document>"
+            let result = try await PicoDocsEngine.convert(data:PagesConverterTests.makeZip([(name:"word/document.xml",data:Array(doc.utf8)),(name:"word/numbering.xml",data:Array(numbering.utf8))]),filename:"deleted.docx")
+            #expect(result.markdown().contains("1. Visible")); #expect(!result.markdown().contains("Deleted"))
+        }
+    }
+
     @Test func WordCodeBackslashesShareContextAcrossRuns() async throws {
         for runs in [#"<w:r><w:t>`C:\tmp`</w:t></w:r>"#, #"<w:r><w:t>`C:</w:t></w:r><w:r><w:t>\tmp`</w:t></w:r>"#, #"<w:r><w:t>``C:</w:t></w:r><w:r><w:t>\tmp``</w:t></w:r>"#] {
             let document = "<w:document \(ns)><w:body><w:p>\(runs)</w:p></w:body></w:document>"
@@ -196,9 +257,9 @@ struct WordNumberingReviewTests {
         #expect(disabled.markdown().contains("I.1. Item"))
         let enabled = try await convert(format: "decimal", label: "%1.%2.", override: #"<w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:isLgl/></w:lvl></w:lvlOverride>"#)
         #expect(enabled.markdown().contains("1.1. Item"))
-        for (format, start, language, expected) in [("cardinalText", 1, "en-US", "one"), ("ordinalText", 1, "en-US", "first"), ("ordinalText", 22, "en-GB", "twenty-second"), ("cardinalText", 2, "fr-FR", "deux")] {
+        for (format, start, language, expected) in [("cardinalText", 1, "en-US", "one"), ("ordinalText", 1, "en-US", "first"), ("ordinalText", 22, "en-GB", "twenty-second"), ("cardinalText", 2, "fr-FR", "deux"), ("ordinalText", 1, "fr-FR", "premier"), ("ordinalText", 5, "fr-FR", "cinquième"), ("ordinalText", 1, "de-DE", "erste"), ("ordinalText", 21, "de-DE", "einundzwanzigste"), ("hex", 10, "en-US", "A")] {
             let result = try await convert(format: format, label: "%2.", start: start, language: language)
-            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(expected + ". Item"))
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(expected + ". Item"), "\(format) \(language): \(result.markdown()) expected \(expected)")
         }
     }
 

@@ -24,6 +24,8 @@ final class WordListNumbering {
         var legal = false
         var language: String? = nil
         var suffix: String? = nil
+        var nullText = false
+        var paragraphStyle: String? = nil
     }
 
     /// abstractNumId → ilvl → level definition.
@@ -44,7 +46,7 @@ final class WordListNumbering {
     private var isLibreOffice = false
     private var lastInstance: [String: String] = [:]
     private var resumeAlias: (original: String, replacement: String)?
-    private struct PartialLevel { let format: String?; let start: Int?; let restart: Int?; var text: String? = nil; var legal: Bool? = nil; var language: String? = nil; var suffix: String? = nil }
+    private struct PartialLevel { let format: String?; let start: Int?; let restart: Int?; var text: String? = nil; var legal: Bool? = nil; var language: String? = nil; var suffix: String? = nil; var nullText: Bool? = nil; var paragraphStyle: String? = nil }
     private var levelOverrides: [String: [Int: PartialLevel]] = [:]
 
     /// Whether `numbering.xml` was found; without it, list paragraphs fall back
@@ -79,11 +81,21 @@ final class WordListNumbering {
             level = level ?? inherited.level
         }
         guard let numID = Self.canonicalID(numID), numID != "0" else { return nil }   // numId 0: numbering removed
-        let ilvl = min(max(level ?? 0, 0), 8)
 
         guard isResolvable, let number = numbers[numID] else {
             return numPr == nil ? nil : "- "   // unknown definition: keep the old bullet
         }
+        if level == nil {
+            var associatedStyle = style ?? defaultStyle
+            for _ in 0..<16 {
+                guard let id = associatedStyle else { break }
+                if let match = (0...8).first(where: { effectiveLevel(numID: numID, level: $0)?.paragraphStyle == id }) {
+                    level = match; break
+                }
+                associatedStyle = styles[id]?.basedOn
+            }
+        }
+        let ilvl = min(max(level ?? 0, 0), 8)
         let abstract = number.abstract
         let definition = effectiveLevel(numID: numID, level: ilvl)
         if let alias = resumeAlias, alias.original == numID {
@@ -113,6 +125,7 @@ final class WordListNumbering {
         let count = previous.map { min($0, Int.max - 1) + 1 } ?? start
         counters[numID, default: [:]][ilvl] = count
 
+        if definition?.nullText == true { return nil }
         let language = Self.language(in: paragraphProperties ?? numPr?.parent()) ?? styleLanguage(style)
         let suffix = definition?.suffix == "nothing" ? "" : (definition?.suffix == "space" ? " " : "\t")
         var marker: String
@@ -149,12 +162,12 @@ final class WordListNumbering {
         if base == nil, let style = numberingStyleLinks[number.abstract],
            let linkedID = Self.canonicalID(styleNumbering(style)?.numID),
            let linked = effectiveLevel(numID: linkedID, level: level, visited: visited.union([numID])) {
-            base = Level(format: linked.format, start: numbers[linkedID]?.overrides[level] ?? linked.start, restart: linked.restart, text: linked.text, legal: linked.legal, language: linked.language, suffix: linked.suffix)
+            base = Level(format: linked.format, start: numbers[linkedID]?.overrides[level] ?? linked.start, restart: linked.restart, text: linked.text, legal: linked.legal, language: linked.language, suffix: linked.suffix, nullText: linked.nullText, paragraphStyle: linked.paragraphStyle)
         }
         guard let override = levelOverrides[numID]?[level] else { return base }
         return Level(format: override.format ?? base?.format ?? "decimal",
                      start: override.start ?? base?.start ?? 0,
-                     restart: override.restart ?? base?.restart, text: override.text ?? base?.text, legal: override.legal ?? base?.legal ?? false, language: override.language ?? base?.language, suffix: override.suffix ?? base?.suffix)
+                     restart: override.restart ?? base?.restart, text: override.text ?? base?.text, legal: override.legal ?? base?.legal ?? false, language: override.language ?? base?.language, suffix: override.suffix ?? base?.suffix, nullText: override.nullText ?? base?.nullText ?? false, paragraphStyle: override.paragraphStyle ?? base?.paragraphStyle)
     }
 
     // MARK: - Parsing
@@ -170,7 +183,7 @@ final class WordListNumbering {
                 let format = Self.child(of: level, named: "w:numfmt").flatMap { try? $0.attr("w:val") } ?? "decimal"
                 let start = Self.child(of: level, named: "w:start").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) } ?? 0
                 let restart = Self.child(of: level, named: "w:lvlrestart").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
-                levels[ilvl] = Level(format: format, start: max(0, start), restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil }, text: Self.child(of: level, named: "w:lvltext").flatMap { try? $0.attr("w:val") }, legal: Self.legal(in: level) ?? false, language: Self.language(in: level), suffix: Self.child(of: level, named: "w:suff").flatMap { try? $0.attr("w:val") })
+                levels[ilvl] = Level(format: format, start: max(0, start), restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil }, text: Self.child(of: level, named: "w:lvltext").flatMap { try? $0.attr("w:val") }, legal: Self.legal(in: level) ?? false, language: Self.language(in: level), suffix: Self.child(of: level, named: "w:suff").flatMap { try? $0.attr("w:val") }, nullText: Self.nullLevelText(level) ?? false, paragraphStyle: Self.child(of: level, named: "w:pstyle").flatMap { try? $0.attr("w:val") })
             }
             abstractLevels[id] = levels
         }
@@ -188,7 +201,7 @@ final class WordListNumbering {
                     let format = Self.child(of: level, named: "w:numfmt").flatMap { try? $0.attr("w:val") }
                     let start = Self.child(of: level, named: "w:start").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
                     let restart = Self.child(of: level, named: "w:lvlrestart").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
-                    levelOverrides[id, default: [:]][ilvl] = PartialLevel(format: format, start: start.map { max(0, $0) }, restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil }, text: Self.child(of: level, named: "w:lvltext").flatMap { try? $0.attr("w:val") }, legal: Self.legal(in: level), language: Self.language(in: level), suffix: Self.child(of: level, named: "w:suff").flatMap { try? $0.attr("w:val") })
+                    levelOverrides[id, default: [:]][ilvl] = PartialLevel(format: format, start: start.map { max(0, $0) }, restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil }, text: Self.child(of: level, named: "w:lvltext").flatMap { try? $0.attr("w:val") }, legal: Self.legal(in: level), language: Self.language(in: level), suffix: Self.child(of: level, named: "w:suff").flatMap { try? $0.attr("w:val") }, nullText: Self.nullLevelText(level), paragraphStyle: Self.child(of: level, named: "w:pstyle").flatMap { try? $0.attr("w:val") })
                 }
             }
             numbers[id] = (abstract, overrides)
@@ -283,7 +296,7 @@ final class WordListNumbering {
             let formatter = NumberFormatter()
             formatter.locale = Locale(identifier: language)
             formatter.numberStyle = .spellOut
-            let cardinal = formatter.string(from: NSNumber(value: value)) ?? String(value)
+            let cardinal = (formatter.string(from: NSNumber(value: value)) ?? String(value)).replacingOccurrences(of: "\u{00AD}", with: "")
             if format == "cardinalText" { return cardinal }
             if language.lowercased().hasPrefix("en") {
                 let end = cardinal.endIndex
@@ -293,10 +306,33 @@ final class WordListNumbering {
                 let ordinal = irregular[word] ?? (word.hasSuffix("y") ? String(word.dropLast()) + "ieth" : word + "th")
                 return String(cardinal[..<start]) + ordinal
             }
-            // Foundation exposes localized cardinal spellout, but no ordinal
-            // spellout rule selector. Retain a localized ordinal for other languages.
-            formatter.numberStyle = .ordinal
-            return formatter.string(from: NSNumber(value: value)) ?? String(value)
+            // Foundation's .ordinal emits digits, not ordinal words. Apply
+            // textual inflection for French/German instead of changing format.
+            // CLDR reference: common/rbnf/{fr,de}.xml, SpelloutRules.
+            if language.lowercased().hasPrefix("fr") {
+                if value == 1 { return "premier" }
+                var stem = cardinal
+                if value >= 1_000_000, value.isMultiple(of: 1_000_000), stem.hasPrefix("un ") { stem = String(stem.dropFirst(3)) }
+                if stem.hasSuffix("cents") || stem.hasSuffix("vingts") || stem.hasSuffix("millions") || stem.hasSuffix("milliards") { stem.removeLast() }
+                if stem.hasSuffix("cinq") { stem += "u" }
+                else if stem.hasSuffix("neuf") { stem = String(stem.dropLast()) + "v" }
+                else if stem.hasSuffix("e") { stem.removeLast() }
+                return stem + "ième"
+            }
+            if language.lowercased().hasPrefix("de") {
+                let remainder = value % 100
+                let ending = [1:"erste",3:"dritte",7:"siebte",8:"achte"]
+                if remainder > 0 && remainder < 20 {
+                    let tail = (formatter.string(from: NSNumber(value: remainder)) ?? "").replacingOccurrences(of: "\u{00AD}", with: "")
+                    if cardinal.hasSuffix(tail) {
+                        return String(cardinal.dropLast(tail.count)) + (ending[remainder] ?? tail + "te")
+                    }
+                }
+                return cardinal + (value < 20 ? "te" : "ste")
+            }
+            // Unsupported ordinal inflections retain localized words rather
+            // than silently substituting a numeric ordinal representation.
+            return cardinal
         }
         if format == "ordinal" {
             let lastTwo = abs(value % 100)
@@ -305,6 +341,7 @@ final class WordListNumbering {
             else { suffix = [1: "st", 2: "nd", 3: "rd"][abs(value % 10)] ?? "th" }
             return String(value) + suffix
         }
+        if format == "hex" { return String(value, radix: 16, uppercase: true) }
         if format == "decimalFullWidth" {
             return String(String(value).unicodeScalars.map { scalar in
                 (48...57).contains(scalar.value) ? Character(UnicodeScalar(scalar.value + 0xFEE0)!) : Character(scalar)
@@ -325,6 +362,11 @@ final class WordListNumbering {
             return format == "lowerRoman" ? text.lowercased() : text
         }
         return String(value)
+    }
+
+    private static func nullLevelText(_ level: Element) -> Bool? {
+        guard let text = child(of: level, named: "w:lvltext") else { return nil }
+        return ["1", "true", "on"].contains((try? text.attr("w:null")) ?? "")
     }
 
     private static func canonicalID(_ value: String?) -> String? {

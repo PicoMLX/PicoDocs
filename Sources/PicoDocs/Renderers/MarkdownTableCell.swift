@@ -47,6 +47,27 @@ enum MarkdownTableCell {
 
 
 
+    /// Only runs immediately before pipes need a table layer inside code.
+    /// Backslashes elsewhere are source text and must remain untouched.
+    static func codePipes(_ text: String, encoding: Bool) -> String {
+        var output = "", slashes = 0
+        for character in text {
+            if character == "\\" { slashes += 1; continue }
+            let count: Int
+            if character == "|" {
+                count = encoding ? slashes * 2 + 1 : (slashes.isMultiple(of: 2) ? slashes : (slashes - 1) / 2)
+            } else { count = slashes }
+            output += String(repeating: "\\", count: count)
+            output.append(character); slashes = 0
+        }
+        return output + String(repeating: "\\", count: slashes)
+    }
+
+    static func decodeCodePipes(_ text: String) -> String {
+        mapCodeSpans(text, code: { codePipes($0, encoding: false) }, plain: { $0 })
+    }
+
+
     /// Escapes the characters that are structural in a pipe-table cell: a literal
     /// backslash (`\` -> `\\`, done first) and the pipe delimiter (`|` -> `\|`).
     /// Newlines are handled separately by callers (some join with spaces, some
