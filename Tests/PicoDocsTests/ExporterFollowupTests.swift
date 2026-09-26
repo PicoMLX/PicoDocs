@@ -8,6 +8,55 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func sparseSpreadsheetCoordinatesSurviveOfficeRoundTrip() async throws {
+        let base = try PicoDocsEngine.write(markdown: "| A | B | C |\n| --- | --- |", to: .xlsx)
+        let archive = try #require(Archive(data: base, accessMode: .read))
+        let worksheet = #"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>First</t></is></c><c r="C1" t="inlineStr"><is><t>Third</t></is></c></row><row r="3"><c r="B3" t="inlineStr"><is><t>Middle</t></is></c></row></sheetData></worksheet>"#
+        var entries: [(name: String, data: [UInt8])] = []
+        for entry in archive {
+            var bytes = Data(); _ = try archive.extract(entry) { bytes.append($0) }
+            entries.append((entry.path, entry.path == "xl/worksheets/sheet1.xml" ? Array(worksheet.utf8) : Array(bytes)))
+        }
+        let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(entries), filename: "sparse.xlsx")
+        #expect(result.sections.first?.metadata["csv"] == "\"First\",\"\",\"Third\"\n\"\",\"\",\"\"\n\"\",\"Middle\",\"\"")
+        let output = try xml(PicoDocsEngine.write(result, to: .xlsx), "xl/worksheets/sheet1.xml")
+        #expect(output.contains(#"r="C1" t="inlineStr"><is><t xml:space="preserve">Third"#))
+        #expect(output.contains(#"r="B3" t="inlineStr"><is><t xml:space="preserve">Middle"#))
+    }
+
+    @Test func inlineSentinelsAndOptionalLinkTitlesStayDistinct() throws {
+        for source in ["\u{E020}0\u{E021} `code`", "\u{E010}0\u{E011} \\*"] {
+            let expected = source.replacingOccurrences(of: "`code`", with: "code").replacingOccurrences(of: "\\*", with: "*")
+            #expect(MarkdownInlineParser.parse(source).plainText == expected)
+            let document = try SwiftSoup.parse(xml(PicoDocsEngine.write(markdown: source, to: .docx), "word/document.xml"), "", SwiftSoup.Parser.xmlParser())
+            let visible = try document.getElementsByTag("w:t").array().map { $0.getChildNodes().compactMap { ($0 as? TextNode)?.getWholeText() }.joined() }.joined()
+            #expect(visible == expected)
+        }
+        for source in [#"[Label](https://example.com "Home")"#, #"[Label](<https://example.com> "Home")"#, #"[Label](https://example.com 'Home')"#, #"[Label](https://example.com (Home))"#, #"[Label](https://example.com/a_(b) "Home (extra)")"#] {
+            let nodes = MarkdownInlineParser.parse(source)
+            let expected = source.contains("a_(b)") ? "https://example.com/a_(b)" : "https://example.com"
+            #expect(nodes == [.link(label: [.text("Label")], destination: expected)])
+            for (format, path) in [(ExportableFileType.docx, "word/_rels/document.xml.rels"), (.pptx, "ppt/slides/_rels/slide1.xml.rels")] {
+                let rels = try xml(PicoDocsEngine.write(markdown: source, to: format), path)
+                #expect(rels.contains(expected)); #expect(!rels.contains("Home"))
+            }
+        }
+    }
+
+    @Test func literalWordRunsSurviveOfficeTranscoding() async throws {
+        let literals = [#"[label](https://example.com) *stars* `code` ![image](x) \*"#, "# Heading", "1. List", "- Bullet", "---"]
+        let paragraphs = literals.map { "<w:p><w:r><w:t>" + $0 + "</w:t></w:r></w:p>" }.joined()
+        let document = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"# + paragraphs + "</w:body></w:document>"
+        let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8))]), filename: "literal.docx")
+        let exported = try PicoDocsEngine.write(result, to: .docx)
+        let output = try xml(exported, "word/document.xml")
+        #expect(!output.contains("<w:hyperlink")); #expect(!output.contains("<w:numPr>")); #expect(!output.contains("<w:drawing>"))
+        for literal in literals { #expect(output.contains(literal)) }
+        let recovered = try await PicoDocsEngine.convert(data: exported, filename: "again.docx")
+        let plain = try DocumentRenderer.render(recovered, to: .plaintext)
+        for literal in literals { #expect(plain.contains(literal)) }
+    }
+
     @Test func titleOnlySlidesAndPathQualifiedTitleImages() throws {
         let slide = ConverterResult(sections: [.init(title: "Agenda", kind: .slide, markdown: "", slideNumber: 1)])
         #expect(try xml(PicoDocsEngine.write(slide, to: .pptx), "ppt/slides/slide1.xml").contains(">Agenda</a:t>"))

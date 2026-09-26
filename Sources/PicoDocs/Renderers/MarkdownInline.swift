@@ -83,6 +83,7 @@ enum MarkdownInlineParser {
         }
         while i < chars.count {
             let c = chars[i]
+            if c == "\u{E020}" { append(.text(String(c))); i += 1; continue }
 
             if c == "\\", i + 1 < chars.count, punctuation.contains(chars[i + 1]) {
                 run.append(c); run.append(chars[i + 1]); i += 2; continue
@@ -171,22 +172,41 @@ enum MarkdownInlineParser {
         let parenOpen = labelEnd + 1
         guard parenOpen < chars.count, chars[parenOpen] == "(" else { return nil }
 
-        let destStart = parenOpen + 1
+        var cursor = parenOpen + 1
+        while cursor < chars.count, chars[cursor].isWhitespace { cursor += 1 }
+        let destStart = cursor
         var dest = ""
-        var cursor = destStart
-        if destStart < chars.count, chars[destStart] == "<" {
-            guard let gt = nextAngle[destStart + 1] else { return nil }
-            dest = unescape(String(chars[(destStart + 1)..<gt]))
+        if cursor < chars.count, chars[cursor] == "<" {
+            guard let gt = nextAngle[cursor + 1] else { return nil }
+            dest = unescape(String(chars[(cursor + 1)..<gt]))
             cursor = gt + 1
-            guard cursor < chars.count, chars[cursor] == ")" else { return nil }
         } else {
-            // Bare destination: match balanced parentheses so a URL such as
-            // `https://example.com/Foo_(bar)` (common in raw LLM Markdown) isn't
-            // truncated at the first `)`.
-            guard let parenClose = parenCloses[parenOpen] else { return nil }
-            dest = unescape(String(chars[destStart..<parenClose]))
-            cursor = parenClose
+            // Separate the bare URL from its optional title. Balanced URL
+            // parentheses are paired by the initial scan; escaped spaces stay literal.
+            while cursor < chars.count, !chars[cursor].isWhitespace, chars[cursor] != ")" {
+                if chars[cursor] == "\\", cursor + 1 < chars.count { cursor += 2 }
+                else if chars[cursor] == "(" {
+                    guard let close = parenCloses[cursor] else { return nil }
+                    cursor = close + 1
+                } else { cursor += 1 }
+            }
+            dest = unescape(String(chars[destStart..<cursor]))
         }
+        let afterDestination = cursor
+        while cursor < chars.count, chars[cursor].isWhitespace { cursor += 1 }
+        if cursor < chars.count, chars[cursor] != ")" {
+            guard cursor > afterDestination, ["\"", "'", "("].contains(chars[cursor]) else { return nil }
+            let delimiter: Character = chars[cursor] == "(" ? ")" : chars[cursor]
+            cursor += 1
+            while cursor < chars.count, chars[cursor] != delimiter {
+                if chars[cursor] == "\\", cursor + 1 < chars.count { cursor += 2 }
+                else { cursor += 1 }
+            }
+            guard cursor < chars.count else { return nil }
+            cursor += 1
+            while cursor < chars.count, chars[cursor].isWhitespace { cursor += 1 }
+        }
+        guard cursor < chars.count, chars[cursor] == ")" else { return nil }
         let labelText = String(chars[(bracket + 1)..<labelEnd])
         let node: MarkdownInline = isImage
             ? .image(alt: unescape(labelText), source: dest)
@@ -215,7 +235,11 @@ enum MarkdownInlineParser {
         var index = text.startIndex
         while index < text.endIndex {
             let next = text.index(after: index)
-            if text[index] == "\\", next < text.endIndex, punctuation.contains(text[next]) {
+            if text[index] == "\u{E010}" {
+                escapes.append(String(text[index]))
+                protected += "\u{E010}\(escapes.count - 1)\u{E011}"
+                index = next
+            } else if text[index] == "\\", next < text.endIndex, punctuation.contains(text[next]) {
                 escapes.append(String(text[next]))
                 protected += "\u{E010}\(escapes.count - 1)\u{E011}"
                 index = text.index(after: next)

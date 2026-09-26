@@ -211,7 +211,7 @@ public struct WordConverter: DocumentConverter {
         }
         let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
         let prefix = numbering.map { $0.prefix(numPr: numPr, style: style) } ?? (numPr != nil ? "- " : nil)
-        let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
+        let text = escapeBlockStarts(renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces))
         guard !text.isEmpty else { return nil }
 
         if let level = headingLevel(forStyle: style) {
@@ -264,7 +264,7 @@ public struct WordConverter: DocumentConverter {
                         // label needs a structured inline representation (a run-level
                         // "contains image" signal) — a deliberately deferred
                         // enhancement for this narrow icon+label case.
-                        out += "[\(escapeLinkLabel(inner))](\(escapeLinkDestination(url)))"
+                        out += "[\(escapeCanonicalLabel(inner))](\(escapeLinkDestination(url)))"
                     }
                 } else {
                     out += inner
@@ -307,7 +307,7 @@ public struct WordConverter: DocumentConverter {
                 // Read raw text nodes to preserve significant whitespace
                 // (w:t may carry xml:space="preserve").
                 for child in node.getChildNodes() {
-                    if let textNode = child as? TextNode { textBuffer += textNode.getWholeText() }
+                    if let textNode = child as? TextNode { textBuffer += escapeLiteralText(textNode.getWholeText()) }
                 }
             case "w:tab":
                 textBuffer += "\t"
@@ -355,8 +355,41 @@ public struct WordConverter: DocumentConverter {
         return true
     }
 
+    private static func escapeBlockStarts(_ text: String) -> String {
+        text.components(separatedBy: "\n").map { line in
+            let leading = line.prefix { $0 == " " || $0 == "\t" }
+            let body = String(line.dropFirst(leading.count))
+            if let first = body.first, "#+-~|".contains(first) {
+                return String(leading) + "\\" + body
+            }
+            let digits = body.prefix { $0.isASCII && $0.isNumber }
+            if !digits.isEmpty, body.dropFirst(digits.count).hasPrefix(".") {
+                return String(leading) + digits + "\\" + body.dropFirst(digits.count)
+            }
+            return line
+        }.joined(separator: "\n")
+    }
+
+    private static func escapeLiteralText(_ text: String) -> String {
+        text.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+    }
+
+    private static func escapeCanonicalLabel(_ text: String) -> String {
+        var output = "", index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            if text[index] == "\\", next < text.endIndex {
+                output.append(text[index]); output.append(text[next]); index = text.index(after: next)
+            } else {
+                if text[index] == "[" || text[index] == "]" { output.append("\\") }
+                output.append(text[index]); index = next
+            }
+        }
+        return output
+    }
+
     private static func escapeLinkLabel(_ text: String) -> String {
-        text.replacingOccurrences(of: "[", with: "\\[")
+        text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "[", with: "\\[")
             .replacingOccurrences(of: "]", with: "\\]")
     }
 

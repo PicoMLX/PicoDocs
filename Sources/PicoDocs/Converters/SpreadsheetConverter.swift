@@ -34,7 +34,7 @@ public struct SpreadsheetConverter: DocumentConverter {
                 let worksheet = try file.parseWorksheet(at: path)
                 guard let rows = worksheet.data?.rows, !rows.isEmpty else { continue }
 
-                let table = Self.markdownTable(rows: rows, sharedStrings: sharedStrings, sheetName: name)
+                let table = try Self.markdownTable(rows: rows, sharedStrings: sharedStrings, sheetName: name)
                 guard !table.markdown.isEmpty else { continue }
 
                 if let name { sheetNames.append(name) }
@@ -55,26 +55,34 @@ public struct SpreadsheetConverter: DocumentConverter {
 
     // MARK: - Markdown table
 
-    private static func markdownTable(rows: [Row], sharedStrings: SharedStrings?, sheetName: String?) -> (markdown: String, csv: String) {
-        // Use the widest row as the column count so ragged rows still produce a
-        // valid (rectangular) Markdown table.
-        let columnCount = rows.map { $0.cells.count }.max() ?? 0
+    private static func markdownTable(rows: [Row], sharedStrings: SharedStrings?, sheetName: String?) throws -> (markdown: String, csv: String) {
+        let origin = ColumnReference("A")!
+        let columnCount = (rows.flatMap(\.cells).map { origin.distance(to: $0.reference.column) }.max() ?? -1) + 1
         guard columnCount > 0 else { return ("", "") }
-
-        var out = "", csvRows: [String] = []
-        if let sheetName, !sheetName.isEmpty {
-            out += "## \(sheetName)\n\n"
+        let rowCount = rows.map { Int(clamping: $0.reference) }.max() ?? 0
+        // Bound dense materialization: sparse files can point at the final Excel
+        // coordinate with only a few bytes of XML.
+        guard columnCount <= 16_384, rowCount > 0, rowCount <= 1_048_576,
+              rowCount <= 1_000_000 / columnCount else { throw PicoDocsError.parsingError }
+        var grid: [Int: [String]] = [:]
+        for row in rows {
+            let rowIndex = Int(clamping: row.reference)
+            guard rowIndex > 0 else { throw PicoDocsError.fileCorrupted }
+            var values = grid[rowIndex] ?? Array(repeating: "", count: columnCount)
+            for cell in row.cells {
+                let column = origin.distance(to: cell.reference.column)
+                guard column >= 0, column < columnCount else { throw PicoDocsError.fileCorrupted }
+                values[column] = cellText(cell, sharedStrings: sharedStrings)
+            }
+            grid[rowIndex] = values
         }
-        for (index, row) in rows.enumerated() {
-            var values = row.cells.map { cellText($0, sharedStrings: sharedStrings) }
-            while values.count < columnCount { values.append("") }
-            // Keep raw cell values separate from the display-oriented Markdown.
-            // Office re-export and CSV output consume this lossless carrier.
+        var out = "", csvRows: [String] = []
+        if let sheetName, !sheetName.isEmpty { out += "## \(sheetName)\n\n" }
+        for index in 1...rowCount {
+            let values = grid[index] ?? Array(repeating: "", count: columnCount)
             csvRows.append(values.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: ","))
             out += "| " + values.map(markdownCell).joined(separator: " | ") + " |\n"
-            if index == 0 {
-                out += "| " + Array(repeating: "---", count: columnCount).joined(separator: " | ") + " |\n"
-            }
+            if index == 1 { out += "| " + Array(repeating: "---", count: columnCount).joined(separator: " | ") + " |\n" }
         }
         return (out, csvRows.joined(separator: "\n"))
     }
