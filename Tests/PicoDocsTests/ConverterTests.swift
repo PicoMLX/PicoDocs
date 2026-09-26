@@ -676,4 +676,37 @@ struct DocumentRendererTests {
         #expect(csv.contains("| grep foo | wc -l |"))
         #expect(!csv.contains("grep foo,wc -l"))
     }
+
+    @Test("Renderers keep nested lists nested and honor list start numbers")
+    func renderNestedLists() throws {
+        let markdown = "3. Three\n   - sub a\n   - sub b\n4. Four\n   1. deep\n      more\n5.\n6. Six"
+        let result = ConverterResult(title: "T", sections: [DocumentSection(kind: .body, markdown: markdown)])
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == """
+        3. Three
+           - sub a
+           - sub b
+        4. Four
+           1. deep more
+        5.
+        6. Six
+        """)
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("""
+        <ol start="3">
+        <li>Three
+        <ul>
+        <li>sub a</li>
+        <li>sub b</li>
+        </ul>
+        </li>
+        <li>Four
+        <ol>
+        <li>deep more</li>
+        </ol>
+        </li>
+        <li></li>
+        <li>Six</li>
+        </ol>
+        """))
+    }
 }

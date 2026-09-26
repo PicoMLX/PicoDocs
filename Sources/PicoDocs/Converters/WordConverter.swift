@@ -198,7 +198,7 @@ public struct WordConverter: DocumentConverter {
             return String(repeating: "#", count: level) + " " + text
         }
         if isListItem {
-            return "- " + text
+            return "- " + text.components(separatedBy: "\n").map { MarkdownLiteral.escapeBlockStart($0) }.joined(separator: "\n  ")
         }
         return text
     }
@@ -243,7 +243,7 @@ public struct WordConverter: DocumentConverter {
                         // label needs a structured inline representation (a run-level
                         // "contains image" signal) — a deliberately deferred
                         // enhancement for this narrow icon+label case.
-                        out += "[\(escapeLinkLabel(inner))](\(escapeLinkDestination(url)))"
+                        out += "[\(escapeCanonicalLabel(inner))](\(escapeLinkDestination(url)))"
                     }
                 } else {
                     out += inner
@@ -280,7 +280,7 @@ public struct WordConverter: DocumentConverter {
                 // Read raw text nodes to preserve significant whitespace
                 // (w:t may carry xml:space="preserve").
                 for child in node.getChildNodes() {
-                    if let textNode = child as? TextNode { textBuffer += textNode.getWholeText() }
+                    if let textNode = child as? TextNode { textBuffer += escapeLiteralText(textNode.getWholeText()) }
                 }
             case "w:tab":
                 textBuffer += "\t"
@@ -314,6 +314,26 @@ public struct WordConverter: DocumentConverter {
         return true
     }
 
+    private static func escapeLiteralText(_ text: String) -> String {
+        text.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+    }
+
+    /// Generated inline content already has escaped source text. Preserve those
+    /// pairs while protecting brackets introduced by embedded image markup.
+    private static func escapeCanonicalLabel(_ text: String) -> String {
+        var result = "", index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            if text[index] == "\\", next < text.endIndex {
+                result.append(text[index]); result.append(text[next]); index = text.index(after: next)
+            } else {
+                if text[index] == "[" || text[index] == "]" { result.append("\\") }
+                result.append(text[index]); index = next
+            }
+        }
+        return result
+    }
+
     private static func escapeLinkLabel(_ text: String) -> String {
         text.replacingOccurrences(of: "[", with: "\\[")
             .replacingOccurrences(of: "]", with: "\\]")
@@ -328,6 +348,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     private static func escapeLinkDestination(_ url: String) -> String {
+        let url = url.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E")
         // Spaces / parens break inline link destinations; wrap in <> (a valid
         // CommonMark destination form) when present.
         if url.contains(" ") || url.contains("(") || url.contains(")") {
@@ -356,7 +377,7 @@ public struct WordConverter: DocumentConverter {
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
-                cells.append(MarkdownTableCell.escapeDelimiters(cellText)
+                cells.append(cellText.replacingOccurrences(of: "|", with: "\\|")
                     .replacingOccurrences(of: "\r\n", with: "<br>")
                     .replacingOccurrences(of: "\r", with: "<br>")
                     .replacingOccurrences(of: "\n", with: "<br>"))
@@ -531,7 +552,7 @@ public struct WordConverter: DocumentConverter {
     static func imageMarkdown(in drawing: Element, relationships: [String: String]) -> String {
         guard let target = imageTarget(in: drawing, relationships: relationships) else { return "" }
         let filename = (target as NSString).lastPathComponent
-        return "![\(escapeLinkLabel(imageAltText(in: drawing)))](\(escapeLinkDestination(filename)))"
+        return "![\(escapeLiteralText(imageAltText(in: drawing)))](\(escapeLinkDestination(filename)))"
     }
 
     /// The relationship Target (e.g. "media/image1.png") an image references via

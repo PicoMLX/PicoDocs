@@ -14,6 +14,355 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func PagesAndRTFCodeKeepLiteralBackslashesAcrossParagraphs() async throws {
+        let paragraphs = [#"`a\*b`"#, "```", #"c\*d"#, "```", #"outside \*"#]
+        let pages = Self.makePagesFile(paragraphs: paragraphs)
+        let rtf = #"{\rtf1\ansi "# + paragraphs.map { $0.replacingOccurrences(of:"\\",with:"\\\\") }.joined(separator:#"\par "#) + "}"
+        for (filename, data) in [("code.pages", pages), ("code.rtf", Data(rtf.utf8))] {
+            let result = try await PicoDocsEngine.convert(data:data,filename:filename)
+            for format in [ExportFileType.html,.plaintext,.csv] {
+                let output = try DocumentRenderer.render(result,to:format)
+                #expect(output.contains(#"a\*b"#)); #expect(output.contains(#"c\*d"#))
+                #expect(!output.contains(#"a\\*b"#)); #expect(!output.contains(#"c\\*d"#))
+                #expect(output.contains(#"outside \*"#))
+            }
+        }
+    }
+
+    @Test func lazyProseContinuesBelowALongMarker() throws {
+        for continuation in ["continuation", "#hashtag"] {
+            let result = ConverterResult(sections:[.init(markdown:"1234. item\n  " + continuation)])
+            #expect(try DocumentRenderer.render(result,to:.html).contains("<li>item " + continuation + "</li>"))
+        }
+    }
+
+    @Test func malformedPackedListMarkerStillInherits() throws {
+        let text = "Item"
+        var storage = Self.varintField(1,0) + Self.lengthField(3,Array(text.utf8))
+        storage += Self.lengthField(7,Self.lengthField(1,Self.varintField(1,0) + Self.lengthField(2,Self.varintField(1,10))))
+        let parent = Self.lengthField(1,Self.lengthField(3,Self.varintField(1,11)))
+        let malformed = Self.lengthField(11,Array(repeating:UInt8(0x80),count:9) + [0x02])
+        let stream = Self.makeIWAStream(objects:[(1,2001,storage,[]),(10,2023,parent + malformed,[]),(11,2023,Self.varintField(11,3),[])])
+        #expect(try IWATable.bodyMarkdown(documentStream:stream,in:[stream]) == "1. Item")
+    }
+
+    @Test func tableFirstHeadingsKeepHeadingPrecedence() async throws {
+        let data = Self.makeListPagesFile(text:"\u{FFFC}Heading",style:.ordered,restarts:[],tableCell:"Cell",heading:true)
+        let result = try await PicoDocsEngine.convert(data:data,filename:"heading.pages")
+        #expect(result.markdown().contains("# Heading"))
+        let html = try DocumentRenderer.render(result,to:.html)
+        #expect(html.contains("<h1>Heading</h1>")); #expect(!html.contains("<ol"))
+    }
+
+    @Test func escapedFootnoteIDsStillMatchDefinitions() throws {
+        for id in [#"a\*"#, #"a\<"#, "a&b"] {
+            let result = ConverterResult(sections:[.init(markdown:"Body[^" + id + "]\n\n[^" + id + "]: Note")])
+            let html = try DocumentRenderer.render(result,to:.html)
+            #expect(html.contains("footnote-ref")); #expect(html.contains("Note"))
+            let text = try DocumentRenderer.render(result,to:.plaintext)
+            #expect(text.contains("Body[1]")); #expect(text.contains("Note"))
+        }
+        let escaped = ConverterResult(sections:[.init(markdown:#"Body\[^a\*]"# + "\n\n" + #"[^a\*]: Note"#)])
+        #expect(!(try DocumentRenderer.render(escaped,to:.html)).contains("footnote-ref"))
+    }
+
+    @Test func structuralContinuationNeedsTheContentColumn() throws {
+        for suffix in ["  | A |\n  | --- |", "  # Heading"] {
+            let result = ConverterResult(sections: [.init(markdown: "1234. item\n" + suffix)])
+            let html = try DocumentRenderer.render(result, to: .html)
+            let listEnd = try #require(html.range(of: "</ol>"))
+            let block = try #require(html.range(of: suffix.contains("|") ? "<table>" : "<h1>"))
+            #expect(listEnd.lowerBound < block.lowerBound)
+        }
+    }
+
+    @Test func escapeSentinelsStayLiteralInTextAndCode() throws {
+        let literal = "\u{E006}0\u{E007}"
+        for text in [literal, "`" + literal + "`"] {
+            let result = ConverterResult(sections: [.init(markdown: #"\* "# + text)])
+            for format in [ExportFileType.html, .plaintext] {
+                #expect(try DocumentRenderer.render(result, to: format).contains(literal))
+            }
+        }
+    }
+
+    @Test func formattedDashRowsRemainCSVData() throws {
+        for cell in ["`---`", "*---*", #"\-\-\-"#] {
+            let result = ConverterResult(sections: [.init(markdown: "| Header |\n| " + cell + " |")])
+            #expect(try DocumentRenderer.render(result, to: .csv).contains("---"))
+        }
+    }
+
+    @Test func listInheritanceRevisitsShorterPaths() throws {
+        var storage = Self.varintField(1, 0) + Self.lengthField(3, Array("Item".utf8))
+        storage += Self.lengthField(7, Self.lengthField(1, Self.varintField(1, 0) + Self.lengthField(2, Self.varintField(1, 10))))
+        func parents(_ ids: [UInt64]) -> [UInt8] {
+            Self.lengthField(1, ids.flatMap { Self.lengthField(3, Self.varintField(1, $0)) })
+        }
+        var objects: [(id: UInt64,type: UInt64,payload: [UInt8],references: [UInt64])] = [(1,2001,storage,[])]
+        objects.append((10,2023,parents([11,73]),[]))
+        for id in UInt64(11)...72 { objects.append((id,2023,parents([id+1]),[])) }
+        objects.append((73,2023,parents([74]),[]))
+        objects.append((74,2023,Self.varintField(11,3),[]))
+        let stream = Self.makeIWAStream(objects: objects)
+        #expect(try IWATable.bodyMarkdown(documentStream: stream, in: [stream]) == "1. Item")
+    }
+
+    @Test func verbatimCodeKeepsOriginalBackslashes() async throws {
+        let source = #"before \* `a\*b` and ``c\d``"# + "\n\n```\n" + #"x\*y"# + "\n```\n" + #"after \*"#
+        let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "code.txt")
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            let output = try DocumentRenderer.render(result, to: format)
+            #expect(output.contains(#"a\*b"#)); #expect(!output.contains(#"a\\*b"#))
+            #expect(output.contains(#"c\d"#)); #expect(output.contains(#"x\*y"#))
+            #expect(output.contains(#"before \*"#)); #expect(output.contains(#"after \*"#))
+        }
+    }
+
+    @Test func tableParagraphUsesItsVisibleSuffixListStyle() async throws {
+        let data = Self.makeListPagesFile(text: "First\n\u{0004}\u{FFFC}Tail\nNext", style: .ordered, restarts: [(8,7),(13,0)], tableCell: "Cell", styleChange: 8)
+        let result = try await PicoDocsEngine.convert(data: data, filename: "split.pages")
+        #expect(result.markdown().contains("7.\n"))
+        #expect(result.markdown().contains("8. Next"))
+        #expect(!result.markdown().contains("2.\n"))
+    }
+
+    @Test func longBareMarkerOnlyConfirmsAnAttachedTable() throws {
+        let prose = ConverterResult(sections: [.init(markdown: "1234.\n\n  | A |\n  | --- |")])
+        let html = try DocumentRenderer.render(prose, to: .html)
+        #expect(html.contains("<p>1234.</p>")); #expect(!html.contains("<ol"))
+        let attached = ConverterResult(sections: [.init(markdown: "1234.\n\n      | A |\n      | --- |")])
+        #expect(try DocumentRenderer.render(attached, to: .html).contains(#"<ol start="1234">"#))
+    }
+
+    @Test func angleDestinationsAndWordImageAltRemainLiteral() async throws {
+        let converted = try HTMLToMarkdown.convert(html: #"<a href="foo&gt; bar&lt;">Link</a>"#)
+        let html = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: converted.markdown)]), to: .html)
+        #expect(html.contains(#"href="foo%3E bar%3C""#))
+        let document = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:body><w:p><w:r><w:drawing><wp:docPr descr="\* icon `literal`"/><a:blip r:embed="image"/></w:drawing></w:r></w:p></w:body></w:document>"#
+        let rels = #"<Relationships><Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image.png"/></Relationships>"#
+        let result = try await PicoDocsEngine.convert(data: Self.makeZip([(name: "word/document.xml",data: Array(document.utf8)),(name: "word/_rels/document.xml.rels",data: Array(rels.utf8))]), filename: "alt.docx")
+        for format in [ExportFileType.html,.plaintext,.csv] { #expect(try DocumentRenderer.render(result, to: format).contains(#"\* icon `literal`"#)) }
+    }
+
+    @Test func inlineTableTailSoftBreaksStayInsideTheirListItem() async throws {
+        for separator in ["\u{2028}","\u{000B}","\u{000C}"] {
+            let data = Self.makeListPagesFile(text: "a \u{FFFC} b" + separator + "- literal\nNext", style: .ordered, restarts: [], tableCell: "Cell")
+            let result = try await PicoDocsEngine.convert(data: data, filename: "continuation.pages")
+            #expect(result.markdown().contains("   b\n   \\- literal"))
+            let html = try DocumentRenderer.render(result, to: .html)
+            #expect(html.contains("literal")); #expect(!html.contains("<ul"))
+        }
+    }
+
+    @Test func multiBacktickSpansProtectLiteralEscapes() throws {
+        for (source, expected) in [(#"``a\*b``"#,#"a\*b"#),(#"prefix ```a`\*b```"#,#"a`\*b"#),(#"`` a`b ``"#,"a`b")] {
+            let result = ConverterResult(sections: [.init(markdown: source)])
+            for format in [ExportFileType.html,.plaintext,.csv] { #expect(try DocumentRenderer.render(result, to: format).contains(expected)) }
+        }
+    }
+
+    @Test func verbatimConvertersPreserveSourceBackslashes() async throws {
+        let literal = ##"\* and \# and \\server\file"##
+        let rtf = #"{\rtf1\ansi \b "# + literal.replacingOccurrences(of: "\\", with: "\\\\") + #"\b0 }"#
+        let results = [
+            try await PicoDocsEngine.convert(data: Data(literal.utf8), filename: "literal.txt"),
+            try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "literal.rtf"),
+            try await PicoDocsEngine.convert(data: KeynoteConverterTests.makeKeynoteFile(slides: [literal]), filename: "literal.key"),
+        ]
+        for result in results {
+            for format in [ExportFileType.html,.plaintext,.csv] { #expect(try DocumentRenderer.render(result, to: format).contains(literal)) }
+        }
+        for info in [StreamInfo(filename: "input.md", detectedFormat: .plainText), StreamInfo(mimeType: "text/markdown; charset=utf-8", detectedFormat: .plainText)] {
+            let markdown = try await PlainTextConverter().convert(Data(#"\* literal"#.utf8), info: info)
+            #expect(try DocumentRenderer.render(markdown, to: .plaintext) == "* literal")
+        }
+    }
+
+    @Test func boundedHTMLFallbackKeepsBlockAndCellBoundaries() throws {
+        let content = "<h1>A</h1><h2>B</h2><blockquote>C</blockquote>D<table><tr><td>E</td><td>F</td></tr></table>G"
+        let html = String(repeating: "<div>", count: 80) + content + String(repeating: "</div>", count: 80)
+        let converted = try HTMLToMarkdown.convert(html: html)
+        let text = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: converted.markdown)]), to: .plaintext)
+        #expect(text.split(whereSeparator: \.isWhitespace).map(String.init) == ["A", "B", "C", "D", "E", "F", "G"])
+    }
+
+    @Test func sourceHyperlinkBackslashesSurviveCanonicalDecoding() async throws {
+        for target in [#"foo\*bar"#, #"\\server\*file"#] {
+            let html = try HTMLToMarkdown.convert(html: "<p><a href=\"\(target)\">Link</a><img src=\"\(target)\" alt=\"Alt\"></p>")
+            let output = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: html.markdown)]), to: .html)
+            #expect(output.contains("href=\"\(target)\"")); #expect(output.contains("src=\"\(target)\""))
+            let document = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:hyperlink r:id="link"><w:r><w:t>Link</w:t></w:r></w:hyperlink></w:p></w:body></w:document>"#
+            let rels = "<Relationships><Relationship Id=\"link\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"\(target)\" TargetMode=\"External\"/></Relationships>"
+            let word = try await PicoDocsEngine.convert(data: Self.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/_rels/document.xml.rels", data: Array(rels.utf8))]), filename: "links.docx")
+            #expect(try DocumentRenderer.render(word, to: .html).contains("href=\"\(target)\""))
+        }
+    }
+
+    @Test func storageWideStyleWorkRemainsBounded() async throws {
+        let count = 2000
+        let text = String(repeating: "x\n", count: count)
+        var runs: [UInt8] = []
+        var objects: [(id: UInt64, type: UInt64, payload: [UInt8], references: [UInt64])] = []
+        for index in 0..<count {
+            let id = UInt64(index + 10)
+            runs += Self.lengthField(1, Self.varintField(1, UInt64(index * 2)) + Self.lengthField(2, Self.varintField(1, id)))
+            let parent = Self.lengthField(3, Self.varintField(1, 10000))
+            objects.append((id,2023,Self.lengthField(1,parent),[]))
+        }
+        for index in 0..<64 {
+            let parent = Self.lengthField(3, Self.varintField(1, UInt64(10001 + index)))
+            objects.append((UInt64(10000 + index),2023,Self.lengthField(1,parent),[]))
+        }
+        let storage = Self.varintField(1,0) + Self.lengthField(3,Array(text.utf8)) + Self.lengthField(7,runs)
+        objects.append((1,2001,storage,[]))
+        let data = Self.makeZip([(name: "Index/Document.iwa", data: Self.snappyFrame(Self.makeIWAStream(objects: objects)))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "shared-styles.pages")
+        #expect(result.markdown().filter { $0 == "x" }.count == count)
+    }
+
+    @Test func tableCodePipesAndLiteralCellsSurviveCSVDecoding() async throws {
+        for value in ["a|b", #"a\|b"#, #"a\\|b"#, #"a\\path | b"#] {
+            let converted = try HTMLToMarkdown.convert(html: "<table><tr><td><code>\(value)</code></td></tr></table>")
+            let result = ConverterResult(sections: [.init(markdown: converted.markdown)])
+            #expect(try DocumentRenderer.render(result, to: .csv) == value)
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(value))
+            #expect(try DocumentRenderer.render(result, to: .html).contains("<code>\(value)</code>"))
+        }
+        let literal = "*literal* `code` [label](target)"
+        let converted = try HTMLToMarkdown.convert(html: "<table><tr><td>\(literal)</td><td><strong>Bold</strong></td></tr></table>")
+        #expect(try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: converted.markdown)]), to: .csv) == literal + ",Bold")
+        let document = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>\(literal)</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"
+        let word = try await PicoDocsEngine.convert(data: Self.makeZip([(name: "word/document.xml", data: Array(document.utf8))]), filename: "literal.docx")
+        #expect(try DocumentRenderer.render(word, to: .csv) == literal)
+        let csv = try await PicoDocsEngine.convert(data: Data(("value\n" + literal).utf8), filename: "literal.csv")
+        #expect(try DocumentRenderer.render(csv, to: .plaintext).contains(literal))
+        let pages = try await PicoDocsEngine.convert(data: Self.makeListPagesFile(text: "\u{FFFC}", style: .bullet, restarts: [], tableCell: literal), filename: "literal.pages")
+        #expect(try DocumentRenderer.render(pages, to: .csv).contains(literal))
+    }
+
+    @Test func invalidBareOrderedMarkersStayLiteral() throws {
+        for marker in ["1234567890.", "١."] {
+            let result = ConverterResult(sections: [.init(markdown: marker + "\n" + marker)])
+            #expect(try !DocumentRenderer.render(result, to: .html).contains("<ol"))
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(marker))
+        }
+    }
+
+    @Test func deeplyNestedHTMLPreservesListContext() throws {
+        let count = 512
+        let source = "<ul><li>" + String(repeating: "<span>x", count: count) + "1. literal" + String(repeating: "</span>", count: count) + "</li></ul>"
+        let converted = try HTMLToMarkdown.convert(html: source)
+        let rendered = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: converted.markdown)]), to: .plaintext)
+        #expect(rendered.contains(String(repeating: "x", count: count) + "1. literal"))
+    }
+
+    @Test func listStyleInheritanceHasBoundedDepthAndSharedWork() async throws {
+        for (count, duplicated, terminalMarker) in [(8,false,true),(1400,false,true),(40,true,false)] {
+            let reference = Self.lengthField(1, Self.varintField(1, 0) + Self.lengthField(2, Self.varintField(1, 10)))
+            let storage = Self.varintField(1, 0) + Self.lengthField(3, Array("Visible".utf8)) + Self.lengthField(7, reference)
+            var objects: [(id: UInt64, type: UInt64, payload: [UInt8], references: [UInt64])] = [(1,2001,storage,[])]
+            for index in 0..<count {
+                var payload: [UInt8] = []
+                if index + 1 < count {
+                    let parent = Self.lengthField(3, Self.varintField(1, UInt64(11 + index)))
+                    payload = Self.lengthField(1, duplicated ? parent + parent : parent)
+                } else if terminalMarker { payload = Self.varintField(11, 2) }
+                objects.append((UInt64(10 + index),2023,payload,[]))
+            }
+            let data = Self.makeZip([(name: "Index/Document.iwa", data: Self.snappyFrame(Self.makeIWAStream(objects: objects)))])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "styles.pages")
+            #expect(result.markdown() == (count == 8 ? "- Visible" : "Visible"))
+        }
+    }
+
+    @Test func numericLiteralListTextMatchesAcceptedMarkerGrammar() async throws {
+        let result = try await PicoDocsEngine.convert(data: Self.makeListPagesFile(text: "1234567890. literal\n١. literal", style: .bullet, restarts: []), filename: "markers.pages")
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(!html.contains("<ol"))
+        for format in [ExportFileType.html, .plaintext] {
+            let text = try DocumentRenderer.render(result, to: format)
+            #expect(text.contains("1234567890. literal")); #expect(text.contains("١. literal"))
+        }
+    }
+
+    @Test func HTMLCanonicalTextAndNestedTablesDecodeOnce() throws {
+        let source = #"<p>\* regex and `literal`</p><p><img alt="\* image" src="image.png"></p><ul><li><table><tr><td>v1.2 | \* literal</td></tr></table></li></ul>"#
+        let converted = try HTMLToMarkdown.convert(html: source)
+        let result = ConverterResult(sections: [.init(markdown: converted.markdown)])
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            let text = try DocumentRenderer.render(result, to: format)
+            #expect(text.contains(#"\* regex and `literal`"#))
+            #expect(text.contains(#"\* image"#))
+            #expect(text.contains(#"v1.2 | \* literal"#))
+            #expect(!text.contains(#"v1\.2"#))
+        }
+    }
+
+    @Test func visiblePagesListStyleIgnoresDroppedControls() async throws {
+        for prior: UInt64? in [nil, 10] {
+            let text = "\u{0004}Visible"
+            let first = Self.varintField(1, 0) + (prior.map { Self.lengthField(2, Self.varintField(1, $0)) } ?? [])
+            let second = Self.varintField(1, 1) + Self.lengthField(2, Self.varintField(1, 11))
+            let runs = Self.lengthField(1, first) + Self.lengthField(1, second)
+            var storage = Self.varintField(1, 0) + Self.lengthField(3, Array(text.utf8)) + Self.lengthField(7, runs)
+            storage += Self.lengthField(6, Self.lengthField(1, Self.varintField(1, 1) + Self.varintField(2, 0) + Self.varintField(3, 7)))
+            let stream = Self.makeIWAStream(objects: [(1, 2001, storage, []), (10, 2023, Self.varintField(11, 2), []), (11, 2023, Self.varintField(11, 3), [])])
+            let data = Self.makeZip([(name: "Index/Document.iwa", data: Self.snappyFrame(stream))])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "sentinel.pages")
+            #expect(result.markdown() == "7. Visible")
+        }
+    }
+
+    @Test func splitHTMLTextCannotCreateNestedMarkdownBlocks() throws {
+        let converted = try HTMLToMarkdown.convert(html: "<ul><li><span>1</span>. literal</li><li><span>*</span> literal</li><li>path \\folder</li></ul>")
+        let result = ConverterResult(sections: [.init(markdown: converted.markdown)])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(!html.contains("<ol"))
+        #expect(html.components(separatedBy: "<li>").count - 1 == 3)
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains("1. literal"))
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains("* literal"))
+    }
+
+    @Test func literalHTMLListPrefixesAndSemanticNestedBlocks() throws {
+        let source = "<ul><li># literal</li><li>&gt; literal</li><li>| literal |</li><li>```</li><li>---</li><li>- literal</li><li><span>#</span> split</li></ul>"
+        let converted = try HTMLToMarkdown.convert(html: source)
+        let result = ConverterResult(sections: [.init(markdown: converted.markdown)])
+        let html = try DocumentRenderer.render(result, to: .html)
+        for tag in ["<h1", "<blockquote", "<table", "<hr", "<pre"] { #expect(!html.contains(tag)) }
+        #expect(html.components(separatedBy: "<li>").count - 1 == 7)
+        let plain = try DocumentRenderer.render(result, to: .plaintext)
+        for text in ["# literal", "> literal", "| literal |", "```", "---", "- literal", "# split"] { #expect(plain.contains(text)) }
+        let semantic = try HTMLToMarkdown.convert(html: "<ul><li><h2>Heading</h2><blockquote>Quote</blockquote><ul><li>Child</li></ul></li></ul>")
+        let rendered = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: semantic.markdown)]), to: .html)
+        #expect(rendered.contains("<h2")); #expect(rendered.contains("<blockquote"))
+        #expect(rendered.components(separatedBy: "<ul>").count - 1 == 2)
+    }
+
+    @Test func wordListLeadingFootnoteReferencesStayActive() async throws {
+        let xml = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:numPr/></w:pPr><w:r><w:footnoteReference w:id="1"/><w:t> first</w:t><w:br/><w:endnoteReference w:id="2"/><w:t> continuation</w:t></w:r></w:p></w:body></w:document>"#
+        let converted = try await PicoDocsEngine.convert(data: Self.makeZip([(name: "word/document.xml", data: Array(xml.utf8))]), filename: "notes.docx")
+        #expect(!converted.markdown().contains(#"\[^"#))
+        let result = ConverterResult(sections: [.init(markdown: converted.markdown() + "\n\n[^fn1]: First note\n[^en2]: Second note")])
+        for format in [ExportFileType.html, .plaintext] {
+            let rendered = try DocumentRenderer.render(result, to: format)
+            #expect(rendered.contains("First note")); #expect(rendered.contains("Second note"))
+            #expect(!rendered.contains("[^fn1]")); #expect(!rendered.contains("[^en2]"))
+        }
+        #expect(MarkdownLiteral.escapeBlockStart("[^literal]: definition") == #"\[^literal]: definition"#)
+    }
+
+    @Test func tableSourceBackslashesSurviveInlineRendering() async throws {
+        let result = try await PicoDocsEngine.convert(data: Data("value\n\\* regex".utf8), filename: "literal.csv")
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            #expect(try DocumentRenderer.render(result, to: format).contains(#"\* regex"#))
+        }
+        let xml = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>\* regex</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
+        let word = try await PicoDocsEngine.convert(data: Self.makeZip([(name: "word/document.xml", data: Array(xml.utf8))]), filename: "literal.docx")
+        #expect(word.markdown().contains(#"\\* regex"#))
+        #expect(!word.markdown().contains(#"\\\\* regex"#))
+        #expect(try DocumentRenderer.render(word, to: .plaintext).contains(#"\* regex"#))
+    }
 
     // MARK: - Snappy
 
@@ -223,6 +572,149 @@ struct PagesConverterTests {
         #expect(!markdown.contains("[]("))
     }
 
+    @Test("PagesConverter renders bullet and numbered lists as Markdown")
+    func realPagesLists() async throws {
+        let data = try Fixture.data("sample", "pages")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "sample.pages")
+        let markdown = result.markdown()
+
+        // Bullet-list paragraphs (the "List Bullet" style) render with a `-` marker.
+        #expect(markdown.contains("- First unordered item with a longer line that wraps naturally."))
+        #expect(markdown.contains("- Second unordered item"))
+
+        // Numbered-list paragraphs render with a running counter that starts at 1.
+        #expect(markdown.contains("1. First ordered item"))
+        #expect(markdown.contains("2. Second ordered item"))
+        #expect(markdown.contains("3. Third ordered item"))
+
+        // Consecutive items of one list are tight — no blank line between them.
+        #expect(markdown.contains("1. First ordered item\n2. Second ordered item\n3. Third ordered item"))
+    }
+
+    @Test("PagesConverter honors explicit list restarts and start numbers")
+    func listRestarts() async throws {
+        // Four paragraphs in one ordered list style; paragraph data (field 6) marks
+        // where a list (re)starts. Same style throughout, so only the restart value
+        // can split the count.
+        func render(_ restarts: [(offset: Int, restart: UInt64)]) async throws -> String {
+            let pages = Self.makeListPagesFile(text: "a\nb\nc\nd", style: .ordered, restarts: restarts)
+            return try await PicoDocsEngine.convert(data: pages, filename: "lists.pages").markdown()
+        }
+        // A second adjacent list restarted at 1 is its own list, not "3. c".
+        let restarted = try await render([(0, 1), (2, 0), (4, 1), (6, 0)])
+        #expect(restarted == "1. a\n2. b\n\n1. c\n2. d")
+        // "Start at 5" keeps the author's numbering.
+        let startAt = try await render([(0, 1), (2, 0), (4, 5), (6, 0)])
+        #expect(startAt == "1. a\n2. b\n\n5. c\n6. d")
+        // No paragraph data (older/other encoders): one running count.
+        let plain = try await render([])
+        #expect(plain == "1. a\n2. b\n3. c\n4. d")
+    }
+
+    @Test("PagesConverter keeps multi-line list items as one item")
+    func multiLineListItems() async throws {
+        // A soft line break (U+2028) inside an item — plus the author's own
+        // indentation after it — must become the item's indented continuation, not
+        // a separate paragraph.
+        let bullets = Self.makeListPagesFile(text: "First line\u{2028}  second line\nNext item", style: .bullet, restarts: [])
+        let bulletMarkdown = try await PicoDocsEngine.convert(data: bullets, filename: "lists.pages").markdown()
+        #expect(bulletMarkdown == "- First line\n  second line\n- Next item")
+
+        let ordered = Self.makeListPagesFile(text: "Alpha\u{2028}beta\u{2028}\u{2028}gamma\nDelta", style: .ordered, restarts: [])
+        let orderedMarkdown = try await PicoDocsEngine.convert(data: ordered, filename: "lists.pages").markdown()
+        #expect(orderedMarkdown == "1. Alpha\n   beta\n   gamma\n2. Delta")
+
+        // The repo's own Markdown parser reads it back as two items, not item + paragraph.
+        let result = try await PicoDocsEngine.convert(data: bullets, filename: "lists.pages")
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.components(separatedBy: "<li>").count == 3)
+        #expect(!html.contains("<p>second line"))
+    }
+
+    @Test("PagesConverter keeps empty list items and their numbering")
+    func emptyListItems() async throws {
+        func render(_ text: String, _ style: ListKind) async throws -> ConverterResult {
+            let pages = Self.makeListPagesFile(text: text, style: style, restarts: [])
+            return try await PicoDocsEngine.convert(data: pages, filename: "lists.pages")
+        }
+        // An interior empty item keeps its marker, so the next item stays "3.".
+        let ordered = try await render("a\n\nc", .ordered)
+        #expect(ordered.markdown() == "1. a\n2.\n3. c")
+        #expect(try await render("a\n\nc", .bullet).markdown() == "- a\n-\n- c")
+        // Trailing empty items leave no dangling marker.
+        #expect(try await render("a\nb\n\n", .ordered).markdown() == "1. a\n2. b")
+
+        // The renderers read the empty item as part of the same list.
+        let html = try DocumentRenderer.render(ordered, to: .html)
+        #expect(html.contains("<ol>\n<li>a</li>\n<li></li>\n<li>c</li>\n</ol>"))
+        #expect(try DocumentRenderer.render(ordered, to: .plaintext) == "1. a\n2.\n3. c")
+    }
+
+    @Test("PagesConverter escapes marker-like text inside list items")
+    func listItemMarkerText() async throws {
+        // A soft-break line (or item) that starts like a list marker is content,
+        // not a nested list.
+        let bullets = Self.makeListPagesFile(text: "Intro\u{2028}- not a sub-item\n- literal dash", style: .bullet, restarts: [])
+        let bulletResult = try await PicoDocsEngine.convert(data: bullets, filename: "lists.pages")
+        #expect(bulletResult.markdown() == "- Intro\n  \\- not a sub-item\n- \\- literal dash")
+
+        let ordered = Self.makeListPagesFile(text: "Alpha\u{2028}2. inner\nBeta", style: .ordered, restarts: [])
+        let orderedResult = try await PicoDocsEngine.convert(data: ordered, filename: "lists.pages")
+        #expect(orderedResult.markdown() == "1. Alpha\n   2\\. inner\n2. Beta")
+
+        // The renderers keep each item whole and drop the escape.
+        let html = try DocumentRenderer.render(bulletResult, to: .html)
+        #expect(html.components(separatedBy: "<li>").count == 3)
+        #expect(try DocumentRenderer.render(bulletResult, to: .plaintext) == "- Intro - not a sub-item\n- - literal dash")
+        #expect(try DocumentRenderer.render(orderedResult, to: .plaintext) == "1. Alpha 2. inner\n2. Beta")
+    }
+
+    @Test("PagesConverter clamps oversized list restarts instead of overflowing")
+    func oversizedListRestart() async throws {
+        let pages = Self.makeListPagesFile(text: "a\nb", style: .ordered,
+                                           restarts: [(0, UInt64(Int.max)), (2, 0)])
+        await #expect(throws: PicoDocsError.fileCorrupted) {
+            try await PicoDocsEngine.convert(data: pages, filename: "lists.pages")
+        }
+    }
+
+    @Test("PagesConverter keeps list numbering across an inline table")
+    func listNumberingAcrossInlineTable() async throws {
+        // The table sits at the end of item 2; item 3 continues the same list.
+        let pages = Self.makeListPagesFile(text: "a\nb \u{FFFC}\nc", style: .ordered, restarts: [], tableCell: "X")
+        let markdown = try await PicoDocsEngine.convert(data: pages, filename: "lists.pages").markdown()
+        #expect(markdown == "1. a\n2. b\n\n   | X |\n   | --- |\n\n3. c")
+    }
+
+    @Test("Explicit list start numbers survive plaintext and HTML rendering")
+    func listStartRendering() async throws {
+        let pages = Self.makeListPagesFile(text: "a\nb\nc\nd", style: .ordered,
+                                           restarts: [(0, 1), (2, 0), (4, 5), (6, 0)])
+        let result = try await PicoDocsEngine.convert(data: pages, filename: "lists.pages")
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == "1. a\n2. b\n\n5. c\n6. d")
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<ol>\n<li>a</li>"))
+        #expect(html.contains("<ol start=\"5\">\n<li>c</li>\n<li>d</li>\n</ol>"))
+    }
+
+    @Test func followupPagesListRegressions() async throws {
+        for style in [ListKind.ordered, .bullet] {
+            let data = Self.makeListPagesFile(text: "\nb", style: style, restarts: [])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "lists.pages")
+            let html = try DocumentRenderer.render(result, to: .html)
+            #expect(html.contains("<li></li>\n<li>b</li>"))
+        }
+        let table = Self.makeListPagesFile(text: "a\n\n\u{FFFC}\nc", style: .ordered, restarts: [], tableCell: "X")
+        let result = try await PicoDocsEngine.convert(data: table, filename: "lists.pages")
+        #expect(result.markdown().contains("1. a\n2.\n3.\n\n   | X |"))
+        #expect(result.markdown().contains("4. c"))
+        let markers = Self.makeListPagesFile(text: "- literal\u{2028}1. note", style: .bullet, restarts: [])
+        let content = try await PicoDocsEngine.convert(data: markers, filename: "lists.pages")
+        let csv = try DocumentRenderer.render(content, to: .csv)
+        #expect(!csv.contains("\\-"))
+        #expect(!csv.contains("1\\."))
+    }
+
     @Test("Detector routes a .pages package to the Pages format")
     func detectionRoutesToPages() {
         let pages = Self.makePagesFile(paragraphs: ["Hi"])
@@ -254,6 +746,78 @@ struct PagesConverterTests {
         }
     }
 
+    @Test func additionalPagesListReviewRegressions() async throws {
+        func convert(_ text: String, style: ListKind = .ordered,
+                     restarts: [(offset: Int, restart: UInt64)] = [],
+                     tableCell: String? = nil, styleChange: Int? = nil) async throws -> ConverterResult {
+            try await PicoDocsEngine.convert(data: Self.makeListPagesFile(
+                text: text, style: style, restarts: restarts, tableCell: tableCell,
+                styleChange: styleChange), filename: "lists.pages")
+        }
+        #expect(try await convert("a\r\nb").markdown() == "1. a\n2. b")
+        let bullets = try await convert("a\nb\nc\nd", style: .bullet,
+            restarts: [(0, 1), (2, 0), (4, 1), (6, 0)])
+        #expect(bullets.markdown() == "- a\n- b\n\n- c\n- d")
+        #expect(try DocumentRenderer.render(bullets, to: .html).components(separatedBy: "<ul>").count == 3)
+        #expect(try await convert("a\nb", restarts: [(0, 1), (2, 0)], styleChange: 2).markdown() == "1. a\n2. b")
+        #expect(try await convert("a\nb", styleChange: 2).markdown() == "1. a\n\n1. b")
+        let literal = try await convert("# heading\n> quote\n| a |\n```\n---", style: .bullet)
+        let html = try DocumentRenderer.render(literal, to: .html)
+        for tag in ["<h1", "<blockquote", "<table", "<hr", "<pre", "<code"] { #expect(!html.contains(tag)) }
+        #expect(try DocumentRenderer.render(literal, to: .plaintext) == "- # heading\n- > quote\n- | a |\n- ```\n- ---")
+        let table = try await convert("\u{FFFC}\nb", tableCell: "X")
+        let tableHTML = try DocumentRenderer.render(table, to: .html)
+        #expect(tableHTML.contains("<li>\n<table>"))
+        #expect(tableHTML.contains("<ol start=\"2\">"))
+        #expect(!tableHTML.contains("<p>1.</p>"))
+    }
+
+    @Test func listRendererCodeAndFootnoteReviewRegressions() throws {
+        let code = ConverterResult(sections: [.init(markdown: "`a\\*b`")])
+        #expect(try DocumentRenderer.render(code, to: .plaintext) == "a\\*b")
+        #expect(try DocumentRenderer.render(code, to: .csv).contains("a\\*b"))
+        let fenced = ConverterResult(sections: [.init(markdown: "- Item\n  ```\n  [^n]\n  ```\n\n[^n]: Hidden definition")])
+        let html = try DocumentRenderer.render(fenced, to: .html)
+        #expect(html.contains("[^n]"))
+        #expect(!html.contains("Hidden definition"))
+        #expect(!html.contains("<sup"))
+    }
+
+    @Test func finalPagesListBoundaryRegressions() async throws {
+        let noteData = Self.makeListPagesFile(text: "Intro\u{2028}[^n]: literal\n\\* regex", style: .bullet, restarts: [])
+        let note = try await PicoDocsEngine.convert(data: noteData, filename: "list.pages")
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            let text = try DocumentRenderer.render(note, to: format)
+            #expect(text.contains("[^n]: literal"))
+            #expect(text.contains(#"\* regex"#))
+        }
+        let tableData = Self.makeListPagesFile(text: "\u{FFFC}text\nnext", style: .ordered, restarts: [], tableCell: "X")
+        let table = try await PicoDocsEngine.convert(data: tableData, filename: "table.pages")
+        #expect(table.markdown().contains("   text\n2. next"))
+        let html = try DocumentRenderer.render(table, to: .html)
+        #expect(html.contains("<li>\n<table>"))
+        #expect(html.contains("<p>text</p>\n</li>"))
+        #expect(html.contains("<li>next</li>"))
+        #expect(!html.contains("<p>1.</p>"))
+        let bare = ConverterResult(sections: [.init(markdown: "2020.\n\n1. item")])
+        #expect(try DocumentRenderer.render(bare, to: .html).contains("<p>2020.</p>"))
+        let nested = (0..<100).map { String(repeating: "  ", count: $0) + "- item" }.joined(separator: "\n")
+        let deep = ConverterResult(sections: [.init(markdown: nested + "[^n]\n\n[^n]: Note")])
+        #expect(try DocumentRenderer.render(deep, to: .html).contains("item"))
+    }
+
+    @Test func wordListBlockSyntaxRemainsLiteral() async throws {
+        let body = ["# heading", "&gt; quote", "| a |", "---", "\\* regex"].map {
+            "<w:p><w:pPr><w:numPr/></w:pPr><w:r><w:t>\($0)</w:t></w:r></w:p>"
+        }.joined()
+        let xml = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>\(body)</w:body></w:document>"
+        let result = try await PicoDocsEngine.convert(data: Self.makeZip([(name: "word/document.xml", data: Array(xml.utf8))]), filename: "literal.docx")
+        let html = try DocumentRenderer.render(result, to: .html)
+        for tag in ["<h1", "<blockquote", "<table", "<hr"] { #expect(!html.contains(tag)) }
+        #expect(html.contains(#"\* regex"#))
+        #expect(html.contains("# heading"))
+    }
+
     // MARK: - Fixture builders
 
     /// A decompressed IWA object stream with a single storage (default type 2001)
@@ -280,6 +844,78 @@ struct PagesConverterTests {
         stream += archiveInfo
         stream += payload
         return stream
+    }
+
+    /// A decompressed IWA stream holding several objects, each written as
+    /// `varint(ArchiveInfo length) · ArchiveInfo · payload`, with its
+    /// cross-object references in MessageInfo field 5.
+    static func makeIWAStream(objects: [(id: UInt64, type: UInt64, payload: [UInt8], references: [UInt64])]) -> [UInt8] {
+        var stream: [UInt8] = []
+        for object in objects {
+            var messageInfo = varintField(1, object.type) + varintField(3, UInt64(object.payload.count))
+            for reference in object.references { messageInfo += varintField(5, reference) }
+            let archiveInfo = varintField(1, object.id) + lengthField(2, messageInfo)
+            stream += varint(UInt64(archiveInfo.count)) + archiveInfo + object.payload
+        }
+        return stream
+    }
+
+    enum ListKind { case bullet, ordered }
+
+    /// A `.pages` file whose body storage (`\n`-separated paragraphs in `text`) is
+    /// entirely in one list style of `style`'s kind (ListStyle field 11 level 0:
+    /// 2 = bullet, 3 = number), with paragraph-data runs (storage field 6) carrying
+    /// each `(UTF-16 offset, restart)`.
+    ///
+    /// With `tableCell`, the first U+FFFC in `text` becomes an inline table
+    /// attachment: a one-cell table (inline-string cell `tableCell`) reached from the
+    /// attachment object through a table model → tile, as in real Pages files.
+    static func makeListPagesFile(text: String, style: ListKind,
+                                  restarts: [(offset: Int, restart: UInt64)],
+                                  tableCell: String? = nil, styleChange: Int? = nil, heading: Bool = false) -> Data {
+        let listStyleID: UInt64 = 10
+        let listStyle = varintField(11, style == .bullet ? 2 : 3)
+        var storage = varintField(1, 0) + lengthField(3, Array(text.utf8))
+        var styleRuns = lengthField(1, varintField(1, 0) + lengthField(2, varintField(1, listStyleID)))
+        if let styleChange {
+            styleRuns += lengthField(1, varintField(1, UInt64(styleChange)) + lengthField(2, varintField(1, 11)))
+        }
+        storage += lengthField(7, styleRuns)
+        if !restarts.isEmpty {
+            var table: [UInt8] = []
+            for run in restarts {
+                table += lengthField(1, varintField(1, UInt64(run.offset)) + varintField(2, 0) + varintField(3, run.restart))
+            }
+            storage += lengthField(6, table)
+        }
+        var objects: [(id: UInt64, type: UInt64, payload: [UInt8], references: [UInt64])] = [
+            (listStyleID, 2023, listStyle, []),
+            (11, 2023, listStyle, []),
+        ]
+        if heading {
+            storage += lengthField(5, lengthField(1, varintField(1, 0) + lengthField(2, varintField(1, 12))))
+            objects.append((12, 2021, lengthField(1, lengthField(1, Array("Title".utf8))), []))
+        }
+        if let tableCell, let marker = Array(text.utf16).firstIndex(of: 0xFFFC) {
+            let (modelID, tileID, listID): (UInt64, UInt64, UInt64) = (20, 21, 22)
+            // Attachment run (storage field 9): {1: charIndex, 2: Reference{1: id}}.
+            storage += lengthField(9, lengthField(1, varintField(1, UInt64(marker)) + lengthField(2, varintField(1, modelID))))
+            // Tile row: cell storage buffer (field 6) + 16-bit cell offsets (field 7).
+            // Cell: version 5, type 3 (inline string), key 1 at byte 12.
+            let cell: [UInt8] = [0x05, 0x03] + Array(repeating: 0, count: 10) + [1, 0, 0, 0]
+            let tile = lengthField(5, lengthField(6, cell) + lengthField(7, [0x00, 0x00]))
+            // Inline-string data list: list_type 1, entry {1: key, 3: text}.
+            let strings = varintField(1, 1) + lengthField(3, varintField(1, 1) + lengthField(3, Array(tableCell.utf8)))
+            objects += [(modelID, 6001, [], [tileID, listID]), (tileID, 6002, tile, []), (listID, 6005, strings, [])]
+        }
+        let stream = makeIWAStream(objects: [(1, 2001, storage, [])] + objects)
+        return makeZip([(name: "Index/Document.iwa", data: snappyFrame(stream))])
+    }
+
+    static func varintField(_ field: Int, _ value: UInt64) -> [UInt8] { tag(field: field, wire: 0) + varint(value) }
+
+    static func lengthField(_ field: Int, _ bytes: [UInt8]) -> [UInt8] {
+        tag(field: field, wire: 2) + varint(UInt64(bytes.count)) + bytes
     }
 
     /// Wraps a stream in a single Snappy literal block + one iWork frame header.
