@@ -50,7 +50,7 @@ public struct PDFConverter: DocumentConverter {
             if !text.isEmpty {
                 sections.append(DocumentSection(
                     kind: .body,
-                    markdown: text,
+                    markdown: MarkdownLiteral.escapeBackslashes(text),
                     pageRange: pageNumber...pageNumber,
                     metadata: ["extractionMethod": "pdfkit"]
                 ))
@@ -91,7 +91,7 @@ public struct PDFConverter: DocumentConverter {
                     if !ocrText.isEmpty {
                         sections.append(DocumentSection(
                             kind: .body,
-                            markdown: ocrText,
+                            markdown: MarkdownLiteral.escapeBackslashes(ocrText),
                             pageRange: pageNumber...pageNumber,
                             metadata: ["extractionMethod": "vision-ocr"]
                         ))

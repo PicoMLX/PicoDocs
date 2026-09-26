@@ -40,12 +40,15 @@ public struct PlainTextConverter: DocumentConverter {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PicoDocsError.emptyDocument
         }
-        // NOTE: the decoded text is stored verbatim as the Markdown body, so any
-        // Markdown metacharacters it contains (`*`, `#`, `|`, …) are interpreted
-        // by the renderers on non-Markdown export. Markdown-escaping this is
-        // deliberately deferred (see DocumentRenderer's header) — the likely fix
-        // is adopting swift-markdown for real CommonMark handling.
-        let section = DocumentSection(title: info.filename, kind: .body, markdown: text)
+        // Explicit Markdown is already canonical; other text sources carry
+        // literal backslashes that must survive the renderer's escape decoder.
+        // Existing interpretation of other Markdown punctuation is unchanged.
+        let ext = (info.fileExtension ?? info.filename.map { ($0 as NSString).pathExtension } ?? "").lowercased()
+        let mime = info.mimeType?.split(separator: ";").first?.trimmingCharacters(in: .whitespaces).lowercased()
+        let isMarkdown = ["md", "markdown", "mdown", "mkd", "mkdn"].contains(ext)
+            || mime == "text/markdown" || mime == "text/x-markdown"
+        let markdown = isMarkdown ? text : MarkdownLiteral.escapeBackslashes(text)
+        let section = DocumentSection(title: info.filename, kind: .body, markdown: markdown)
         return ConverterResult(title: info.filename, sections: [section])
     }
 }

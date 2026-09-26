@@ -24,6 +24,23 @@ import PDFKit
 @Suite("OCR (Vision)")
 struct OCRTests {
 
+    @Test("Selectable PDF backslashes survive rendered exports")
+    func selectablePDFLiteralBackslashes() async throws {
+        let literal = ##"Path \* and \#"##
+        let data = NSMutableData()
+        let consumer = CGDataConsumer(data: data as CFMutableData)!
+        var mediaBox = CGRect(x: 0, y: 0, width: 800, height: 200)
+        let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil)!
+        context.beginPDFPage(nil)
+        let attributes: [CFString: Any] = [kCTFontAttributeName: CTFontCreateWithName("Helvetica" as CFString, 28, nil)]
+        let line = CTLineCreateWithAttributedString(CFAttributedStringCreate(nil, literal as CFString, attributes as CFDictionary)!)
+        context.textPosition = CGPoint(x: 30, y: 80)
+        CTLineDraw(line, context)
+        context.endPDFPage(); context.closePDF()
+        let result = try await PicoDocsEngine.convert(data: data as Data, filename: "literal.pdf")
+        for format in [ExportFileType.html,.plaintext,.csv] { #expect(try DocumentRenderer.render(result, to: format).contains(literal)) }
+    }
+
     @Test("Image OCR converter extracts text from an image")
     func imageOCR() async throws {
         let png = Self.pngData(Self.makeTextImage("Hello Vision World"))

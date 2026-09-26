@@ -2,6 +2,12 @@ import Foundation
 
 /// Protect literal source text from being reinterpreted as nested Markdown blocks.
 enum MarkdownLiteral {
+    /// Verbatim converters predate canonical Markdown escaping. Protect their
+    /// literal backslashes before the renderer decodes generated escapes.
+    static func escapeBackslashes(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\", with: "\\\\")
+    }
+
     static func escapeBlockStart(_ line: String) -> String {
         let content = line.drop { $0 == " " || $0 == "\t" }
         let lead = String(line[..<content.startIndex])

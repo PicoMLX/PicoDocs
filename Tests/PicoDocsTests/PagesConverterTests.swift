@@ -14,6 +14,23 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func verbatimConvertersPreserveSourceBackslashes() async throws {
+        let literal = ##"\* and \# and \\server\file"##
+        let rtf = #"{\rtf1\ansi \b "# + literal.replacingOccurrences(of: "\\", with: "\\\\") + #"\b0 }"#
+        let results = [
+            try await PicoDocsEngine.convert(data: Data(literal.utf8), filename: "literal.txt"),
+            try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "literal.rtf"),
+            try await PicoDocsEngine.convert(data: KeynoteConverterTests.makeKeynoteFile(slides: [literal]), filename: "literal.key"),
+        ]
+        for result in results {
+            for format in [ExportFileType.html,.plaintext,.csv] { #expect(try DocumentRenderer.render(result, to: format).contains(literal)) }
+        }
+        for info in [StreamInfo(filename: "input.md", detectedFormat: .plainText), StreamInfo(mimeType: "text/markdown; charset=utf-8", detectedFormat: .plainText)] {
+            let markdown = try await PlainTextConverter().convert(Data(#"\* literal"#.utf8), info: info)
+            #expect(try DocumentRenderer.render(markdown, to: .plaintext) == "* literal")
+        }
+    }
+
     @Test func boundedHTMLFallbackKeepsBlockAndCellBoundaries() throws {
         let content = "<h1>A</h1><h2>B</h2><blockquote>C</blockquote>D<table><tr><td>E</td><td>F</td></tr></table>G"
         let html = String(repeating: "<div>", count: 80) + content + String(repeating: "</div>", count: 80)

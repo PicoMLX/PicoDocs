@@ -93,7 +93,7 @@ public struct ImageOCRConverter: DocumentConverter {
             sections = [DocumentSection(
                 title: info.filename,
                 kind: .body,
-                markdown: frameTexts[0],
+                markdown: MarkdownLiteral.escapeBackslashes(frameTexts[0]),
                 metadata: ["extractionMethod": "vision-ocr"]
             )]
         } else {
@@ -102,7 +102,7 @@ public struct ImageOCRConverter: DocumentConverter {
             sections = frameTexts.enumerated().compactMap { index, text in
                 text.isEmpty ? nil : DocumentSection(
                     kind: .body,
-                    markdown: text,
+                    markdown: MarkdownLiteral.escapeBackslashes(text),
                     pageRange: (index + 1)...(index + 1),
                     metadata: ["extractionMethod": "vision-ocr"]
                 )
