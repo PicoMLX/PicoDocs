@@ -57,7 +57,20 @@ enum HTMLToMarkdown {
     private static func render(_ node: Node, into out: inout String, preserveWhitespace: Bool = false) {
         if let text = node as? TextNode {
             let whole = text.getWholeText()
-            out += preserveWhitespace ? whole : collapseWhitespace(whole)
+            var value = preserveWhitespace ? whole : collapseWhitespace(whole)
+            // Escape block syntax only when it originates in literal list text.
+            // Tags such as h2/blockquote/ul keep their semantic Markdown markers.
+            if !preserveWhitespace, out.split(separator: "\n", omittingEmptySubsequences: false).last?.allSatisfy({ $0.isWhitespace }) ?? true {
+                var ancestor = text.parent()
+                while let current = ancestor {
+                    if (current as? Element)?.tagName().lowercased() == "li" {
+                        value = MarkdownLiteral.escapeBlockStart(value)
+                        break
+                    }
+                    ancestor = current.parent()
+                }
+            }
+            out += value
             return
         }
         guard let element = node as? Element else { return }

@@ -14,6 +14,34 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func literalHTMLListPrefixesAndSemanticNestedBlocks() throws {
+        let source = "<ul><li># literal</li><li>&gt; literal</li><li>| literal |</li><li>```</li><li>---</li><li>- literal</li><li><span>#</span> split</li></ul>"
+        let converted = try HTMLToMarkdown.convert(html: source)
+        let result = ConverterResult(sections: [.init(markdown: converted.markdown)])
+        let html = try DocumentRenderer.render(result, to: .html)
+        for tag in ["<h1", "<blockquote", "<table", "<hr", "<pre"] { #expect(!html.contains(tag)) }
+        #expect(html.components(separatedBy: "<li>").count - 1 == 7)
+        let plain = try DocumentRenderer.render(result, to: .plaintext)
+        for text in ["# literal", "> literal", "| literal |", "```", "---", "- literal", "# split"] { #expect(plain.contains(text)) }
+        let semantic = try HTMLToMarkdown.convert(html: "<ul><li><h2>Heading</h2><blockquote>Quote</blockquote><ul><li>Child</li></ul></li></ul>")
+        let rendered = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: semantic.markdown)]), to: .html)
+        #expect(rendered.contains("<h2")); #expect(rendered.contains("<blockquote"))
+        #expect(rendered.components(separatedBy: "<ul>").count - 1 == 2)
+    }
+
+    @Test func wordListLeadingFootnoteReferencesStayActive() async throws {
+        let xml = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:numPr/></w:pPr><w:r><w:footnoteReference w:id="1"/><w:t> first</w:t><w:br/><w:endnoteReference w:id="2"/><w:t> continuation</w:t></w:r></w:p></w:body></w:document>"#
+        let converted = try await PicoDocsEngine.convert(data: Self.makeZip([(name: "word/document.xml", data: Array(xml.utf8))]), filename: "notes.docx")
+        #expect(!converted.markdown().contains(#"\[^"#))
+        let result = ConverterResult(sections: [.init(markdown: converted.markdown() + "\n\n[^fn1]: First note\n[^en2]: Second note")])
+        for format in [ExportFileType.html, .plaintext] {
+            let rendered = try DocumentRenderer.render(result, to: format)
+            #expect(rendered.contains("First note")); #expect(rendered.contains("Second note"))
+            #expect(!rendered.contains("[^fn1]")); #expect(!rendered.contains("[^en2]"))
+        }
+        #expect(MarkdownLiteral.escapeBlockStart("[^literal]: definition") == #"\[^literal]: definition"#)
+    }
+
     @Test func tableSourceBackslashesSurviveInlineRendering() async throws {
         let result = try await PicoDocsEngine.convert(data: Data("value\n\\* regex".utf8), filename: "literal.csv")
         for format in [ExportFileType.html, .plaintext, .csv] {

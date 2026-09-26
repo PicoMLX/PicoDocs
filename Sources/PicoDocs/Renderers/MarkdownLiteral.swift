@@ -5,7 +5,7 @@ enum MarkdownLiteral {
     static func escapeBlockStart(_ line: String) -> String {
         let content = line.drop { $0 == " " || $0 == "\t" }
         let lead = String(line[..<content.startIndex])
-        if content.hasPrefix("[^") { return lead + "\\" + content }
+        if content.hasPrefix("[^"), let close = content.firstIndex(of: "]"), content[content.index(after: close)...].hasPrefix(":") { return lead + "\\" + content }
         if content.hasPrefix("```") {
             return lead + content.replacingOccurrences(of: "`", with: "\\`")
         }
