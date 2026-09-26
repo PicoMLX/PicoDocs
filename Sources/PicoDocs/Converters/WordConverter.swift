@@ -212,8 +212,8 @@ public struct WordConverter: DocumentConverter {
         let style = properties.flatMap { child(of: $0, named: "w:pstyle") }.flatMap { try? $0.attr("w:val") }
         let numPr = properties.flatMap { child(of: $0, named: "w:numpr") }
         let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
-        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style, visibleMarker: text.isEmpty || headingLevel(forStyle: style) == nil, paragraphProperties: properties) } ?? (numPr != nil ? "- " : nil)
-        guard !text.isEmpty else { return prefix }
+        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style, visibleMarker: headingLevel(forStyle: style) == nil, paragraphProperties: properties) } ?? (numPr != nil ? "- " : nil)
+        guard !text.isEmpty else { return headingLevel(forStyle: style) == nil ? prefix : nil }
 
         if let level = headingLevel(forStyle: style) {
             return String(repeating: "#", count: level) + " " + text

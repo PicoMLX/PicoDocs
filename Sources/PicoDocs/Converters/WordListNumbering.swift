@@ -114,7 +114,7 @@ final class WordListNumbering {
         counters[numID, default: [:]][ilvl] = count
 
         let language = Self.language(in: paragraphProperties ?? numPr?.parent()) ?? styleLanguage(style)
-        let suffix = definition?.suffix == "nothing" ? "" : (definition?.suffix == "tab" ? "\t" : " ")
+        let suffix = definition?.suffix == "nothing" ? "" : (definition?.suffix == "space" ? " " : "\t")
         var marker: String
         switch definition?.format ?? "bullet" {
         case "none":
