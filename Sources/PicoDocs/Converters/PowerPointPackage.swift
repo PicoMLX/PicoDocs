@@ -53,13 +53,19 @@ final class PowerPointPackage {
 final class PowerPointXML: NSObject, XMLParserDelegate {
     private var scopes: [[String: String]] = [[:]]
     private var names: [String] = []
+    private var unknownPrefixes: [String: String] = [:]
     private var output = ""
     private static let prefixes = [
         "http://schemas.openxmlformats.org/presentationml/2006/main": "p",
         "http://schemas.openxmlformats.org/drawingml/2006/main": "a",
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships": "r",
         "http://schemas.openxmlformats.org/markup-compatibility/2006": "mc",
-        "http://purl.org/dc/elements/1.1/": "dc"
+        "http://purl.org/dc/elements/1.1/": "dc",
+        "http://purl.oclc.org/ooxml/presentationml/main": "p",
+        "http://purl.oclc.org/ooxml/drawingml/main": "a",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships": "r",
+        "http://schemas.openxmlformats.org/package/2006/relationships": "",
+        "http://schemas.openxmlformats.org/package/2006/content-types": ""
     ]
 
     static func normalize(_ data: Data) -> String? {
@@ -76,10 +82,11 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         let prefix = parts.count == 2 ? parts[0] : ""
         let local = parts.last!
         guard !attribute || !prefix.isEmpty, let uri = scope[prefix] else { return raw }
-        if let canonical = Self.prefixes[uri] { return canonical + ":" + local }
-        // Unknown prefixes must never impersonate supported OOXML namespaces.
-        if !prefix.isEmpty { return "unsupported:" + local }
-        return local
+        if let canonical = Self.prefixes[uri] { return canonical.isEmpty ? local : canonical + ":" + local }
+        // URI identity survives normalization, even for ignorable extensions.
+        let synthetic = unknownPrefixes[uri] ?? "extension\(unknownPrefixes.count)"
+        unknownPrefixes[uri] = synthetic
+        return synthetic + ":" + local
     }
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes: [String: String]) {

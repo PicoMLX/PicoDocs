@@ -35,11 +35,13 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
+        try Task.checkCancellation()
         guard let zip = Archive(data: data, accessMode: .read) else {
             throw PicoDocsError.fileCorrupted
         }
         let archive = PowerPointPackage(archive: zip)
         guard let presentation = Self.xml(archive, path: "ppt/presentation.xml") else {
+            try archive.check()
             throw PicoDocsError.fileCorrupted
         }
 
@@ -143,6 +145,7 @@ public struct PowerPointConverter: DocumentConverter {
         let relationships: [String: Relationship]
         var images: ImageCollector
         var embedsImages = true
+        var defaultLink: String?
         /// The slide's layout and master parts, when resolvable.
         var layout: Document?
         var master: Document?
@@ -187,11 +190,16 @@ public struct PowerPointConverter: DocumentConverter {
     private static func renderShapes(in container: Element, title: inout String?, blocks: inout [String], context: inout SlideContext) {
         for shape in container.children().array() {
             if Task.isCancelled { return }
+            context.defaultLink = nil
             switch shape.tagName().lowercased() {
             case "p:sp":
                 let type = placeholderType(of: shape)
                 if let type, skippedPlaceholders.contains(type) { continue }
                 guard let body = textBody(of: shape) else { continue }
+                let shapeProperties = child(of: shape, named: "p:nvsppr").flatMap { child(of: $0, named: "p:cnvpr") }
+                context.defaultLink = shapeProperties.flatMap { child(of: $0, named: "a:hlinkclick") }
+                    .flatMap { try? $0.attr("r:id") }.flatMap { context.relationships[$0] }
+                    .flatMap { $0.external && DocumentRenderer.isSafeURL($0.target, isImage: false) ? $0.target : nil }
                 if type == "title" || type == "ctrTitle" {
                     let text = renderParagraphs(body, inherited: noInheritance, context: &context)
                         .joined(separator: " ")
@@ -416,7 +424,7 @@ public struct PowerPointConverter: DocumentConverter {
                     .flatMap { try? $0.attr("r:id") }
                     .flatMap { context.relationships[$0] }
                     .flatMap { $0.external && DocumentRenderer.isSafeURL($0.target, isImage: false) ? $0.target : nil }
-                runs.append(Run(text: text, bold: isOn(properties, "b", defaults: defaults), italic: isOn(properties, "i", defaults: defaults), link: link))
+                runs.append(Run(text: text, bold: isOn(properties, "b", defaults: defaults), italic: isOn(properties, "i", defaults: defaults), link: link ?? context.defaultLink))
             case "a:br":
                 runs.append(Run(text: "\n", bold: false, italic: false, link: nil))
             default:
@@ -467,6 +475,10 @@ public struct PowerPointConverter: DocumentConverter {
         for character in text {
             if #"\`*_{}[]<>"#.contains(character) { out.append("\\") }
             out.append(character)
+        }
+        if out.trimmingCharacters(in: .whitespaces).count >= 3,
+           out.trimmingCharacters(in: .whitespaces).allSatisfy({ $0 == "-" || $0 == " " }) {
+            return out.replacingOccurrences(of: "-", with: "\\-")
         }
         return out.replacingOccurrences(of: #"(?m)^(#{1,6}|[-+])(?=\s)"#, with: #"\\$1"#, options: .regularExpression)
             .replacingOccurrences(of: #"(?m)^([0-9]+)([.)])(?=\s)"#, with: #"$1\\$2"#, options: .regularExpression)
@@ -528,7 +540,7 @@ public struct PowerPointConverter: DocumentConverter {
         if context.embedsImages {
             context.images.add(path: mediaPath, filename: filename, archive: context.archive)
         }
-        let label = alt.replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]")
+        let label = alt.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]")
         return "![\(label)](\(linkDestination(filename)))"
     }
 
@@ -538,8 +550,12 @@ public struct PowerPointConverter: DocumentConverter {
         private var seen: Set<String> = []
 
         mutating func add(path: String, filename: String, archive: PowerPointPackage) {
-            guard seen.insert(path).inserted,
-                  let bytes = archive.read(path), !bytes.isEmpty else { return }
+            guard !seen.contains(path) else { return }
+            guard let bytes = archive.read(path), !bytes.isEmpty else {
+                archive.fail(PicoDocsError.fileCorrupted)
+                return
+            }
+            seen.insert(path)
             sections.append(DocumentSection(
                 title: filename,
                 kind: .image,

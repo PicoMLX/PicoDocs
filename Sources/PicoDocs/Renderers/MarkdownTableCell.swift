@@ -23,6 +23,21 @@ enum MarkdownTableCell {
             .replacingOccurrences(of: "|", with: "\\|")
     }
 
+    /// Decode canonical breaks without interpreting an escaped literal marker.
+    static func decodeBreaks(_ text: String) -> String {
+        var output = ""
+        var index = text.startIndex
+        while index < text.endIndex {
+            if text[index] == "\\" {
+                output.append(text[index]); index = text.index(after: index)
+                if index < text.endIndex { output.append(text[index]); index = text.index(after: index) }
+            } else if text[index...].hasPrefix("<br>") {
+                output.append("\n"); index = text.index(index, offsetBy: 4)
+            } else { output.append(text[index]); index = text.index(after: index) }
+        }
+        return output
+    }
+
     /// Inverse of `escapeDelimiters`: turns `\\` back into `\` and `\|` into `|`,
     /// leaving any other backslash sequence untouched (so a stray `\x` from a
     /// non-escaping source isn't corrupted).
