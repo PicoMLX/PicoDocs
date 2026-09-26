@@ -4,6 +4,40 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func externalClicksRequireHyperlinkRelationships() async throws {
+        typealias B = PowerPointConverterTests
+        let type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+        let run = B.shape(placeholder:nil,paragraphs:[#"<a:p><a:r><a:rPr><a:hlinkClick r:id="link"/></a:rPr><a:t>Text</a:t></a:r></a:p>"#])
+        let shape = B.shape(placeholder:nil,paragraphs:["<a:p><a:r><a:t>Text</a:t></a:r></a:p>"]).replacingOccurrences(of:#"<p:cNvPr id="2" name="Shape"/>"#,with:#"<p:cNvPr id="2" name="Shape"><a:hlinkClick r:id="link"/></p:cNvPr>"#)
+        for content in [run,shape] {
+            let data = B.deck(slides:[.init(file:"s.xml",shapes:content,relationships:[("link",type + "image","https://example.com\" TargetMode=\"External")])])
+            await #expect(throws:PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data:data,filename:"wrong-type.pptx") }
+        }
+    }
+
+    @Test func placeholderInheritanceUsesSelectedAlternateContent() async throws {
+        typealias B = PowerPointConverterTests
+        let ph = #"<p:ph type="body" idx="1"/>"#
+        let slide = B.shape(placeholder:ph,paragraphs:["<a:p><a:r><a:t>Inherited</a:t></a:r></a:p>"])
+        func styled(_ properties: String) -> String {
+            B.shape(placeholder:ph,paragraphs:[]).replacingOccurrences(of:"<a:bodyPr/>",with:"<a:bodyPr/><a:lstStyle><a:lvl1pPr>" + properties + "</a:lvl1pPr></a:lstStyle>")
+        }
+        let choices = "<mc:AlternateContent><mc:Choice Requires=\"p14\">" + styled("<a:buChar char=\"•\"/><a:defRPr i=\"1\"/>") + "</mc:Choice><mc:Fallback>" + styled("<a:buNone/><a:defRPr b=\"1\"/>") + "</mc:Fallback></mc:AlternateContent>"
+        let layout = "<p:sldLayout \(B.namespaces)><p:cSld><p:spTree>" + choices + "</p:spTree></p:cSld></p:sldLayout>"
+        let data = B.deck(slides:[.init(file:"s.xml",shapes:slide,relationships:[("layout","http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout","../slideLayouts/l.xml")])],extraParts:[("ppt/slideLayouts/l.xml",Array(layout.utf8))])
+        let result = try await PicoDocsEngine.convert(data:data,filename:"fallback.pptx")
+        #expect(result.markdown().contains("**Inherited**")); #expect(!result.markdown().contains("- ")); #expect(!result.markdown().contains("***"))
+    }
+
+    @Test func internalTargetsCannotTraverseAbovePackageRoot() async throws {
+        typealias B = PowerPointConverterTests
+        // Builder prefixes slides/, requiring three parent components to underflow ppt/slides.
+        let data = B.deck(slides:[.init(file:"s.xml",shapes:B.titleShape("Slide"))],order:["../../../ppt/slides/s.xml"])
+        await #expect(throws:PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data:data,filename:"escape.pptx") }
+        let valid = B.deck(slides:[.init(file:"s.xml",shapes:B.titleShape("Slide"))],order:["../../ppt/slides/s.xml"])
+        #expect(try await PicoDocsEngine.convert(data:valid,filename:"inside.pptx").markdown().contains("Slide"))
+    }
+
     @Test func codeAndDestinationsProtectTableBreakMarkers() throws {
         for cell in ["`<br>`", "``<br>``"] {
             let result = ConverterResult(sections:[.init(markdown:"| " + cell + " |\n| --- |")])

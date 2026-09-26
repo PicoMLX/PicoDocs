@@ -235,9 +235,17 @@ public struct PowerPointConverter: DocumentConverter {
 
     private static func shapeLink(_ shape: Element, context: SlideContext) -> String? {
         let properties = child(of: shape, named: "p:nvsppr").flatMap { child(of: $0, named: "p:cnvpr") }
-        return properties.flatMap { child(of: $0, named: "a:hlinkclick") }
-            .flatMap { try? $0.attr("r:id") }.flatMap { context.relationships[$0] }
-            .flatMap { $0.external && DocumentRenderer.isSafeURL($0.target, isImage: false) ? $0.target : nil }
+        return hyperlink(properties.flatMap { child(of: $0, named: "a:hlinkclick") }, context: context)
+    }
+
+    private static func hyperlink(_ click: Element?, context: SlideContext) -> String? {
+        guard let id = try? click?.attr("r:id"), !id.isEmpty,
+              let relation = context.relationships[id], relation.external else { return nil }
+        guard relation.type.hasSuffix("/hyperlink") else {
+            context.archive.fail(PicoDocsError.fileCorrupted)
+            return nil
+        }
+        return DocumentRenderer.isSafeURL(relation.target, isImage: false) ? relation.target : nil
     }
 
     /// Placeholder types that are slide furniture, not content.
@@ -420,7 +428,20 @@ public struct PowerPointConverter: DocumentConverter {
     /// `idx` when both have one, else by type (a typeless placeholder is "obj",
     /// which a master provides as "body").
     private static func matchingPlaceholder(in part: Document, type: String, index: String) -> Element? {
-        let shapes = (try? part.getElementsByTag("p:sp").array()) ?? []
+        guard let root = part.children().first(), let common = child(of: root, named: "p:csld"),
+              let tree = child(of: common, named: "p:sptree") else { return nil }
+        var shapes: [Element] = []
+        func collect(_ container: Element) {
+            for element in container.children().array() {
+                switch element.tagName().lowercased() {
+                case "p:sp": shapes.append(element)
+                case "p:grpsp": collect(element)
+                case "mc:alternatecontent": if let selected = selectedAlternateBranch(element) { collect(selected) }
+                default: break
+                }
+            }
+        }
+        collect(tree)
         func phType(_ shape: Element) -> String? {
             guard let placeholder = placeholder(of: shape) else { return nil }
             let type = (try? placeholder.attr("type")) ?? ""
@@ -540,9 +561,7 @@ public struct PowerPointConverter: DocumentConverter {
                 let text = escapeMarkdown(child(of: node, named: "a:t").map(wholeText) ?? "")
                 guard !text.isEmpty else { continue }
                 let click = properties.flatMap { child(of: $0, named: "a:hlinkclick") }
-                let link = click.flatMap { try? $0.attr("r:id") }
-                    .flatMap { context.relationships[$0] }
-                    .flatMap { $0.external && DocumentRenderer.isSafeURL($0.target, isImage: false) ? $0.target : nil }
+                let link = hyperlink(click, context: context)
                 runs.append(Run(text: text, bold: isOn(properties, "b", defaults: defaults), italic: isOn(properties, "i", defaults: defaults), link: click == nil ? context.defaultLink : link))
             case "a:br":
                 runs.append(Run(text: "\n", bold: false, italic: false, link: nil))
@@ -812,7 +831,17 @@ public struct PowerPointConverter: DocumentConverter {
             guard let id = try? element.attr("Id"), let target = try? element.attr("Target"),
                   !id.isEmpty, !target.isEmpty else { continue }
             guard map[id] == nil else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
-            map[id] = Relationship(type: (try? element.attr("Type")) ?? "", target: target, external: ((try? element.attr("TargetMode")) ?? "").lowercased() == "external")
+            let external = ((try? element.attr("TargetMode")) ?? "").lowercased() == "external"
+            if !external {
+                var depth = target.hasPrefix("/") ? 0 : directory(of: part).split(separator: "/").count
+                for segment in target.split(separator: "/") {
+                    if segment == ".." {
+                        guard depth > 0 else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
+                        depth -= 1
+                    } else if segment != "." { depth += 1 }
+                }
+            }
+            map[id] = Relationship(type: (try? element.attr("Type")) ?? "", target: target, external: external)
         }
         archive.relationshipMaps[part] = map
         return map
