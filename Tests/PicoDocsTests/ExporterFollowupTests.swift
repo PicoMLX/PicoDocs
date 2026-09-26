@@ -8,6 +8,51 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func underscoreEmphasisUsesFlankingAndPreservesIdentifiers() throws {
+        #expect(MarkdownInlineParser.parse("_italic_") == [.emphasis([.text("italic")])])
+        #expect(MarkdownInlineParser.parse("__bold__") == [.strong([.text("bold")])])
+        #expect(MarkdownInlineParser.parse("_**both**_") == [.emphasis([.strong([.text("both")])])])
+        #expect(MarkdownInlineParser.parse("foo_bar_baz foo__bar__baz").plainText == "foo_bar_baz foo__bar__baz")
+        #expect(MarkdownInlineParser.parse(#"\_literal\_"#) == [.text("_literal_")])
+        let document = try xml(PicoDocsEngine.write(markdown:"_italic_ __bold__",to:.docx),"word/document.xml")
+        #expect(document.contains("<w:i/>")); #expect(document.contains("<w:b/>"))
+        let slide = try xml(PicoDocsEngine.write(markdown:"_italic_ __bold__",to:.pptx),"ppt/slides/slide1.xml")
+        #expect(slide.contains(#"i="1""#)); #expect(slide.contains(#"b="1""#))
+    }
+
+    @Test func bracketedLinkLabelsAndLiteralCodeClosers() {
+        #expect(MarkdownInlineParser.parse("[API [v2]](https://example.com)") == [.link(label:[.text("API [v2]")],destination:"https://example.com")])
+        #expect(MarkdownInlineParser.parse("![API [v2]](image.png)") == [.image(alt:"API [v2]",source:"image.png")])
+        #expect(MarkdownInlineParser.parse("[API `]` v2](url)") == [.link(label:[.text("API "),.code("]"),.text(" v2")],destination:"url")])
+        // CommonMark 0.31.2 example 338: backslashes cannot escape a code closer.
+        #expect(MarkdownInlineParser.parse(#"`open\` tail"#) == [.code("open\\"),.text(" tail")])
+        #expect(MarkdownInlineParser.parse(#"\`open\` tail"#) == [.text("`open` tail")])
+        #expect(MarkdownInlineParser.parse("[not a `link](/foo`)") == [.text("[not a "),.code("link](/foo"),.text(")")])
+    }
+
+    @Test func blankSlidesAndNestedContinuationsRetainStructure() throws {
+        let blank = ConverterResult(sections:[.init(kind:.slide,markdown:"",slideNumber:1),.init(kind:.slide,markdown:"",slideNumber:3)])
+        let deck = try PicoDocsEngine.write(blank,to:.pptx)
+        #expect(try xml(deck,"ppt/presentation.xml").components(separatedBy:"<p:sldId ").count - 1 == 3)
+        let slide = try xml(PicoDocsEngine.write(markdown:"- parent\n  - child\n    - grandchild\n    continuation",to:.pptx),"ppt/slides/slide1.xml")
+        #expect(slide.contains(#"<a:pPr lvl="1"><a:buNone/></a:pPr>"#))
+        #expect(slide.contains("continuation"))
+    }
+
+    @Test func documentFragmentLinksTargetUniqueHeadingBookmarks() throws {
+        let source = "[Details](#details) [second](#details-1) [unicode](#caf%C3%A9) [missing](#unknown)\n\n# Details\n\n## Details\n\n# Café"
+        let data = try PicoDocsEngine.write(markdown:source,to:.docx)
+        let document = try xml(data,"word/document.xml")
+        for index in 1...3 {
+            #expect(document.contains("<w:hyperlink w:anchor=\"heading_\(index)\">"))
+            #expect(document.contains("w:name=\"heading_\(index)\""))
+        }
+        #expect(document.components(separatedBy:"<w:bookmarkStart ").count - 1 == 3)
+        #expect(document.components(separatedBy:"<w:bookmarkEnd ").count - 1 == 3)
+        #expect(!(try xml(data,"word/_rels/document.xml.rels")).contains("/hyperlink"))
+        #expect(document.contains("missing"))
+    }
+
     @Test func emptyWorksheetsSurviveTranscoding() async throws {
         for includeData in [false,true] {
             var sections = [DocumentSection(title:"Template",kind:.sheet,markdown:"")]

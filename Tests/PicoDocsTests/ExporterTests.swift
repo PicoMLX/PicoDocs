@@ -408,7 +408,7 @@ struct MarkdownInlineParserTests {
     func parsesInline() {
         let nodes = MarkdownInlineParser.parse("a **b _c_** `d` [e](http://x)")
         // Plain-text projection collapses formatting.
-        #expect(nodes.plainText == "a b _c_ d e")
+        #expect(nodes.plainText == "a b c d e")
 
         let strong = MarkdownInlineParser.parse("***x***")
         #expect(strong == [.strong([.emphasis([.text("x")])])])

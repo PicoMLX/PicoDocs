@@ -23,8 +23,9 @@ public struct WordprocessingMLExporter: DocumentExporter {
         guard format == .docx else { throw ExporterError.notAccepted }
         let result = PicoDocsEngine.withSynthesizedImageReferences(result)
 
-        let builder = Builder(images: Self.imageIndex(result.sections))
-        for block in OfficeDocumentBlocks.parse(result) {
+        let blocks = OfficeDocumentBlocks.parse(result)
+        let builder = Builder(images: Self.imageIndex(result.sections), blocks: blocks)
+        for block in blocks {
             builder.append(block)
         }
         builder.finishRelationships()
@@ -147,7 +148,28 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
         struct Relationship { let id: String; let type: String; let target: String; let external: Bool }
 
-        init(images: ImageIndex) { self.images = images }
+        private var headingBookmarks: [String] = []
+        private var fragmentBookmarks: [String: String] = [:]
+        private var headingIndex = 0
+
+        init(images: ImageIndex, blocks: [MarkdownBlock]) {
+            self.images = images
+            var usedSlugs: Set<String> = []
+            for block in blocks {
+                guard case .heading(_, let text) = block else { continue }
+                let plain = MarkdownInlineParser.parse(text).plainText.lowercased()
+                let base = String(plain.unicodeScalars.filter {
+                    !CharacterSet.punctuationCharacters.union(.symbols).contains($0) || $0 == "-" || $0 == "_"
+                }).replacingOccurrences(of: "\\s", with: "-", options: .regularExpression)
+                var slug = base, suffix = 1
+                while usedSlugs.contains(slug) { slug = "\(base)-\(suffix)"; suffix += 1 }
+                usedSlugs.insert(slug)
+                // Generated names are short and valid even for Unicode headings.
+                let name = "heading_\(headingBookmarks.count + 1)"
+                headingBookmarks.append(name)
+                fragmentBookmarks[slug] = name
+            }
+        }
 
         private func nextRelID() -> String { relCounter += 1; return "rId\(relCounter)" }
 
@@ -155,7 +177,10 @@ public struct WordprocessingMLExporter: DocumentExporter {
             switch block {
             case .heading(let level, let text):
                 let pPr = "<w:pPr><w:pStyle w:val=\"Heading\(min(max(level, 1), 6))\"/></w:pPr>"
-                body += paragraph(pPr: pPr, content: inlineRuns(text))
+                let bookmark = headingBookmarks[headingIndex]
+                let id = headingIndex
+                headingIndex += 1
+                body += paragraph(pPr: pPr, content: "<w:bookmarkStart w:id=\"\(id)\" w:name=\"\(bookmark)\"/>" + inlineRuns(text) + "<w:bookmarkEnd w:id=\"\(id)\"/>")
 
             case .paragraph(let text):
                 body += paragraph(pPr: "", content: inlineRuns(text))
@@ -259,6 +284,16 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 case .emphasis(let children):
                     out += renderRuns(children, bold: bold, italic: true)
                 case .link(let label, let destination):
+                    if destination.hasPrefix("#") {
+                        let fragment = String(destination.dropFirst())
+                        if let bookmark = fragmentBookmarks[fragment.removingPercentEncoding ?? fragment] {
+                            out += "<w:hyperlink w:anchor=\"\(bookmark)\">\(renderRuns(label, bold: bold, italic: italic))</w:hyperlink>"
+                        } else {
+                            // A missing local target cannot become an external URI.
+                            out += renderRuns(label, bold: bold, italic: italic)
+                        }
+                        continue
+                    }
                     let id = nextRelID()
                     relationships.append(Relationship(
                         id: id,

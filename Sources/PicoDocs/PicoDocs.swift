@@ -111,8 +111,8 @@ public enum PicoDocsEngine {
         let hasImages = result.sections.contains { $0.kind == .image }
         let hasCSV = format == .xlsx && result.sections.contains { !($0.metadata["csv"] ?? "").isEmpty }
         let hasSheets = format == .xlsx && result.sections.contains { $0.kind == .sheet }
-        let hasSlideTitle = format == .pptx && result.sections.contains { $0.kind == .slide && !($0.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        if isEmpty, !hasImages, !hasCSV, !hasSheets, !hasSlideTitle {
+        let hasSlides = format == .pptx && result.sections.contains { $0.kind == .slide }
+        if isEmpty, !hasImages, !hasCSV, !hasSheets, !hasSlides {
             throw PicoDocsError.emptyDocument
         }
         return try registry.write(result, format: format)

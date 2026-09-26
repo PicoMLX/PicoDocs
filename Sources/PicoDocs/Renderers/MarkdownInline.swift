@@ -74,6 +74,16 @@ enum MarkdownInlineParser {
             if let close = lastTick[tick.length] { nextTicks[tick.start] = (close, tick.length) }
             lastTick[tick.length] = tick.start
         }
+        // Balance labels once, ignoring escaped brackets and complete code spans.
+        var labelCloses: [Int: Int] = [:], labels: [Int] = []
+        scan = 0
+        while scan < chars.count {
+            if chars[scan] == "\\", scan + 1 < chars.count, punctuation.contains(chars[scan + 1]) { scan += 2; continue }
+            if chars[scan] == "`", let (close, length) = nextTicks[scan] { scan = close + length; continue }
+            if chars[scan] == "[" { labels.append(scan) }
+            else if chars[scan] == "]", let open = labels.popLast() { labelCloses[open] = scan }
+            scan += 1
+        }
         var structured: [MarkdownInline] = []
         var run = ""
         var i = 0
@@ -104,7 +114,7 @@ enum MarkdownInlineParser {
 
             // Image: ![alt](dest)
             if c == "!", i + 1 < chars.count, chars[i + 1] == "[",
-               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: nextBracket[min(i + 2, chars.count)], parenCloses: parenCloses, nextAngle: nextAngle) {
+               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: labelCloses[i + 1], parenCloses: parenCloses, nextAngle: nextAngle) {
                 append(parsed.node)
                 i = parsed.next
                 continue
@@ -112,7 +122,7 @@ enum MarkdownInlineParser {
 
             if c == "[" {
                 // Link: [label](dest)
-                if let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: nextBracket[min(i + 1, chars.count)], parenCloses: parenCloses, nextAngle: nextAngle) {
+                if let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: labelCloses[i], parenCloses: parenCloses, nextAngle: nextAngle) {
                     append(parsed.node)
                     i = parsed.next
                     continue
@@ -278,11 +288,12 @@ enum MarkdownInlineParser {
         // from its left edge, so *** can close an inner * and then an outer **.
         struct Frame {
             var count: Int
+            let delimiter: Character
             let canClose: Bool
             var nodes: [MarkdownInline]
         }
         let chars = Array(text)
-        var frames: [Frame] = [Frame(count: 0, canClose: false, nodes: [])]
+        var frames: [Frame] = [Frame(count: 0, delimiter: "*", canClose: false, nodes: [])]
         var index = 0
         func punctuation(_ c: Character?) -> Bool {
             guard let c else { return false }
@@ -296,22 +307,25 @@ enum MarkdownInlineParser {
             } else { frames[last].nodes.append(.text(value)) }
         }
         while index < chars.count {
-            guard chars[index] == "*" else {
+            guard chars[index] == "*" || chars[index] == "_" else {
                 let start = index
-                while index < chars.count, chars[index] != "*" { index += 1 }
+                while index < chars.count, chars[index] != "*", chars[index] != "_" { index += 1 }
                 appendText(String(chars[start..<index]))
                 continue
             }
             let start = index
-            while index < chars.count, chars[index] == "*" { index += 1 }
+            let delimiter = chars[index]
+            while index < chars.count, chars[index] == delimiter { index += 1 }
             var remaining = index - start
             let before: Character? = start > 0 ? chars[start - 1] : nil
             let after: Character? = index < chars.count ? chars[index] : nil
             let beforeSpace = before?.isWhitespace ?? true
             let afterSpace = after?.isWhitespace ?? true
-            let opens = !afterSpace && (!punctuation(after) || beforeSpace || punctuation(before))
-            let closes = !beforeSpace && (!punctuation(before) || afterSpace || punctuation(after))
-            while closes, remaining > 0, frames.count > 1 {
+            let leftFlanking = !afterSpace && (!punctuation(after) || beforeSpace || punctuation(before))
+            let rightFlanking = !beforeSpace && (!punctuation(before) || afterSpace || punctuation(after))
+            let opens = leftFlanking && (delimiter == "*" || !rightFlanking || punctuation(before))
+            let closes = rightFlanking && (delimiter == "*" || !leftFlanking || punctuation(after))
+            while closes, remaining > 0, frames.count > 1, frames.last?.delimiter == delimiter {
                 let top = frames.count - 1
                 // CommonMark's rule of three disambiguates intraword runs.
                 if (opens || frames[top].canClose), (frames[top].count + remaining) % 3 == 0,
@@ -328,13 +342,13 @@ enum MarkdownInlineParser {
             }
             if remaining > 0 {
                 if opens, frames.count < 128 {
-                    frames.append(Frame(count: remaining, canClose: closes, nodes: []))
-                } else { appendText(String(repeating: "*", count: remaining)) }
+                    frames.append(Frame(count: remaining, delimiter: delimiter, canClose: closes, nodes: []))
+                } else { appendText(String(repeating: String(delimiter), count: remaining)) }
             }
         }
         while frames.count > 1 {
             let frame = frames.removeLast()
-            appendText(String(repeating: "*", count: frame.count))
+            appendText(String(repeating: String(frame.delimiter), count: frame.count))
             for node in frame.nodes {
                 if case .text(let value) = node { appendText(value) }
                 else { frames[frames.count - 1].nodes.append(node) }

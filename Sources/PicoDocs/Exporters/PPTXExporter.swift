@@ -199,7 +199,7 @@ public struct PPTXExporter: DocumentExporter {
                     nodes.insert(.text("\(paragraph.number). "), at: 0)
                 case true?: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buAutoNum type=\"arabicPeriod\" startAt=\"\(paragraph.number)\"/></a:pPr>"
                 case false?: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buChar char=\"•\"/></a:pPr>"
-                case nil: properties = "<a:pPr><a:buNone/></a:pPr>"
+                case nil: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buNone/></a:pPr>"
                 }
                 let runs = runs(nodes, relationships: &relationships)
                 return "<a:p>\(properties)\(runs)</a:p>"
