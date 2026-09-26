@@ -5,6 +5,28 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func bulletWithoutSuffixKeepsItsVisibleGlyph() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"bullet\"/><w:lvlText w:val=\"•\"/><w:suff w:val=\"nothing\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:start w:val=\"1\"/><w:numFmt w:val=\"bullet\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        func paragraph(_ level: Int, _ content: String) -> String { "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"\(level)\"/></w:numPr></w:pPr><w:r>\(content)</w:r></w:p>" }
+        let document = "<w:document \(ns)><w:body>" + paragraph(0,"<w:t>Parent</w:t><w:br/><w:t>Continued</w:t>") + paragraph(1,"<w:t>Child</w:t>") + "</w:body></w:document>"
+        let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml",data: Array(document.utf8)),(name: "word/numbering.xml",data: Array(numbering.utf8))]), filename: "tabs.docx")
+        #expect(result.markdown().contains("- •Parent  \n   Continued"))
+        #expect(result.markdown().contains("\n  - Child"))
+        #expect(try DocumentRenderer.render(result, to: .plaintext).hasPrefix("- •Parent"))
+        #expect(try DocumentRenderer.render(result, to: .html).components(separatedBy: "<ul").count - 1 == 2)
+    }
+
+    @Test func bulletTabSuffixControlsNestingAndPlaintextPadding() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"bullet\"/><w:suff w:val=\"tab\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:start w:val=\"1\"/><w:numFmt w:val=\"bullet\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        func paragraph(_ level: Int, _ content: String) -> String { "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"\(level)\"/></w:numPr></w:pPr><w:r>\(content)</w:r></w:p>" }
+        let document = "<w:document \(ns)><w:body>" + paragraph(0,"<w:t>Parent</w:t><w:br/><w:t>Continued</w:t>") + paragraph(1,"<w:t>Child</w:t>") + "</w:body></w:document>"
+        let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml",data: Array(document.utf8)),(name: "word/numbering.xml",data: Array(numbering.utf8))]), filename: "tabs.docx")
+        #expect(result.markdown().contains("-\tParent  \n    Continued"))
+        #expect(result.markdown().contains("\n    - Child"))
+        #expect(try DocumentRenderer.render(result, to: .plaintext).hasPrefix("-\tParent"))
+        #expect(try DocumentRenderer.render(result, to: .html).components(separatedBy: "<ul").count - 1 == 2)
+    }
+
     @Test func decimalTabSuffixControlsNestingAndPlaintextPadding() async throws {
         let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:suff w:val=\"tab\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
         func paragraph(_ level: Int, _ content: String) -> String { "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"\(level)\"/></w:numPr></w:pPr><w:r>\(content)</w:r></w:p>" }

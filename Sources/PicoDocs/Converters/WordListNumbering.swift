@@ -114,12 +114,16 @@ final class WordListNumbering {
         counters[numID, default: [:]][ilvl] = count
 
         let language = Self.language(in: paragraphProperties ?? numPr?.parent()) ?? styleLanguage(style)
+        let suffix = definition?.suffix == "nothing" ? "" : (definition?.suffix == "tab" ? "\t" : " ")
         var marker: String
         switch definition?.format ?? "bullet" {
         case "none":
             return nil
         case "bullet":
-            marker = "- "
+            if suffix.isEmpty {
+                let label = definition?.text ?? "•"
+                marker = "- " + label.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+            } else { marker = "-" + suffix }
         default:
             let simple = Self.formattedNumber(count, format: definition?.format ?? "decimal", language: definition?.language ?? language) + "."
             var label = definition?.text ?? simple
@@ -128,7 +132,6 @@ final class WordListNumbering {
                 let value = counters[numID]?[level] ?? numbers[numID]?.overrides[level] ?? effective?.start ?? 0
                 label = label.replacingOccurrences(of: "%\(level + 1)", with: Self.formattedNumber(value, format: definition?.legal == true ? "decimal" : (effective?.format ?? "decimal"), language: definition?.language ?? effective?.language ?? language))
             }
-            let suffix = definition?.suffix == "nothing" ? "" : (definition?.suffix == "tab" ? "\t" : " ")
             if label == "\(count).", String(count).count <= 9, !suffix.isEmpty { marker = label + suffix }
             else {
                 let escaped = label.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
