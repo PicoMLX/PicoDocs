@@ -5,6 +5,24 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func literalContinuationAndNestedReadingOrder() throws {
+        let xml = try SwiftSoup.parse("<w:p><w:pPr><w:numPr/></w:pPr><w:r><w:t>First</w:t><w:br/><w:t>- literal</w:t><w:br/><w:t>2. literal number</w:t></w:r></w:p>", "", SwiftSoup.Parser.xmlParser())
+        let paragraph = try #require(xml.getElementsByTag("w:p").first())
+        let markdown = try #require(WordConverter.renderParagraph(paragraph, relationships: [:]))
+        let result = ConverterResult(sections: [.init(markdown: markdown)])
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.components(separatedBy: "<li>").count == 2)
+        #expect(html.contains("- literal"))
+        #expect(!html.contains("\\-"))
+        let nested = ConverterResult(sections: [.init(markdown: "1. parent[^p]\n   - child[^c]\n   after child[^a]\n2. next\n\n[^p]: Parent\n[^c]: Child\n[^a]: After")])
+        let plain = try DocumentRenderer.render(nested, to: .plaintext)
+        #expect(plain.contains("1. parent[1]\n   - child[2]\n   after child[3]\n2. next"))
+        let nestedHTML = try DocumentRenderer.render(nested, to: .html)
+        let childEnd = try #require(nestedHTML.range(of: "</ul>"))
+        let after = try #require(nestedHTML.range(of: "after child"))
+        #expect(childEnd.upperBound < after.lowerBound)
+    }
+
     private let ns = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\""
 
     @Test func concreteCountersOverridesDefaultsAndRestarts() throws {

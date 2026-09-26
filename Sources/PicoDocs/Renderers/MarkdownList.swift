@@ -1,11 +1,23 @@
 import Foundation
 
-/// A list retains each source marker and its child lists, including loose items.
+/// A list retains source markers and the reading order of text and child lists.
 struct MarkdownList {
     struct Item {
         let number: Int?
-        var text: String
-        var children: [MarkdownList] = []
+        enum Content {
+            case text(String)
+            case list(MarkdownList)
+        }
+        var content: [Content]
+        init(number: Int?, text: String) {
+            self.number = number
+            content = [.text(text)]
+        }
+        mutating func appendText(_ text: String) {
+            if case .text(let previous) = content.last {
+                content[content.count - 1] = .text(previous + "\n" + text)
+            } else { content.append(.text(text)) }
+        }
     }
     let ordered: Bool
     var items: [Item] = []
@@ -50,13 +62,13 @@ struct MarkdownList {
                     guard !list.items.isEmpty else { break }
                     var childIndex = next
                     guard let child = parse(lines, index: &childIndex, depth: depth + 1) else { break }
-                    list.items[list.items.count - 1].children.append(child)
+                    list.items[list.items.count - 1].content.append(.list(child))
                     index = childIndex
                 }
             } else {
                 let indent = lines[next].prefix { $0 == " " }.count
                 guard !blank, indent > first.indent, !list.items.isEmpty else { break }
-                list.items[list.items.count - 1].text += "\n" + lines[next].trimmingCharacters(in: .whitespaces)
+                list.items[list.items.count - 1].appendText(lines[next].trimmingCharacters(in: .whitespaces))
                 index = next + 1
             }
         }
@@ -66,9 +78,14 @@ struct MarkdownList {
     func plaintext(indent: String = "", inline: (String) -> String) -> String {
         items.map { item in
             let marker = item.number.map { "\($0). " } ?? "- "
-            let line = indent + marker + inline(item.text).replacingOccurrences(of: "\n", with: " ")
-            let children = item.children.map { $0.plaintext(indent: indent + String(repeating: " ", count: marker.count), inline: inline) }
-            return ([line] + children).joined(separator: "\n")
+            let continuation = indent + String(repeating: " ", count: marker.count)
+            return item.content.enumerated().map { index, content in
+                switch content {
+                case .text(let text):
+                    return (index == 0 ? indent + marker : continuation) + inline(text).replacingOccurrences(of: "\n", with: " ")
+                case .list(let child): return child.plaintext(indent: continuation, inline: inline)
+                }
+            }.joined(separator: "\n")
         }.joined(separator: "\n")
     }
 
@@ -80,11 +97,23 @@ struct MarkdownList {
         let body = items.map { item in
             let value = item.number.map { $0 == expected ? "" : " value=\"\($0)\"" } ?? ""
             if let number = item.number { expected = min(number, Int.max - 1) + 1 }
-            let children = item.children.map { $0.html(inline: inline) }.joined(separator: "\n")
-            return "<li\(value)>\(inline(item.text).replacingOccurrences(of: "\n", with: " "))\(children.isEmpty ? "" : "\n" + children)</li>"
+            let content = item.content.map { content in
+                switch content {
+                case .text(let text): return inline(text).replacingOccurrences(of: "\n", with: " ")
+                case .list(let child): return child.html(inline: inline)
+                }
+            }.joined(separator: "\n")
+            return "<li\(value)>\(content)</li>"
         }.joined(separator: "\n")
         return "<\(tag)\(attribute)>\n\(body)\n</\(tag)>"
     }
 
-    var texts: [String] { items.flatMap { [$0.text] + $0.children.flatMap(\.texts) } }
+    var texts: [String] {
+        items.flatMap { $0.content.flatMap { content in
+            switch content {
+            case .text(let text): return [text]
+            case .list(let child): return child.texts
+            }
+        } }
+    }
 }
