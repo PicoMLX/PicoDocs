@@ -320,6 +320,11 @@ enum IWATable {
                 }
                 start = index + 1
             }
+            if index < range.upperBound, body.units[index] == 0x0D,
+               index + 1 < range.upperBound, body.units[index + 1] == 0x0A {
+                index += 1
+                start = index + 1
+            }
             index += 1
         }
         // A table attachment is visible content: emit pending empty markers
@@ -342,19 +347,21 @@ enum IWATable {
                                        _ body: BodyStorage, _ lists: inout ListState) throws -> (marker: String, tight: Bool) {
         switch kind {
         case .bullet:
-            let tight = style == lists.lastList
+            let restart = listRestart(at: offset, in: body.listRestarts)
+            let tight = lists.lastList != nil && (restart == 0 || (restart == nil && style == lists.lastList))
             lists.lastList = style; lists.orderedList = nil
             return ("-", tight)
         case .ordered:
             let restart = listRestart(at: offset, in: body.listRestarts)
-            if let restart {
+            if let restart, restart > 0 {
                 lists.counter = restart - 1; lists.orderedList = style
-            } else if style != lists.orderedList {
+            } else if lists.orderedList == nil || (restart == nil && style != lists.orderedList) {
                 lists.counter = 0; lists.orderedList = style
             }
             guard lists.counter < Int(maxListStart) else { throw PicoDocsError.fileCorrupted }
             lists.counter += 1
-            let tight = style == lists.lastList && restart == nil
+            let tight = lists.lastList != nil && (restart == 0 || (restart == nil && style == lists.lastList))
+            lists.orderedList = style
             lists.lastList = style
             return ("\(lists.counter).", tight)
         }
@@ -401,6 +408,14 @@ enum IWATable {
     static func escapingListMarker(_ line: String) -> String {
         let content = line.drop { $0 == " " || $0 == "\t" }
         let lead = String(line[..<content.startIndex])
+        if content.hasPrefix("```") {
+            return lead + content.replacingOccurrences(of: "`", with: "\\`")
+        }
+        if let first = content.first, "#>|".contains(first) { return lead + "\\" + content }
+        let compact = content.filter { !$0.isWhitespace }
+        if compact.count >= 3, let first = compact.first, "-*_".contains(first), compact.allSatisfy({ $0 == first }) {
+            return lead + content.map { $0 == first ? "\\" + String($0) : String($0) }.joined()
+        }
         func endsMarker(_ rest: Substring) -> Bool { rest.isEmpty || rest.first == " " || rest.first == "\t" }
         if let first = content.first, "-*+".contains(first), endsMarker(content.dropFirst()) {
             return lead + "\\" + String(content)
@@ -422,12 +437,12 @@ enum IWATable {
     private static func listRestart(at index: Int, in runs: [(offset: Int, value: Int)]) -> Int? {
         var low = 0
         var high = runs.count - 1
-        var value = 0
+        var value: Int?
         while low <= high {                               // last run at or before `index`
             let mid = (low + high) / 2
             if runs[mid].offset <= index { value = runs[mid].value; low = mid + 1 } else { high = mid - 1 }
         }
-        return value > 0 ? value : nil
+        return value
     }
 
     /// The largest list number CommonMark accepts (nine digits).

@@ -336,7 +336,8 @@ public enum DocumentRenderer {
             // Mirror inlineHTML/stripInline: code spans and links become
             // placeholders, so a `[^id]` inside them isn't treated as a reference.
             let (afterCode, _) = extractCodeSpans(text)
-            let (afterLinks, _) = extractLinks(afterCode)
+            let (protected, _) = protectEscapes(afterCode)
+            let (afterLinks, _) = extractLinks(protected)
             var cursor = afterLinks.startIndex
             while let open = afterLinks.range(of: "[^", range: cursor..<afterLinks.endIndex) {
                 guard let close = afterLinks.range(of: "]", range: open.upperBound..<afterLinks.endIndex) else { break }
@@ -345,16 +346,19 @@ public enum DocumentRenderer {
             }
         }
 
-        for block in blocks {
-            switch block {
-            case .code, .rule: continue        // code blocks never render footnote refs
-            case .heading(_, let text): scan(text)
-            case .paragraph(let text): scan(text)
-            case .blockquote(let lines): lines.forEach(scan)
-            case .list(_, _, let items): items.forEach(scan)
-            case .table(let rows): rows.forEach { $0.forEach(scan) }
+        func scanBlocks(_ blocks: [Block]) {
+            for block in blocks {
+                switch block {
+                case .code, .rule: continue        // code blocks never render footnote refs
+                case .heading(_, let text): scan(text)
+                case .paragraph(let text): scan(text)
+                case .blockquote(let lines): lines.forEach(scan)
+                case .list(_, _, let items): items.forEach { scanBlocks(parseBlocks($0)) }
+                case .table(let rows): rows.forEach { $0.forEach(scan) }
+                }
             }
         }
+        scanBlocks(blocks)
         // Number notes referenced only from other notes after all body references
         // (breadth-first), so visible body numbers stay in document order.
         var index = 0
@@ -544,8 +548,16 @@ public enum DocumentRenderer {
             }
 
             let leadingBare = bareListMarker(trimmed)
-            let confirmedBare = leadingBare != nil && i + 1 < lines.count
-                && (listMarker(lines[i + 1].trimmingCharacters(in: .whitespaces)) ?? bareListMarker(lines[i + 1].trimmingCharacters(in: .whitespaces))) == leadingBare
+            var following = i + 1
+            if leadingBare != nil {
+                while following < lines.count, isBlank(lines[following]) { following += 1 }
+                if following < lines.count, lines[following].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
+                    while following < lines.count, lines[following].trimmingCharacters(in: .whitespaces).hasPrefix("|") { following += 1 }
+                    while following < lines.count, isBlank(lines[following]) { following += 1 }
+                }
+            }
+            let confirmedBare = leadingBare != nil && following < lines.count
+                && (listMarker(lines[following].trimmingCharacters(in: .whitespaces)) ?? bareListMarker(lines[following].trimmingCharacters(in: .whitespaces))) == leadingBare
             if listMarker(trimmed) != nil || confirmedBare {
                 let ordered = (listMarker(trimmed) ?? leadingBare) == .ordered
                 let start = ordered ? listStart(trimmed) : 1
@@ -724,6 +736,11 @@ public enum DocumentRenderer {
         var result = ""
         var index = text.startIndex
         while index < text.endIndex {
+            if text[index] == "\\", text.index(after: index) < text.endIndex {
+                let next = text.index(after: index)
+                result.append(text[index]); result.append(text[next]); index = text.index(after: next)
+                continue
+            }
             if text[index] == "`",
                let close = text[text.index(after: index)...].firstIndex(of: "`") {
                 spans.append(String(text[text.index(after: index)..<close]))
@@ -770,7 +787,8 @@ public enum DocumentRenderer {
     /// the remaining text is HTML-escaped and emphasized, then they're restored.
     private static func inlineHTML(_ text: String, footnoteNumbers: [String: Int] = [:]) -> String {
         let (afterCode, spans) = extractCodeSpans(text)
-        let (afterLinks, links) = extractLinks(afterCode)
+        let (protected, escaped) = protectEscapes(afterCode)
+        let (afterLinks, links) = extractLinks(protected)
         var result = applyEmphasisHTML(escapeHTML(afterLinks))
         // Footnote references: `[^id]` -> a superscript link. Done here, where code
         // spans are already placeholders, so markers inside code are not touched
@@ -793,7 +811,7 @@ public enum DocumentRenderer {
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
         }
-        return result
+        return restoreEscapes(result, escaped: escaped, html: true)
     }
 
     private static func applyEmphasisHTML(_ text: String) -> String {
@@ -807,9 +825,9 @@ public enum DocumentRenderer {
     /// Strips inline Markdown to plain text (links/images become their label/alt;
     /// code spans keep their literal contents).
     private static func stripInline(_ text: String, footnoteNumbers: [String: Int] = [:]) -> String {
-        let (protected, escaped) = protectEscapes(text)
-        let (afterCode, spans) = extractCodeSpans(protected)
-        let (afterLinks, links) = extractLinks(afterCode)
+        let (afterCode, spans) = extractCodeSpans(text)
+        let (protected, escaped) = protectEscapes(afterCode)
+        let (afterLinks, links) = extractLinks(protected)
         var result = applyEmphasisStrip(afterLinks)
         // Footnote references become `[N]` here (code spans already extracted, so
         // markers inside code are preserved; code blocks never reach stripInline).
@@ -849,10 +867,17 @@ public enum DocumentRenderer {
     }
 
     private static func restoreEscapes(_ text: String, escaped: [String], html: Bool) -> String {
-        var out = text
-        for (index, value) in escaped.enumerated() {
-            out = out.replacingOccurrences(of: "\u{E006}\(index)\u{E007}", with: html ? escapeHTML(value) : value)
+        let ns = text as NSString
+        let regex = try! NSRegularExpression(pattern: "\u{E006}([0-9]+)\u{E007}")
+        var out = "", offset = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            out += ns.substring(with: NSRange(location: offset, length: match.range.location - offset))
+            if let index = Int(ns.substring(with: match.range(at: 1))), escaped.indices.contains(index) {
+                out += html ? escapeHTML(escaped[index]) : escaped[index]
+            } else { out += ns.substring(with: match.range) }
+            offset = NSMaxRange(match.range)
         }
+        out += ns.substring(from: offset)
         return out
     }
 

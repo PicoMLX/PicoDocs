@@ -397,6 +397,43 @@ struct PagesConverterTests {
         }
     }
 
+    @Test func additionalPagesListReviewRegressions() async throws {
+        func convert(_ text: String, style: ListKind = .ordered,
+                     restarts: [(offset: Int, restart: UInt64)] = [],
+                     tableCell: String? = nil, styleChange: Int? = nil) async throws -> ConverterResult {
+            try await PicoDocsEngine.convert(data: Self.makeListPagesFile(
+                text: text, style: style, restarts: restarts, tableCell: tableCell,
+                styleChange: styleChange), filename: "lists.pages")
+        }
+        #expect(try await convert("a\r\nb").markdown() == "1. a\n2. b")
+        let bullets = try await convert("a\nb\nc\nd", style: .bullet,
+            restarts: [(0, 1), (2, 0), (4, 1), (6, 0)])
+        #expect(bullets.markdown() == "- a\n- b\n\n- c\n- d")
+        #expect(try DocumentRenderer.render(bullets, to: .html).components(separatedBy: "<ul>").count == 3)
+        #expect(try await convert("a\nb", restarts: [(0, 1), (2, 0)], styleChange: 2).markdown() == "1. a\n2. b")
+        #expect(try await convert("a\nb", styleChange: 2).markdown() == "1. a\n\n1. b")
+        let literal = try await convert("# heading\n> quote\n| a |\n```\n---", style: .bullet)
+        let html = try DocumentRenderer.render(literal, to: .html)
+        for tag in ["<h1", "<blockquote", "<table", "<hr", "<pre", "<code"] { #expect(!html.contains(tag)) }
+        #expect(try DocumentRenderer.render(literal, to: .plaintext) == "- # heading\n- > quote\n- | a |\n- ```\n- ---")
+        let table = try await convert("\u{FFFC}\nb", tableCell: "X")
+        let tableHTML = try DocumentRenderer.render(table, to: .html)
+        #expect(tableHTML.contains("<li></li>"))
+        #expect(tableHTML.contains("<ol start=\"2\">"))
+        #expect(!tableHTML.contains("<p>1.</p>"))
+    }
+
+    @Test func listRendererCodeAndFootnoteReviewRegressions() throws {
+        let code = ConverterResult(sections: [.init(markdown: "`a\\*b`")])
+        #expect(try DocumentRenderer.render(code, to: .plaintext) == "a\\*b")
+        #expect(try DocumentRenderer.render(code, to: .csv).contains("a\\*b"))
+        let fenced = ConverterResult(sections: [.init(markdown: "- Item\n  ```\n  [^n]\n  ```\n\n[^n]: Hidden definition")])
+        let html = try DocumentRenderer.render(fenced, to: .html)
+        #expect(html.contains("[^n]"))
+        #expect(!html.contains("Hidden definition"))
+        #expect(!html.contains("<sup"))
+    }
+
     // MARK: - Fixture builders
 
     /// A decompressed IWA object stream with a single storage (default type 2001)
@@ -451,11 +488,15 @@ struct PagesConverterTests {
     /// attachment object through a table model → tile, as in real Pages files.
     static func makeListPagesFile(text: String, style: ListKind,
                                   restarts: [(offset: Int, restart: UInt64)],
-                                  tableCell: String? = nil) -> Data {
+                                  tableCell: String? = nil, styleChange: Int? = nil) -> Data {
         let listStyleID: UInt64 = 10
         let listStyle = varintField(11, style == .bullet ? 2 : 3)
         var storage = varintField(1, 0) + lengthField(3, Array(text.utf8))
-        storage += lengthField(7, lengthField(1, varintField(1, 0) + lengthField(2, varintField(1, listStyleID))))
+        var styleRuns = lengthField(1, varintField(1, 0) + lengthField(2, varintField(1, listStyleID)))
+        if let styleChange {
+            styleRuns += lengthField(1, varintField(1, UInt64(styleChange)) + lengthField(2, varintField(1, 11)))
+        }
+        storage += lengthField(7, styleRuns)
         if !restarts.isEmpty {
             var table: [UInt8] = []
             for run in restarts {
@@ -465,6 +506,7 @@ struct PagesConverterTests {
         }
         var objects: [(id: UInt64, type: UInt64, payload: [UInt8], references: [UInt64])] = [
             (listStyleID, 2023, listStyle, []),
+            (11, 2023, listStyle, []),
         ]
         if let tableCell, let marker = Array(text.utf16).firstIndex(of: 0xFFFC) {
             let (modelID, tileID, listID): (UInt64, UInt64, UInt64) = (20, 21, 22)
