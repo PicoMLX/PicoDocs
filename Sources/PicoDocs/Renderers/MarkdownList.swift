@@ -85,7 +85,7 @@ struct MarkdownList: Equatable {
             } else {
                 let indent = indentation(lines[next])
                 guard !blank, indent >= contentIndent, !list.items.isEmpty else { break }
-                list.items[list.items.count - 1].appendText(lines[next].trimmingCharacters(in: .whitespaces))
+                list.items[list.items.count - 1].appendText(String(lines[next].drop { $0 == " " || $0 == "\t" }))
                 index = next + 1
             }
         }

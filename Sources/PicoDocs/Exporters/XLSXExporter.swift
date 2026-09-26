@@ -75,7 +75,7 @@ public struct XLSXExporter: DocumentExporter {
         if section.kind == .sheet,
            case .heading(_, let text)? = blocks.first,
            let title = section.sheetName ?? section.title,
-           plain(text) == title {
+           (text == title || plain(text) == title) {
             blocks.removeFirst()
         }
         var rows: [[String]] = []

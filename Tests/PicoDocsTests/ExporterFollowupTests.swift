@@ -2,9 +2,58 @@ import Foundation
 import Testing
 import ZIPFoundation
 import SwiftSoup
+#if canImport(AppKit)
+import AppKit
+#endif
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func titleOnlySlidesAndPathQualifiedTitleImages() throws {
+        let slide = ConverterResult(sections: [.init(title: "Agenda", kind: .slide, markdown: "", slideNumber: 1)])
+        #expect(try xml(PicoDocsEngine.write(slide, to: .pptx), "ppt/slides/slide1.xml").contains(">Agenda</a:t>"))
+        let images = ConverterResult(sections: ["charts/logo.png", "headers/logo.png"].enumerated().map { index, title in
+            .init(title: title, kind: .image, markdown: "", metadata: ["base64": Data([UInt8(index + 1)]).base64EncodedString(), "mimeType": "image/png"])
+        })
+        let docx = try PicoDocsEngine.write(images, to: .docx)
+        #expect(try xml(docx, "word/document.xml").components(separatedBy: "<w:drawing>").count - 1 == 2)
+        let archive = try #require(Archive(data: docx, accessMode: .read))
+        #expect(archive.filter { $0.path.hasPrefix("word/media/") }.count == 2)
+    }
+
+    @Test func listContinuationHardBreaksAndItalicCode() throws {
+        let source = "- first\n  second  \n  third"
+        let docx = try PicoDocsEngine.write(markdown: source, to: .docx)
+        #expect(try xml(docx, "word/document.xml").contains("<w:br/>"))
+        let pptx = try PicoDocsEngine.write(markdown: source, to: .pptx)
+        #expect(try xml(pptx, "ppt/slides/slide1.xml").contains("first second</a:t></a:r><a:br/>"))
+        #if canImport(AppKit)
+        for source in ["*`code`*", "***`code`***"] {
+            let string = AttributedStringDocumentBuilder.attributedString(from: ConverterResult(sections: [.init(markdown: source)]))
+            let font = try #require(string.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+            #expect(font.fontDescriptor.symbolicTraits.contains(.italic))
+            #expect(font.fontDescriptor.symbolicTraits.contains(.monoSpace))
+            if source.hasPrefix("***") { #expect(font.fontDescriptor.symbolicTraits.contains(.bold)) }
+        }
+        let list = AttributedStringDocumentBuilder.attributedString(from: ConverterResult(sections: [.init(markdown: source)]))
+        #expect(list.string.contains("first second\nthird"))
+        #endif
+    }
+
+    @Test func importedSheetValuesHaveLosslessRoundTripCarrier() async throws {
+        let csv = #""*value*","`code`","[label](url)","\*literal\*"," edge ","line"# + "\r\nbreak\""
+        let original = ConverterResult(sections: [.init(title: "`Code`", kind: .sheet, markdown: "", metadata: ["csv": csv])])
+        let first = try PicoDocsEngine.write(original, to: .xlsx)
+        let recovered = try await PicoDocsEngine.convert(data: first, filename: "literal.xlsx")
+        #expect(recovered.sections.first?.metadata["csv"] == csv)
+        let second = try PicoDocsEngine.write(recovered, to: .xlsx)
+        #expect(try xml(second, "xl/worksheets/sheet1.xml") == xml(first, "xl/worksheets/sheet1.xml"))
+        #expect(try DocumentRenderer.render(recovered, to: .csv) == csv)
+        let echoed = ConverterResult(sections: [.init(title: "`Code`", kind: .sheet, markdown: "## `Code`\n\n| Value |\n| --- |\n| Actual |")])
+        let sheet = try xml(PicoDocsEngine.write(echoed, to: .xlsx), "xl/worksheets/sheet1.xml")
+        #expect(sheet.components(separatedBy: "<row ").count - 1 == 2)
+        #expect(!sheet.contains(">Code</t>"))
+    }
+
     @Test func canonicalLineEndingsFencesAndTabMarkers() throws {
         let expected: [MarkdownBlock] = [.heading(1, "Title"), .code("code"), .paragraph("after")]
         for newline in ["\r\n", "\r", "\n"] {

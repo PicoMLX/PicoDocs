@@ -144,7 +144,7 @@ enum AttributedStringDocumentBuilder {
 
     private static func attributes(size: CGFloat, bold: Bool, italic: Bool, monospace: Bool, link: String?) -> [NSAttributedString.Key: Any] {
         var attrs: [NSAttributedString.Key: Any] = [
-            .font: monospace ? monospacedFont(size: size, bold: bold) : font(size: size, bold: bold, italic: italic)
+            .font: monospace ? monospacedFont(size: size, bold: bold, italic: italic) : font(size: size, bold: bold, italic: italic)
         ]
         if let link, let url = URL(string: link) { attrs[.link] = url }
         return attrs
@@ -159,13 +159,14 @@ enum AttributedStringDocumentBuilder {
         return italic ? applyItalic(base, size: size) : base
     }
 
-    private static func monospacedFont(size: CGFloat, bold: Bool = false) -> PlatformFont {
-        PlatformFont.monospacedSystemFont(ofSize: size, weight: bold ? .bold : .regular)
+    private static func monospacedFont(size: CGFloat, bold: Bool = false, italic: Bool = false) -> PlatformFont {
+        let base = PlatformFont.monospacedSystemFont(ofSize: size, weight: bold ? .bold : .regular)
+        return italic ? applyItalic(base, size: size) : base
     }
 
     private static func applyItalic(_ base: PlatformFont, size: CGFloat) -> PlatformFont {
         #if canImport(AppKit)
-        let descriptor = base.fontDescriptor.withSymbolicTraits(.italic)
+        let descriptor = base.fontDescriptor.withSymbolicTraits(base.fontDescriptor.symbolicTraits.union(.italic))
         return NSFont(descriptor: descriptor, size: size) ?? base
         #else
         guard let descriptor = base.fontDescriptor.withSymbolicTraits(

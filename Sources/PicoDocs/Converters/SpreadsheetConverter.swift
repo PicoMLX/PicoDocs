@@ -34,15 +34,16 @@ public struct SpreadsheetConverter: DocumentConverter {
                 let worksheet = try file.parseWorksheet(at: path)
                 guard let rows = worksheet.data?.rows, !rows.isEmpty else { continue }
 
-                let markdown = Self.markdownTable(rows: rows, sharedStrings: sharedStrings, sheetName: name)
-                guard !markdown.isEmpty else { continue }
+                let table = Self.markdownTable(rows: rows, sharedStrings: sharedStrings, sheetName: name)
+                guard !table.markdown.isEmpty else { continue }
 
                 if let name { sheetNames.append(name) }
                 sections.append(DocumentSection(
                     title: name,
                     kind: .sheet,
-                    markdown: markdown,
-                    sheetName: name
+                    markdown: table.markdown,
+                    sheetName: name,
+                    metadata: ["csv": table.csv]
                 ))
             }
         }
@@ -54,25 +55,28 @@ public struct SpreadsheetConverter: DocumentConverter {
 
     // MARK: - Markdown table
 
-    private static func markdownTable(rows: [Row], sharedStrings: SharedStrings?, sheetName: String?) -> String {
+    private static func markdownTable(rows: [Row], sharedStrings: SharedStrings?, sheetName: String?) -> (markdown: String, csv: String) {
         // Use the widest row as the column count so ragged rows still produce a
         // valid (rectangular) Markdown table.
         let columnCount = rows.map { $0.cells.count }.max() ?? 0
-        guard columnCount > 0 else { return "" }
+        guard columnCount > 0 else { return ("", "") }
 
-        var out = ""
+        var out = "", csvRows: [String] = []
         if let sheetName, !sheetName.isEmpty {
             out += "## \(sheetName)\n\n"
         }
         for (index, row) in rows.enumerated() {
             var values = row.cells.map { cellText($0, sharedStrings: sharedStrings) }
             while values.count < columnCount { values.append("") }
-            out += "| " + values.joined(separator: " | ") + " |\n"
+            // Keep raw cell values separate from the display-oriented Markdown.
+            // Office re-export and CSV output consume this lossless carrier.
+            csvRows.append(values.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: ","))
+            out += "| " + values.map(markdownCell).joined(separator: " | ") + " |\n"
             if index == 0 {
                 out += "| " + Array(repeating: "---", count: columnCount).joined(separator: " | ") + " |\n"
             }
         }
-        return out
+        return (out, csvRows.joined(separator: "\n"))
     }
 
     private static func cellText(_ cell: Cell, sharedStrings: SharedStrings?) -> String {
@@ -86,6 +90,10 @@ public struct SpreadsheetConverter: DocumentConverter {
         } else {
             raw = ""
         }
+        return raw
+    }
+
+    private static func markdownCell(_ raw: String) -> String {
         // Markdown table cells are single-line; escape pipes and flatten newlines
         // (including Windows CRLF and bare CR, common in Excel-on-Windows files).
         return MarkdownTableCell.escapeDelimiters(raw)

@@ -109,7 +109,8 @@ public enum PicoDocsEngine {
         let isEmpty = result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasImages = result.sections.contains { $0.kind == .image }
         let hasCSV = format == .xlsx && result.sections.contains { !($0.metadata["csv"] ?? "").isEmpty }
-        if isEmpty, !hasImages, !hasCSV {
+        let hasSlideTitle = format == .pptx && result.sections.contains { $0.kind == .slide && !($0.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if isEmpty, !hasImages, !hasCSV, !hasSlideTitle {
             throw PicoDocsError.emptyDocument
         }
         // An image-only result carries `.image` byte sections but no body referencing

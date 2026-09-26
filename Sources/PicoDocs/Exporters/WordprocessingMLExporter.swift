@@ -106,8 +106,8 @@ public struct WordprocessingMLExporter: DocumentExporter {
             usedFilenames.insert(mediaFilename)
 
             let image = IndexedImage(data: data, mediaFilename: mediaFilename)
-            if let path = section.sourcePath, !path.isEmpty {
-                byPath[path] = image
+            if let identity = [section.sourcePath, section.title].compactMap({ $0 }).first(where: { !$0.isEmpty }) {
+                byPath[identity] = image
             }
             if let name, !name.isEmpty {
                 basenameCounts[name, default: 0] += 1
