@@ -59,6 +59,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
     private var names: [String] = []
     private var unknownPrefixes: [String: String] = [:]
     private var output = ""
+    private var hasError = false
     private static let prefixes = [
         "http://schemas.openxmlformats.org/presentationml/2006/main": "p",
         "http://schemas.openxmlformats.org/drawingml/2006/main": "a",
@@ -77,7 +78,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         let delegate = PowerPointXML()
         parser.delegate = delegate
         parser.shouldResolveExternalEntities = false
-        guard parser.parse(), !Task.isCancelled else { return nil }
+        guard parser.parse(), !delegate.hasError, !Task.isCancelled else { return nil }
         return delegate.output
     }
 
@@ -85,6 +86,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         let parts = raw.split(separator: ":", maxSplits: 1).map(String.init)
         let prefix = parts.count == 2 ? parts[0] : ""
         let local = parts.last!
+        if parts.count == 2, scope[prefix] == nil, prefix != "xml" { hasError = true }
         guard !attribute || !prefix.isEmpty, let uri = scope[prefix] else { return raw }
         if let canonical = Self.prefixes[uri] { return canonical.isEmpty ? local : canonical + ":" + local }
         // URI identity survives normalization, even for ignorable extensions.
@@ -92,6 +94,9 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         unknownPrefixes[uri] = synthetic
         return synthetic + ":" + local
     }
+
+    func parser(_ parser: XMLParser, parseErrorOccurred parseError: Error) { hasError = true }
+    func parser(_ parser: XMLParser, validationErrorOccurred validationError: Error) { hasError = true }
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes: [String: String]) {
         guard names.count < 128, !Task.isCancelled else { parser.abortParsing(); return }

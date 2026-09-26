@@ -4,6 +4,43 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func notesMasterUsesConversionWideDocumentCache() throws {
+        typealias B = PowerPointConverterTests
+        let notes = "<p:notes \(B.namespaces)>" + B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: ["<a:p><a:r><a:t>Note</a:t></a:r></a:p>"]) + "</p:notes>"
+        let master = "<p:notesMaster \(B.namespaces)><p:cSld><p:spTree/></p:cSld></p:notesMaster>"
+        let rels = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster", "../notesMasters/m.xml")])
+        let entries = [(name: "ppt/notesSlides/n.xml", data: Array(notes.utf8)), (name: "ppt/notesSlides/_rels/n.xml.rels", data: Array(rels.utf8)), (name: "ppt/notesMasters/m.xml", data: Array(master.utf8))]
+        let package = PowerPointPackage(archive: try #require(Archive(data: PagesConverterTests.makeZip(entries), accessMode: .read)), totalLimit: entries.reduce(0) { $0 + $1.data.count })
+        var cache = PowerPointConverter.PartCache(archive: package)
+        let relations = ["notes": PowerPointConverter.Relationship(type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide", target: "../notesSlides/n.xml", external: false)]
+        for _ in 0..<5 { #expect(PowerPointConverter.notes(forSlide: "ppt/slides/s.xml", relationships: relations, archive: package, parts: &cache) == "Note") }
+        try package.check()
+    }
+
+    @Test func malformedXMLNeverNormalizesIntoValidContent() async throws {
+        for source in ["<p:sld><p:cSld/></p:sld>", "<root><child></root>", "<root xmlns:p=\"x\"><p:item></root>"] {
+            #expect(PowerPointXML.normalize(Data(source.utf8)) == nil)
+        }
+        typealias B = PowerPointConverterTests
+        let malformed = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title") + "<unknown:shape/>")])
+        await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: malformed, filename: "bad.pptx") }
+    }
+
+    @Test func pictureAltAndSpreadsheetCellsKeepLiteralInlineSyntax() async throws {
+        typealias B = PowerPointConverterTests
+        let picture = #"<p:pic><p:nvPicPr><p:cNvPr descr="*draft* `code` [copy]"/></p:nvPicPr><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic>"#
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title") + picture, relationships: [("image", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "../media/p.png")])], extraParts: [("ppt/media/p.png", [1,2,3])])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "image.pptx")
+        #expect(try DocumentRenderer.render(result, to: .html).contains(#"alt="*draft* `code` [copy]""#))
+        for format in [ExportFileType.plaintext, .csv] { #expect(try DocumentRenderer.render(result, to: format).contains("*draft* `code` [copy]")) }
+        let worksheet = #"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>*stars* `code` [label](target) \path | &lt;br&gt;</t></is></c></row></sheetData></worksheet>"#
+        let workbook = try await PicoDocsEngine.convert(data: ConverterTests.xlsx(sheetXML: worksheet), filename: "literal.xlsx")
+        for format in [ExportFileType.plaintext, .csv] {
+            #expect(try DocumentRenderer.render(workbook, to: format).contains(#"*stars* `code` [label](target) \path | <br>"#))
+        }
+        #expect(try DocumentRenderer.render(workbook, to: .html).contains(#"*stars* `code` [label](target) \path | &lt;br&gt;"#))
+    }
+
     @Test func sharedRelationshipCacheUsesDistinctPartBudget() throws {
         typealias B = PowerPointConverterTests
         let xml = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster", "../slideMasters/m.xml")])
