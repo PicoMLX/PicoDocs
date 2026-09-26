@@ -228,10 +228,12 @@ final class WordListNumbering {
             counters[id] = nil
             markerWidths[id] = nil
         }
+        lastInstance = lastInstance.filter { !restartAfterBreak.contains($0.key) }
         resumeAlias = nil
     }
 
     private static func formattedNumber(_ value: Int, format: String) -> String {
+        if format == "decimalZero", (0...9).contains(value) { return "0" + String(value) }
         guard value > 0 else { return String(value) }
         if format == "lowerLetter" || format == "upperLetter" {
             var n = value, text = ""

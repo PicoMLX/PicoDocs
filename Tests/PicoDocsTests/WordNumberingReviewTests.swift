@@ -5,6 +5,37 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func sectionBreakClearsLibreOfficeAliasesAndKeepsDecimalZero() throws {
+        let numbering = "<w:numbering \(ns) xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\"><w:abstractNum w:abstractNumId=\"1\" w15:restartNumberingAfterBreak=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"decimalZero\"/><w:lvlText w:val=\"Section %1:\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num><w:num w:numId=\"2\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"0\"><w:startOverride w:val=\"7\"/></w:lvlOverride></w:num></w:numbering>"
+        let data = PagesConverterTests.makeZip([(name: "word/numbering.xml", data: Array(numbering.utf8)), (name: "docProps/app.xml", data: Array("<Properties><Application>LibreOffice</Application></Properties>".utf8))])
+        let resolver = WordListNumbering(archive: try #require(Archive(data: data, accessMode: .read)))
+        func prefix(_ id: Int) throws -> String? {
+            let document = try SwiftSoup.parse("<w:numPr \(ns)><w:numId w:val=\"\(id)\"/></w:numPr>", "", SwiftSoup.Parser.xmlParser())
+            return resolver.prefix(numPr: try document.getElementsByTag("w:numPr").first(), style: nil)
+        }
+        #expect(try prefix(1) == "- Section 01: ")
+        resolver.sectionBreak()
+        #expect(try prefix(2) == "- Section 07: ")
+        #expect(try prefix(1) == "- Section 01: ")
+        for value in 2...9 { #expect(try prefix(1) == "- Section 0\(value): ") }
+        #expect(try prefix(1) == "- Section 10: ")
+    }
+
+    @Test func listChildrenRequireParentContentIndentation() throws {
+        for source in ["- first\n - second", "10. first\n 11. second", "  - first\n- second"] {
+            let result = ConverterResult(sections: [.init(markdown: source)])
+            let html = try DocumentRenderer.render(result, to: .html)
+            #expect(html.components(separatedBy: "<li").count - 1 == 2)
+            #expect(html.components(separatedBy: source.contains("first") && source.contains("10.") ? "<ol" : "<ul").count - 1 == 1)
+        }
+        for source in ["- first\n  - child", "10. first\n    - child", "- first\n\t- child"] {
+            let result = ConverterResult(sections: [.init(markdown: source)])
+            let html = try DocumentRenderer.render(result, to: .html)
+            #expect(html.components(separatedBy: "<ul").count - 1 == (source.hasPrefix("10.") ? 1 : 2))
+            #expect(html.contains("child"))
+        }
+    }
+
     @Test func hiddenParentCountersAdvanceBeforeMarkerSuppression() async throws {
         let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"none\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1.%2.\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
         func paragraph(_ text: String, level: Int) -> String {
