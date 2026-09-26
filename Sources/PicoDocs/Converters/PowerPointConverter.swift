@@ -418,12 +418,13 @@ public struct PowerPointConverter: DocumentConverter {
         var listLines: [String] = []
         var markerWidths: [Int] = []          // marker width per open level
         var schemes: [Int: String] = [:]
+        var starts: [Int: Int] = [:]
         var counters: [Int: Int] = [:]        // numbered-list count per level
         var baseLevel = 0                     // shallowest level in the current list
 
         func flushList() {
             if !listLines.isEmpty { blocks.append(listLines.joined(separator: "\n")) }
-            listLines = []; markerWidths = []; counters = [:]; schemes = [:]
+            listLines = []; markerWidths = []; counters = [:]; schemes = [:]; starts = [:]
         }
 
         for paragraph in body.children().array() where paragraph.tagName().lowercased() == "a:p" {
@@ -444,7 +445,9 @@ public struct PowerPointConverter: DocumentConverter {
                     context.archive.fail(PicoDocsError.fileCorrupted)
                     return []
                 }
-                if schemes[level] != scheme { counters[level] = nil }
+                let explicitStart = properties.flatMap { child(of: $0, named: "a:buautonum") }.flatMap { try? $0.attr("startAt") }.flatMap(Int.init)
+                if schemes[level] != scheme || (explicitStart != nil && starts[level] != start) { counters[level] = nil }
+                if starts[level] == nil || explicitStart != nil { starts[level] = start }
                 schemes[level] = scheme
                 let number = counters[level].map { $0 + 1 } ?? start
                 counters[level] = number
@@ -462,6 +465,7 @@ public struct PowerPointConverter: DocumentConverter {
             }
             // Deeper levels restart their numbering when a shallower item intervenes.
             counters = counters.filter { $0.key <= level }
+            starts = starts.filter { $0.key <= level }
             if marker == "- " { counters[level] = nil }
             // Indent relative to the list's shallowest item, so a list that opens
             // at level 1 (e.g. under a plain paragraph) isn't indented with no parent.
@@ -747,8 +751,12 @@ public struct PowerPointConverter: DocumentConverter {
             archive.relationshipMaps[part] = [:]
             return [:]
         }
+        guard document.children().first()?.tagName().lowercased() == "relationships" else {
+            archive.fail(PicoDocsError.fileCorrupted)
+            return [:]
+        }
         var map: [String: Relationship] = [:]
-        for element in (try? document.getElementsByTag("Relationship").array()) ?? [] {
+        for element in document.children().first()?.children().array() ?? [] where element.tagName().lowercased() == "relationship" {
             guard let id = try? element.attr("Id"), let target = try? element.attr("Target"),
                   !id.isEmpty, !target.isEmpty else { continue }
             map[id] = Relationship(type: (try? element.attr("Type")) ?? "", target: target, external: ((try? element.attr("TargetMode")) ?? "").lowercased() == "external")

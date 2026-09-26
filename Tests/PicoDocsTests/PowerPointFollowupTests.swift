@@ -4,6 +4,27 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func changedExplicitStartsRestartWhileOmittedStartsContinue() async throws {
+        typealias B = PowerPointConverterTests
+        let starts: [Int?] = [1,1,10,nil,10,3,3]
+        let paragraphs = starts.enumerated().map { index, start in
+            let attribute = start.map { " startAt=\"\($0)\"" } ?? ""
+            return "<a:p><a:pPr><a:buAutoNum type=\"arabicPeriod\"\(attribute)/></a:pPr><a:r><a:t>Item \(index)</a:t></a:r></a:p>"
+        }
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.shape(placeholder: nil, paragraphs: paragraphs))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "starts.pptx")
+        #expect(result.markdown() == "1. Item 0\n2. Item 1\n10. Item 2\n11. Item 3\n12. Item 4\n3. Item 5\n4. Item 6")
+    }
+
+    @Test func relationshipPartsRequireTheirOwnRoot() throws {
+        for source in ["<root/>", #"<root><Relationships><Relationship Id="x" Target="foo" Type="bar"/></Relationships></root>"#] {
+            let data = PagesConverterTests.makeZip([(name: "ppt/slides/_rels/s.xml.rels", data: Array(source.utf8))])
+            let package = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
+            #expect(PowerPointConverter.relationships(package, forPart: "ppt/slides/s.xml").isEmpty)
+            #expect(throws: PicoDocsError.fileCorrupted) { try package.check() }
+        }
+    }
+
     @Test func exactSlideRootAndPresentationDefaults() async throws {
         typealias B = PowerPointConverterTests
         let shape = B.shape(placeholder: nil, paragraphs: ["<a:p><a:r><a:t>Defaulted</a:t></a:r></a:p>"])
