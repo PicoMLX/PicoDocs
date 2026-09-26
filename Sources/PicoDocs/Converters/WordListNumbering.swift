@@ -63,7 +63,11 @@ final class WordListNumbering {
     /// The Markdown prefix (indent + marker) for a paragraph, or nil when it isn't
     /// a list item. `numPr` is the paragraph's own `w:numPr`, if any; `style` its
     /// `w:pStyle`, whose (inherited) numbering applies when the paragraph has none.
+    private(set) var lastParagraphList: (instance: String, level: Int)?
+    private var activeMarkerWidths: [Int: Int] = [:]
+
     func prefix(numPr: Element?, style: String?) -> String? {
+        lastParagraphList = nil
         var numID = numPr.flatMap { Self.child(of: $0, named: "w:numid") }.flatMap { try? $0.attr("w:val") }
         var level = numPr.flatMap { Self.child(of: $0, named: "w:ilvl") }.flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
         if numID == nil || level == nil, let inherited = styleNumbering(style) {
@@ -72,6 +76,7 @@ final class WordListNumbering {
         }
         guard let numID = Self.canonicalID(numID), numID != "0" else { return nil }   // numId 0: numbering removed
         let ilvl = min(max(level ?? 0, 0), 8)
+        lastParagraphList = (numID, ilvl)
 
         guard isResolvable, let number = numbers[numID] else {
             return numPr == nil ? nil : "- "   // unknown definition: keep the old bullet
@@ -112,7 +117,9 @@ final class WordListNumbering {
             counters[numID, default: [:]][ilvl] = count
             marker = "\(count). "
         }
-        let indent = (0..<ilvl).reduce(0) { $0 + (markerWidths[numID]?[$1] ?? 2) }
+        activeMarkerWidths = activeMarkerWidths.filter { $0.key < ilvl }
+        let indent = (0..<ilvl).reduce(0) { $0 + (activeMarkerWidths[$1] ?? markerWidths[numID]?[$1] ?? 2) }
+        activeMarkerWidths[ilvl] = marker.count
         markerWidths[numID, default: [:]][ilvl] = marker.count
         return String(repeating: " ", count: indent) + marker
     }

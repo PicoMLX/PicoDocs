@@ -108,7 +108,8 @@ public enum PicoDocsEngine {
         // *unless* it carries image sections (an image-only doc is valid output).
         let isEmpty = result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasImages = result.sections.contains { $0.kind == .image }
-        if isEmpty, !hasImages {
+        let hasCSV = format == .xlsx && result.sections.contains { !($0.metadata["csv"] ?? "").isEmpty }
+        if isEmpty, !hasImages, !hasCSV {
             throw PicoDocsError.emptyDocument
         }
         // An image-only result carries `.image` byte sections but no body referencing

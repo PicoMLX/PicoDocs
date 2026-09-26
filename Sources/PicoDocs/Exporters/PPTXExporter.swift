@@ -25,7 +25,7 @@ public struct PPTXExporter: DocumentExporter {
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .pptx else { throw ExporterError.notAccepted }
 
-        let slides = Self.slides(from: result)
+        let slides = try Self.slides(from: result)
         let count = max(slides.count, 1)
         let effectiveSlides = slides.isEmpty ? [Slide(title: "", body: [])] : slides
 
@@ -53,27 +53,32 @@ public struct PPTXExporter: DocumentExporter {
         let text: String
         var ordered: Bool? = nil
         var number: Int = 1
+        var level: Int = 0
     }
     struct Slide { let title: String; let body: [Paragraph] }
 
-    private static func slides(from result: ConverterResult) -> [Slide] {
+    private static func slides(from result: ConverterResult) throws -> [Slide] {
         // Preserve associated tables, including slides containing only tables.
         let explicit = result.sections.filter { $0.kind == .slide || ($0.slideNumber != nil && $0.kind != .image) }
         if !explicit.isEmpty {
-            var groups: [[DocumentSection]] = []
-            var indices: [Int: Int] = [:]
+            var numbered: [Int: [DocumentSection]] = [:]
+            var unnumberedSlides: [[DocumentSection]] = []
             for section in explicit {
-                if let number = section.slideNumber, let index = indices[number] {
-                    groups[index].append(section)
-                } else {
-                    if let number = section.slideNumber { indices[number] = groups.count }
-                    groups.append([section])
-                }
+                if let number = section.slideNumber, number > 0 {
+                    guard number <= 10_000 else { throw ExporterError.serializationFailed("Slide provenance exceeds the supported deck size") }
+                    numbered[number, default: []].append(section)
+                } else { unnumberedSlides.append([section]) }
             }
+            let maximum = numbered.keys.max() ?? 0
+            var groups = maximum > 0 ? (1...maximum).map { numbered[$0] ?? [] } : []
+            groups += unnumberedSlides
             // Keynote's recovery path may carry text without slide provenance.
             // Keep it as a leading slide rather than losing it when tables exist.
             let unnumbered = result.sections.filter { $0.slideNumber == nil && $0.kind != .slide && $0.kind != .image }
-            if !unnumbered.isEmpty { groups.insert(unnumbered, at: 0) }
+            if !unnumbered.isEmpty {
+                if groups.first?.isEmpty == true { groups[0] = unnumbered }
+                else { groups.append(unnumbered) }
+            }
             return groups.map { sections in
                 Slide(title: sections.first(where: { $0.kind == .slide })?.title ?? "",
                       body: sections.flatMap { bodyLines(MarkdownBlockParser.parse($0.markdown)) })
@@ -111,11 +116,11 @@ public struct PPTXExporter: DocumentExporter {
             case .heading(_, let text):
                 lines.append(Paragraph(text: plain(text)))
             case .paragraph(let text):
-                for line in text.components(separatedBy: "\n") where !line.isEmpty {
-                    lines.append(Paragraph(text: plain(line)))
+                lines.append(Paragraph(text: plain(normalizedBreaks(text))))
+            case .list(let list):
+                for item in list.paragraphs() {
+                    lines.append(Paragraph(text: plain(normalizedBreaks(item.text)), ordered: item.continuation ? nil : item.ordered, number: item.number ?? 1, level: item.level))
                 }
-            case .list(let ordered, let items):
-                for (index, item) in items.enumerated() { lines.append(Paragraph(text: plain(item), ordered: ordered, number: index + 1)) }
             case .code(let code):
                 for line in code.components(separatedBy: "\n") { lines.append(Paragraph(text: line)) }
             case .blockquote(let quoteLines):
@@ -127,6 +132,16 @@ public struct PPTXExporter: DocumentExporter {
             }
         }
         return lines
+    }
+
+    private static func normalizedBreaks(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        return lines.enumerated().map { index, line in
+            guard index + 1 < lines.count else { return line }
+            if line.hasSuffix("\\") { return String(line.dropLast()) + "\n" }
+            if line.hasSuffix("  ") { return line.trimmingCharacters(in: .whitespaces) + "\n" }
+            return line + " "
+        }.joined()
     }
 
     private static func plain(_ markdown: String) -> String {
@@ -144,11 +159,12 @@ public struct PPTXExporter: DocumentExporter {
             bodyParagraphs = slide.body.map { paragraph in
                 let properties: String
                 switch paragraph.ordered {
-                case true?: properties = "<a:pPr><a:buAutoNum type=\"arabicPeriod\" startAt=\"\(paragraph.number)\"/></a:pPr>"
-                case false?: properties = "<a:pPr><a:buChar char=\"•\"/></a:pPr>"
+                case true?: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buAutoNum type=\"arabicPeriod\" startAt=\"\(paragraph.number)\"/></a:pPr>"
+                case false?: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buChar char=\"•\"/></a:pPr>"
                 case nil: properties = "<a:pPr><a:buNone/></a:pPr>"
                 }
-                return "<a:p>\(properties)<a:r><a:t>\(OOXMLPackageWriter.escape(paragraph.text))</a:t></a:r></a:p>"
+                let runs = paragraph.text.components(separatedBy: "\n").map { "<a:r><a:t>\(OOXMLPackageWriter.escape($0))</a:t></a:r>" }.joined(separator: "<a:br/>")
+                return "<a:p>\(properties)\(runs)</a:p>"
             }.joined()
         }
         return OOXMLPackageWriter.xmlDeclaration + """

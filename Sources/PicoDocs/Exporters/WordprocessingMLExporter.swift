@@ -63,8 +63,12 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
         func lookup(_ source: String) -> IndexedImage? {
             if let image = byPath[source] { return image }
-            return byBasename[(source as NSString).lastPathComponent]
+            return byBasename[WordprocessingMLExporter.portableBasename(source)]
         }
+    }
+
+    private static func portableBasename(_ path: String) -> String {
+        (path.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent
     }
 
     private static func imageIndex(_ sections: [DocumentSection]) -> ImageIndex {
@@ -78,7 +82,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                   let data = Data(base64Encoded: base64) else { continue }
 
             // The carrier's display name (basename of the source path, else title).
-            let name = (section.sourcePath as NSString?)?.lastPathComponent ?? (section.title as NSString?)?.lastPathComponent
+            let name = [section.sourcePath, section.title].compactMap { $0 }.first { !$0.isEmpty }.map(portableBasename)
             // Pick a stem + extension; fall back to the declared MIME for the
             // extension so a name like "logo" (or no name) still gets a type Office
             // recognizes rather than `.bin`/octet-stream.
@@ -89,7 +93,10 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
             // Allocate a unique media filename (suffix on basename collisions) so
             // distinct images never share one `word/media/<file>` part.
-            let base = stem.isEmpty ? "image\(usedFilenames.count + 1)" : stem
+            let invalidFilename = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: ":\\/?*<>|\""))
+            let safeStem = String(stem.unicodeScalars.map { invalidFilename.contains($0) ? "_" : Character($0) }).trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            let base = safeStem.isEmpty ? "image\(usedFilenames.count + 1)" : safeStem
+            if ext.unicodeScalars.contains(where: invalidFilename.contains) { ext = OfficeMediaType.fileExtension(forMIME: mime ?? "") }
             var mediaFilename = "\(base).\(ext)"
             var n = 2
             while usedFilenames.contains(mediaFilename) {
@@ -125,7 +132,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         private(set) var media: [(filename: String, data: Data)] = []
         private(set) var mediaExtensions: Set<String> = []
         private(set) var usedBullet = false
-        private(set) var orderedNumIds: [Int] = []
+        private(set) var orderedNumIds: [(id: Int, level: Int, start: Int)] = []
 
         /// Numbering is needed when any list (bullet or ordered) was emitted.
         var usedNumbering: Bool { usedBullet || !orderedNumIds.isEmpty }
@@ -168,23 +175,8 @@ public struct WordprocessingMLExporter: DocumentExporter {
                     body += paragraph(pPr: pPr, content: inlineRuns(line))
                 }
 
-            case .list(let ordered, let items):
-                // Each ordered list gets its own numbering instance so Word restarts
-                // it at 1 instead of continuing the previous list; bullets can all
-                // share one instance (their marker doesn't accumulate).
-                let numId: Int
-                if ordered {
-                    numId = nextOrderedNumId
-                    nextOrderedNumId += 1
-                    orderedNumIds.append(numId)
-                } else {
-                    usedBullet = true
-                    numId = 1
-                }
-                let pPr = "<w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"\(numId)\"/></w:numPr></w:pPr>"
-                for item in items {
-                    body += paragraph(pPr: pPr, content: inlineRuns(item.replacingOccurrences(of: "\n", with: " ")))
-                }
+            case .list(let list):
+                appendList(list)
 
             case .table(let rows):
                 body += table(rows)
@@ -193,6 +185,33 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 // A bottom-bordered empty paragraph. WordConverter drops empty
                 // paragraphs, so a rule simply doesn't survive round-trip (acceptable).
                 body += "<w:p><w:pPr><w:pBdr><w:bottom w:val=\"single\" w:sz=\"6\" w:space=\"1\" w:color=\"auto\"/></w:pBdr></w:pPr></w:p>"
+            }
+        }
+
+        private func appendList(_ list: MarkdownList, level: Int = 0) {
+            let level = min(level, 8)
+            var numId = 1
+            var expected = list.items.first?.number ?? 1
+            func allocate(_ start: Int) -> Int {
+                let id = nextOrderedNumId
+                nextOrderedNumId += 1
+                orderedNumIds.append((id, level, start))
+                return id
+            }
+            if list.ordered { numId = allocate(expected) } else { usedBullet = true }
+            for item in list.items {
+                if let number = item.number, number != expected { numId = allocate(number) }
+                if let number = item.number { expected = min(number, Int.max - 1) + 1 }
+                for (index, content) in item.content.enumerated() {
+                    switch content {
+                    case .text(let text):
+                        let pPr = index == 0
+                            ? "<w:pPr><w:numPr><w:ilvl w:val=\"\(level)\"/><w:numId w:val=\"\(numId)\"/></w:numPr></w:pPr>"
+                            : "<w:pPr><w:ind w:left=\"\((level + 1) * 720)\"/></w:pPr>"
+                        body += paragraph(pPr: pPr, content: inlineRuns(text))
+                    case .list(let child): appendList(child, level: level + 1)
+                    }
+                }
             }
         }
 
@@ -443,32 +462,20 @@ public struct WordprocessingMLExporter: DocumentExporter {
     /// to a single shared instance (`numId` 1); every ordered list gets its own
     /// `numId` over a shared decimal abstract definition, each with a `startOverride`
     /// of 1 so Word restarts separate lists instead of continuing the count.
-    private static func numberingXML(usedBullet: Bool, orderedNumIds: [Int]) -> String {
-        var abstracts = ""
-        if usedBullet {
-            abstracts += """
-            <w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/>\
-            <w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>
-            """
+    private static func numberingXML(usedBullet: Bool, orderedNumIds: [(id: Int, level: Int, start: Int)]) -> String {
+        func levels(ordered: Bool) -> String {
+            (0..<9).map { level in
+                "<w:lvl w:ilvl=\"\(level)\"><w:start w:val=\"1\"/><w:numFmt w:val=\"\(ordered ? "decimal" : "bullet")\"/><w:lvlText w:val=\"\(ordered ? "%\(level + 1)." : "•")\"/><w:pPr><w:ind w:left=\"\((level + 1) * 720)\" w:hanging=\"360\"/></w:pPr></w:lvl>"
+            }.joined()
         }
+        var definitions = ""
+        if usedBullet { definitions += "<w:abstractNum w:abstractNumId=\"0\">\(levels(ordered: false))</w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num>" }
         if !orderedNumIds.isEmpty {
-            abstracts += """
-            <w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>\
-            <w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>
-            """
+            definitions += "<w:abstractNum w:abstractNumId=\"1\">\(levels(ordered: true))</w:abstractNum>"
+            for instance in orderedNumIds {
+                definitions += "<w:num w:numId=\"\(instance.id)\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"\(instance.level)\"><w:startOverride w:val=\"\(instance.start)\"/></w:lvlOverride></w:num>"
+            }
         }
-        var nums = ""
-        if usedBullet {
-            nums += "<w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num>"
-        }
-        for numId in orderedNumIds {
-            nums += """
-            <w:num w:numId="\(numId)"><w:abstractNumId w:val="1"/>\
-            <w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride></w:num>
-            """
-        }
-        return OOXMLPackageWriter.xmlDeclaration + """
-        <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">\(abstracts)\(nums)</w:numbering>
-        """
+        return OOXMLPackageWriter.xmlDeclaration + "<w:numbering xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\(definitions)</w:numbering>"
     }
 }

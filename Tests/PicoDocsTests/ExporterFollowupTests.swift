@@ -4,6 +4,73 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func structuredEmphasisFlankingAndLiteralPaths() {
+        #expect(MarkdownInlineParser.parse("**before `code` after**") == [.strong([.text("before "), .code("code"), .text(" after")])])
+        #expect(MarkdownInlineParser.parse("*see [link](https://example.com)*") == [.emphasis([.text("see "), .link(label: [.text("link")], destination: "https://example.com")])])
+        #expect(MarkdownInlineParser.parse("2 * 3 * 4").plainText == "2 * 3 * 4")
+        #expect(MarkdownInlineParser.parse(#"![x](C:\images\pic.png)"#) == [.image(alt: "x", source: #"C:\images\pic.png"#)])
+    }
+
+    @Test func listStartsAndNestingSurviveOfficeRoundTrips() async throws {
+        let source = "3. Parent\n   1. Child\n      - Grandchild\n4. Next"
+        var result = ConverterResult(sections: [.init(markdown: source)])
+        for _ in 0..<2 {
+            let docx = try PicoDocsEngine.write(result, to: .docx)
+            let document = try xml(docx, "word/document.xml")
+            #expect(document.contains(#"w:ilvl w:val="1""#))
+            #expect(document.contains(#"w:ilvl w:val="2""#))
+            #expect(try xml(docx, "word/numbering.xml").contains(#"w:startOverride w:val="3""#))
+            result = try await PicoDocsEngine.convert(data: docx, filename: "nested.docx")
+            #expect(result.markdown().contains("3. Parent\n   1. Child\n      - Grandchild\n4. Next"))
+        }
+        let pptx = try PicoDocsEngine.write(result, to: .pptx)
+        let slide = try xml(pptx, "ppt/slides/slide1.xml")
+        #expect(slide.contains(#"<a:pPr lvl="1"><a:buAutoNum type="arabicPeriod" startAt="1""#))
+        #expect(slide.contains(#"startAt="3""#))
+    }
+
+    @Test func imagePathsCSVMetadataCellLimitsAndSlideGaps() throws {
+        for (path, title, reference) in [(#"C:\images\pic.png"#, "pic.png", #"C:\images\pic.png"#), ("", "logo.png", "logo.png")] {
+            let image = DocumentSection(title: title, kind: .image, markdown: "", sourcePath: path, metadata: ["base64": "AQID", "mimeType": "image/png"])
+            let result = ConverterResult(sections: [.init(markdown: "![Image](\(reference))"), image])
+            let data = try PicoDocsEngine.write(result, to: .docx)
+            #expect(try xml(data, "word/document.xml").contains("<w:drawing>"))
+            let archive = try #require(Archive(data: data, accessMode: .read))
+            for entry in archive where entry.path.hasPrefix("word/media/") {
+                #expect(!entry.path.contains("\\"))
+                #expect(!entry.path.contains(":"))
+            }
+        }
+        let csvOnly = ConverterResult(sections: [.init(kind: .sheet, markdown: "", metadata: ["csv": "A,B\n1,2"])])
+        #expect(try xml(PicoDocsEngine.write(csvOnly, to: .xlsx), "xl/worksheets/sheet1.xml").contains(">A</t>"))
+        #expect(throws: ExporterError.self) { try PicoDocsEngine.write(markdown: String(repeating: "x", count: 32_768), to: .xlsx) }
+        let deck = ConverterResult(sections: [.init(kind: .slide, markdown: "Third", slideNumber: 3), .init(kind: .slide, markdown: "First", slideNumber: 1)])
+        let pptx = try PicoDocsEngine.write(deck, to: .pptx)
+        #expect(try xml(pptx, "ppt/slides/slide1.xml").contains("First"))
+        #expect(try xml(pptx, "ppt/slides/slide2.xml").contains("<a:p/>"))
+        #expect(try xml(pptx, "ppt/slides/slide3.xml").contains("Third"))
+    }
+
+    @Test func slideBreaksSpaceCodeAndTableNumbering() async throws {
+        let pptx = try PicoDocsEngine.write(markdown: "first\nsecond\n\nfirst\\\nsecond", to: .pptx)
+        let slide = try xml(pptx, "ppt/slides/slide1.xml")
+        #expect(slide.contains("first second</a:t>"))
+        #expect(slide.contains("first</a:t></a:r><a:br/><a:r><a:t>second"))
+        var result = ConverterResult(sections: [.init(markdown: "` `")])
+        for _ in 0..<3 {
+            result = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(result, to: .docx), filename: "space.docx")
+            #expect(MarkdownInlineParser.parse(result.markdown()) == [.code(" ")])
+        }
+        let ns = #"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        func paragraph(_ text: String) -> String { "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>" }
+        let document = "<w:document \(ns)><w:body>" + paragraph("Before") + "<w:tbl><w:tr><w:tc>" + paragraph("Inside") + "</w:tc></w:tr></w:tbl>" + paragraph("After") + "</w:body></w:document>"
+        let data = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8))])
+        let numbered = try await PicoDocsEngine.convert(data: data, filename: "table.docx").markdown()
+        #expect(numbered.contains("2. Inside"))
+        #expect(numbered.contains("3. After"))
+    }
+
     @Test func completeCodeDelimitersAndMalformedDestinations() async throws {
         #expect(MarkdownInlineParser.parse("Use ``a`b`` now") == [.text("Use "), .code("a`b"), .text(" now")])
         #expect(MarkdownInlineParser.parse("`` `x` ``") == [.code("`x`")])
@@ -119,7 +186,7 @@ struct ExporterFollowupTests {
             #expect(try xml(data, "_rels/.rels").contains("metadata/core-properties"))
         }
         let pptx = try PicoDocsEngine.write(result, to: .pptx)
-        #expect(try xml(pptx, "ppt/slides/slide1.xml").contains("first\nsecond"))
+        #expect(try xml(pptx, "ppt/slides/slide1.xml").contains("first</a:t></a:r><a:br/><a:r><a:t>second"))
         #if canImport(AppKit) || canImport(UIKit)
         let rtf = try PicoDocsEngine.write(result, to: .rtf)
         let text = String(decoding: rtf, as: UTF8.self)

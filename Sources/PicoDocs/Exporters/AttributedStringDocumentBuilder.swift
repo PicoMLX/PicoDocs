@@ -81,11 +81,11 @@ enum AttributedStringDocumentBuilder {
                 output.append(NSAttributedString(string: "\n"))
             }
 
-        case .list(let ordered, let items):
-            for (i, item) in items.enumerated() {
-                let marker = ordered ? "\(i + 1).\t" : "•\t"
+        case .list(let list):
+            for item in list.paragraphs() {
+                let marker = String(repeating: "\t", count: item.level) + (item.continuation ? "" : item.ordered ? "\(item.number ?? 1).\t" : "•\t")
                 output.append(NSAttributedString(string: marker, attributes: [.font: bodyFont()]))
-                output.append(inline(item))
+                output.append(inline(item.text))
                 output.append(NSAttributedString(string: "\n"))
             }
 

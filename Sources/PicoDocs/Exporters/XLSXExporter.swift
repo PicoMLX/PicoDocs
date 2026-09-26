@@ -26,6 +26,9 @@ public struct XLSXExporter: DocumentExporter {
         var usedNames = Set<String>()
         for section in result.sections where section.kind != .image {
             let rows = Self.rows(for: section)
+            guard rows.allSatisfy({ $0.allSatisfy { $0.utf16.count <= 32_767 } }) else {
+                throw ExporterError.serializationFailed("Worksheet cell exceeds Excel's 32,767-character limit")
+            }
             try Self.validateDimensions(rows: rows.count, columns: rows.map(\.count).max() ?? 0)
             let name = Self.uniqueSheetName(section, index: sheets.count + 1, used: &usedNames)
             sheets.append((name, rows))
@@ -88,8 +91,8 @@ public struct XLSXExporter: DocumentExporter {
                 for line in text.components(separatedBy: "\n") where !line.isEmpty {
                     rows.append([plain(line)])
                 }
-            case .list(_, let items):
-                for item in items { rows.append([plain(item)]) }
+            case .list(let list):
+                for item in list.paragraphs() { rows.append([plain(item.text)]) }
             case .code(let code):
                 for line in code.components(separatedBy: "\n") { rows.append([line]) }
             case .blockquote(let lines):

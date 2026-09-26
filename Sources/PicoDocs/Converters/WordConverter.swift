@@ -99,17 +99,21 @@ public struct WordConverter: DocumentConverter {
     static func renderBlocks(in container: Element, relationships: [String: String], numbering: WordListNumbering? = nil) throws -> [String] {
         var blocks: [String] = []
         var previousList: MarkdownBlockParser.ListKind?
+        var rootListInstance: String?
         for element in container.children().array() {
             try Task.checkCancellation()
             switch element.tagName().lowercased() {
             case "w:p":
                 if let markdown = renderParagraph(element, relationships: relationships, numbering: numbering), !markdown.isEmpty {
                     let marker = MarkdownBlockParser.listMarker(markdown.trimmingCharacters(in: .whitespaces))
-                    if marker != nil, marker == previousList, !blocks.isEmpty,
-                       !markdown.trimmingCharacters(in: .whitespaces).hasPrefix("1. ") {
+                    let identity = marker == nil ? nil : numbering?.lastParagraphList
+                    let joins = identity.map { $0.level > 0 || $0.instance == rootListInstance } ?? (marker != nil && marker == previousList)
+                    if joins, previousList != nil, !blocks.isEmpty {
                         blocks[blocks.count - 1] += "\n" + markdown
                     } else { blocks.append(markdown) }
                     previousList = marker
+                    if let identity, identity.level == 0 { rootListInstance = identity.instance }
+                    if marker == nil { rootListInstance = nil }
                 }
             case "w:tbl":
                 previousList = nil
@@ -278,7 +282,7 @@ public struct WordConverter: DocumentConverter {
         if (try? properties?.getElementsByTag("w:rStyle").first()?.attr("w:val")) == "PicoCode" {
             let code = codeText(run)
             let delimiter = String(repeating: "`", count: max(1, (code.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0) + 1))
-            let pad = code.hasPrefix("`") || code.hasSuffix("`") || (code.hasPrefix(" ") && code.hasSuffix(" ")) ? " " : ""
+            let pad = code.hasPrefix("`") || code.hasSuffix("`") || (code.hasPrefix(" ") && code.hasSuffix(" ") && code.contains(where: { $0 != " " })) ? " " : ""
             return delimiter + pad + code + pad + delimiter
         }
         let bold = isFormattingEnabled(properties, tag: "w:b")
@@ -389,7 +393,7 @@ public struct WordConverter: DocumentConverter {
                 // own cells still render — see isInsideTextBox.)
                 for paragraph in (try? tc.getElementsByTag("w:p").array()) ?? [] {
                     if isInsideTextBox(paragraph, before: tc) { continue }
-                    let t = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
+                    let t = (renderParagraph(paragraph, relationships: relationships, numbering: numbering) ?? "").trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.

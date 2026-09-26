@@ -73,17 +73,13 @@ enum MarkdownInlineParser {
             if let close = lastTick[tick.length] { nextTicks[tick.start] = (close, tick.length) }
             lastTick[tick.length] = tick.start
         }
-        var nodes: [MarkdownInline] = []
+        var structured: [MarkdownInline] = []
         var run = ""
         var i = 0
-
-        func flush() {
-            if !run.isEmpty {
-                nodes.append(contentsOf: parseEmphasis(run))
-                run = ""
-            }
+        func append(_ node: MarkdownInline) {
+            run += "\u{E020}\(structured.count)\u{E021}"
+            structured.append(node)
         }
-
         while i < chars.count {
             let c = chars[i]
 
@@ -94,10 +90,9 @@ enum MarkdownInlineParser {
             // Code delimiters match the complete run; content is literal.
             if c == "`" {
                 if let (close, length) = nextTicks[i] {
-                    flush()
                     var code = String(chars[(i + length)..<close]).replacingOccurrences(of: "\n", with: " ")
                     if code.hasPrefix(" "), code.hasSuffix(" "), code.contains(where: { $0 != " " }) { code = String(code.dropFirst().dropLast()) }
-                    nodes.append(.code(code))
+                    append(.code(code))
                     i = close + length
                 } else {
                     repeat { run.append(chars[i]); i += 1 } while i < chars.count && chars[i] == "`"
@@ -108,8 +103,7 @@ enum MarkdownInlineParser {
             // Image: ![alt](dest)
             if c == "!", i + 1 < chars.count, chars[i + 1] == "[",
                let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: nextBracket[min(i + 2, chars.count)], parenCloses: parenCloses, nextAngle: nextAngle) {
-                flush()
-                nodes.append(parsed.node)
+                append(parsed.node)
                 i = parsed.next
                 continue
             }
@@ -120,16 +114,14 @@ enum MarkdownInlineParser {
                    let close = nextBracket[min(i + 2, chars.count)] {
                     let id = String(chars[(i + 2)..<close])
                     if !id.isEmpty {
-                        flush()
-                        nodes.append(.footnoteReference(id))
+                        append(.footnoteReference(id))
                         i = close + 1
                         continue
                     }
                 }
                 // Link: [label](dest)
                 if let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: nextBracket[min(i + 1, chars.count)], parenCloses: parenCloses, nextAngle: nextAngle) {
-                    flush()
-                    nodes.append(parsed.node)
+                    append(parsed.node)
                     i = parsed.next
                     continue
                 }
@@ -138,8 +130,28 @@ enum MarkdownInlineParser {
             run.append(c)
             i += 1
         }
-        flush()
-        return nodes
+        func restore(_ nodes: [MarkdownInline]) -> [MarkdownInline] {
+            nodes.flatMap { node -> [MarkdownInline] in
+                switch node {
+                case .text(let text):
+                    let ns = text as NSString
+                    let pattern = try! NSRegularExpression(pattern: "\u{E020}([0-9]+)\u{E021}")
+                    var output: [MarkdownInline] = [], offset = 0
+                    for match in pattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                        if match.range.location > offset { output.append(.text(ns.substring(with: NSRange(location: offset, length: match.range.location - offset)))) }
+                        if let index = Int(ns.substring(with: match.range(at: 1))), structured.indices.contains(index) { output.append(structured[index]) }
+                        else { output.append(.text(ns.substring(with: match.range))) }
+                        offset = NSMaxRange(match.range)
+                    }
+                    if offset < ns.length { output.append(.text(ns.substring(from: offset))) }
+                    return output
+                case .strong(let children): return [.strong(restore(children))]
+                case .emphasis(let children): return [.emphasis(restore(children))]
+                default: return [node]
+                }
+            }
+        }
+        return restore(parseEmphasis(run))
     }
 
     // MARK: - Link / image
@@ -185,21 +197,21 @@ enum MarkdownInlineParser {
     /// text that `WordConverter` (and CommonMark authors) escape.
     private static func unescape(_ text: String) -> String {
         guard text.contains("\\") else { return text }
-        var out = ""
-        var escaped = false
-        for ch in text {
-            if escaped { out.append(ch); escaped = false }
-            else if ch == "\\" { escaped = true }
-            else { out.append(ch) }
+        var out = "", index = text.startIndex
+        let punctuation = ##"!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"##
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            if text[index] == "\\", next < text.endIndex, punctuation.contains(text[next]) {
+                out.append(text[next]); index = text.index(after: next)
+            } else { out.append(text[index]); index = next }
         }
-        if escaped { out.append("\\") }
         return out
     }
 
     // MARK: - Emphasis
 
     private static let emphasisRegex = try! NSRegularExpression(
-        pattern: #"\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|\*(.+?)\*"#)
+        pattern: #"\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*|\*\*(?=\S)(.+?)(?<=\S)\*\*|\*(?=\S)(.+?)(?<=\S)\*"#)
 
     static func parseEmphasis(_ text: String) -> [MarkdownInline] {
         var protected = "", escapes: [String] = []

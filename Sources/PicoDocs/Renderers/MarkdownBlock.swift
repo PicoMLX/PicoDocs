@@ -23,7 +23,7 @@ enum MarkdownBlock: Equatable {
     case paragraph(String)
     case code(String)
     case blockquote([String])
-    case list(ordered: Bool, items: [String])
+    case list(MarkdownList)
     case table([[String]])
     case rule
 }
@@ -94,20 +94,9 @@ enum MarkdownBlockParser {
             }
 
             if listMarker(trimmed) != nil {
-                let ordered = listMarker(trimmed) == .ordered
-                var items: [String] = []
-                while i < lines.count {
-                    let itemLine = lines[i].trimmingCharacters(in: .whitespaces)
-                    if let marker = listMarker(itemLine), (marker == .ordered) == ordered {
-                        items.append(stripListMarker(itemLine)); i += 1
-                    } else if !isBlank(lines[i]), lines[i].hasPrefix("  "), !items.isEmpty {
-                        items[items.count - 1] += "\n" + lines[i].trimmingCharacters(in: .whitespaces)
-                        i += 1
-                    } else {
-                        break
-                    }
-                }
-                blocks.append(.list(ordered: ordered, items: items)); continue
+                if let list = MarkdownList.parse(lines, index: &i) { blocks.append(.list(list)) }
+                else { blocks.append(.paragraph(lines[i])); i += 1 }
+                continue
             }
 
             // Paragraph: gather until a blank line or a structural line.
