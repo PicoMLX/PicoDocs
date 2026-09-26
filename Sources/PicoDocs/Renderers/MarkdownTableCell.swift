@@ -13,7 +13,7 @@ import Foundation
 
 enum MarkdownTableCell {
     /// Transform semantic code spans separately from canonical literal text.
-    static func mapCodeSpans(_ text: String, code: (String) -> String, plain: (String) -> String) -> String {
+    static func mapCodeSpans(_ text: String, keepDelimiters: Bool = true, code: (String) -> String, plain: (String) -> String) -> String {
         let chars = Array(text)
         var runs: [(Int, Int)] = [], index = 0
         while index < chars.count {
@@ -35,7 +35,7 @@ enum MarkdownTableCell {
                 buffer.append(chars[index]); buffer.append(chars[index + 1]); index += 2
             } else if chars[index] == "`", let (close, length) = closers[index] {
                 output += plain(buffer); buffer = ""
-                let delimiter = String(repeating: "`", count: length)
+                let delimiter = keepDelimiters ? String(repeating: "`", count: length) : ""
                 output += delimiter + code(String(chars[(index + length)..<close])) + delimiter
                 index = close + length
             } else {

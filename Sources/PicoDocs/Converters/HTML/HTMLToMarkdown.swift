@@ -167,7 +167,7 @@ enum HTMLToMarkdown {
     }
 
     private static func canonicalDestination(_ url: String) -> String {
-        let escaped = url.replacingOccurrences(of: "\\", with: "\\\\")
+        let escaped = url.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E")
         return escaped.contains(where: { $0.isWhitespace || $0 == "(" || $0 == ")" }) ? "<\(escaped)>" : escaped
     }
 

@@ -556,7 +556,7 @@ public enum DocumentRenderer {
                 && (listMarker(lines[next].trimmingCharacters(in: .whitespaces)) ?? bareListMarker(lines[next].trimmingCharacters(in: .whitespaces))) == leadingBare
             var following = next
             while following < lines.count, isBlank(lines[following]) { following += 1 }
-            let nestedTable = following < lines.count && indentWidth(lines[following]) >= indentWidth(line) + 2
+            let nestedTable = following < lines.count && indentWidth(lines[following]) >= indentWidth(line) + trimmed.count + 1
                 && lines[following].trimmingCharacters(in: .whitespaces).hasPrefix("|")
             let confirmedBare = leadingBare != nil && (adjacent || nestedTable)
             if listMarker(trimmed) != nil || confirmedBare {
@@ -740,25 +740,14 @@ public enum DocumentRenderer {
     /// don't rewrite Markdown metacharacters inside code.
     private static func extractCodeSpans(_ text: String) -> (text: String, spans: [String]) {
         var spans: [String] = []
-        var result = ""
-        var index = text.startIndex
-        while index < text.endIndex {
-            let next = text.index(after: index)
-            // Backslash escapes outside code cannot open a code span. Inside
-            // a real span, backslashes remain literal as required by Markdown.
-            if text[index] == "\\", next < text.endIndex {
-                result.append(text[index]); result.append(text[next])
-                index = text.index(after: next)
-            } else if text[index] == "`",
-               let close = text[text.index(after: index)...].firstIndex(of: "`") {
-                spans.append(String(text[text.index(after: index)..<close]))
-                result += "\(codeOpen)\(spans.count - 1)\(codeClose)"
-                index = text.index(after: close)
-            } else {
-                result.append(text[index])
-                index = text.index(after: index)
+        let result = MarkdownTableCell.mapCodeSpans(text, keepDelimiters: false, code: { raw in
+            var content = raw.replacingOccurrences(of: "\r\n", with: " ").replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ")
+            if content.hasPrefix(" "), content.hasSuffix(" "), content.contains(where: { $0 != " " }) {
+                content = String(content.dropFirst().dropLast())
             }
-        }
+            spans.append(content)
+            return "\(codeOpen)\(spans.count - 1)\(codeClose)"
+        }, plain: { $0 })
         return (result, spans)
     }
 

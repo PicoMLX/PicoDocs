@@ -286,7 +286,7 @@ enum IWATable {
                 fragment = false
                 switch renderParagraph(body, start ..< index, objects: objects) {
                 case .heading(let text)?, .body(let text)?:
-                    let rendered = lists.lastList == nil ? text : text.components(separatedBy: "\n").map {
+                    let rendered = lists.lastList == nil ? text : listLines(text).map {
                         String(repeating: " ", count: lists.markerWidth) + escapingListMarker($0)
                     }.joined(separator: "\n")
                     parts.append((rendered, false))
@@ -393,7 +393,11 @@ enum IWATable {
     /// would end the item). Each line's leading list-marker-like text is escaped so
     /// it stays literal content rather than opening a nested list.
     private static func listItem(_ marker: String, _ text: String) -> String {
-        let softBreaks: Set<Unicode.Scalar> = ["\u{2028}", "\u{000B}", "\u{000C}"]
+        marker + listLines(text).joined(separator: "\n" + String(repeating: " ", count: marker.count))
+    }
+
+    private static func listLines(_ text: String) -> [String] {
+        let softBreaks: Set<Unicode.Scalar> = ["\n", "\r", "\u{2028}", "\u{000B}", "\u{000C}"]
         var lines: [String] = []
         var line = String.UnicodeScalarView()
         var atLineStart = false
@@ -409,8 +413,7 @@ enum IWATable {
             line.append(scalar)
         }
         if !atLineStart { lines.append(String(line)) }
-        let indent = String(repeating: " ", count: marker.count)
-        return marker + lines.map(escapingListMarker).joined(separator: "\n" + indent)
+        return lines.map(escapingListMarker)
     }
 
     /// `line` with a leading list marker (`- x`, `* x`, `+ x`, `1. x`, `1) x`)
@@ -561,7 +564,7 @@ enum IWATable {
     /// Spaces or parentheses break a bare inline-link destination; wrap such URLs in
     /// `<>` (a valid CommonMark destination form).
     private static func escapeLinkDestination(_ url: String) -> String {
-        let url = url.replacingOccurrences(of: "\\", with: "\\\\")
+        let url = url.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E")
         return (url.contains(" ") || url.contains("(") || url.contains(")")) ? "<\(url)>" : url
     }
 

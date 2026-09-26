@@ -14,6 +14,41 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func longBareMarkerOnlyConfirmsAnAttachedTable() throws {
+        let prose = ConverterResult(sections: [.init(markdown: "1234.\n\n  | A |\n  | --- |")])
+        let html = try DocumentRenderer.render(prose, to: .html)
+        #expect(html.contains("<p>1234.</p>")); #expect(!html.contains("<ol"))
+        let attached = ConverterResult(sections: [.init(markdown: "1234.\n\n      | A |\n      | --- |")])
+        #expect(try DocumentRenderer.render(attached, to: .html).contains(#"<ol start="1234">"#))
+    }
+
+    @Test func angleDestinationsAndWordImageAltRemainLiteral() async throws {
+        let converted = try HTMLToMarkdown.convert(html: #"<a href="foo&gt; bar&lt;">Link</a>"#)
+        let html = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: converted.markdown)]), to: .html)
+        #expect(html.contains(#"href="foo%3E bar%3C""#))
+        let document = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:body><w:p><w:r><w:drawing><wp:docPr descr="\* icon `literal`"/><a:blip r:embed="image"/></w:drawing></w:r></w:p></w:body></w:document>"#
+        let rels = #"<Relationships><Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image.png"/></Relationships>"#
+        let result = try await PicoDocsEngine.convert(data: Self.makeZip([(name: "word/document.xml",data: Array(document.utf8)),(name: "word/_rels/document.xml.rels",data: Array(rels.utf8))]), filename: "alt.docx")
+        for format in [ExportFileType.html,.plaintext,.csv] { #expect(try DocumentRenderer.render(result, to: format).contains(#"\* icon `literal`"#)) }
+    }
+
+    @Test func inlineTableTailSoftBreaksStayInsideTheirListItem() async throws {
+        for separator in ["\u{2028}","\u{000B}","\u{000C}"] {
+            let data = Self.makeListPagesFile(text: "a \u{FFFC} b" + separator + "- literal\nNext", style: .ordered, restarts: [], tableCell: "Cell")
+            let result = try await PicoDocsEngine.convert(data: data, filename: "continuation.pages")
+            #expect(result.markdown().contains("   b\n   \\- literal"))
+            let html = try DocumentRenderer.render(result, to: .html)
+            #expect(html.contains("literal")); #expect(!html.contains("<ul"))
+        }
+    }
+
+    @Test func multiBacktickSpansProtectLiteralEscapes() throws {
+        for (source, expected) in [(#"``a\*b``"#,#"a\*b"#),(#"prefix ```a`\*b```"#,#"a`\*b"#),(#"`` a`b ``"#,"a`b")] {
+            let result = ConverterResult(sections: [.init(markdown: source)])
+            for format in [ExportFileType.html,.plaintext,.csv] { #expect(try DocumentRenderer.render(result, to: format).contains(expected)) }
+        }
+    }
+
     @Test func verbatimConvertersPreserveSourceBackslashes() async throws {
         let literal = ##"\* and \# and \\server\file"##
         let rtf = #"{\rtf1\ansi \b "# + literal.replacingOccurrences(of: "\\", with: "\\\\") + #"\b0 }"#

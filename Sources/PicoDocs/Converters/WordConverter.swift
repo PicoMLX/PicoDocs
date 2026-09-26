@@ -348,7 +348,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     private static func escapeLinkDestination(_ url: String) -> String {
-        let url = url.replacingOccurrences(of: "\\", with: "\\\\")
+        let url = url.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E")
         // Spaces / parens break inline link destinations; wrap in <> (a valid
         // CommonMark destination form) when present.
         if url.contains(" ") || url.contains("(") || url.contains(")") {
@@ -552,7 +552,7 @@ public struct WordConverter: DocumentConverter {
     static func imageMarkdown(in drawing: Element, relationships: [String: String]) -> String {
         guard let target = imageTarget(in: drawing, relationships: relationships) else { return "" }
         let filename = (target as NSString).lastPathComponent
-        return "![\(escapeLinkLabel(imageAltText(in: drawing)))](\(escapeLinkDestination(filename)))"
+        return "![\(escapeLiteralText(imageAltText(in: drawing)))](\(escapeLinkDestination(filename)))"
     }
 
     /// The relationship Target (e.g. "media/image1.png") an image references via
