@@ -14,6 +14,48 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func boundedHTMLFallbackKeepsBlockAndCellBoundaries() throws {
+        let content = "<h1>A</h1><h2>B</h2><blockquote>C</blockquote>D<table><tr><td>E</td><td>F</td></tr></table>G"
+        let html = String(repeating: "<div>", count: 80) + content + String(repeating: "</div>", count: 80)
+        let converted = try HTMLToMarkdown.convert(html: html)
+        let text = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: converted.markdown)]), to: .plaintext)
+        #expect(text.split(whereSeparator: \.isWhitespace).map(String.init) == ["A", "B", "C", "D", "E", "F", "G"])
+    }
+
+    @Test func sourceHyperlinkBackslashesSurviveCanonicalDecoding() async throws {
+        for target in [#"foo\*bar"#, #"\\server\*file"#] {
+            let html = try HTMLToMarkdown.convert(html: "<p><a href=\"\(target)\">Link</a><img src=\"\(target)\" alt=\"Alt\"></p>")
+            let output = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: html.markdown)]), to: .html)
+            #expect(output.contains("href=\"\(target)\"")); #expect(output.contains("src=\"\(target)\""))
+            let document = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:hyperlink r:id="link"><w:r><w:t>Link</w:t></w:r></w:hyperlink></w:p></w:body></w:document>"#
+            let rels = "<Relationships><Relationship Id=\"link\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"\(target)\" TargetMode=\"External\"/></Relationships>"
+            let word = try await PicoDocsEngine.convert(data: Self.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/_rels/document.xml.rels", data: Array(rels.utf8))]), filename: "links.docx")
+            #expect(try DocumentRenderer.render(word, to: .html).contains("href=\"\(target)\""))
+        }
+    }
+
+    @Test func storageWideStyleWorkRemainsBounded() async throws {
+        let count = 2000
+        let text = String(repeating: "x\n", count: count)
+        var runs: [UInt8] = []
+        var objects: [(id: UInt64, type: UInt64, payload: [UInt8], references: [UInt64])] = []
+        for index in 0..<count {
+            let id = UInt64(index + 10)
+            runs += Self.lengthField(1, Self.varintField(1, UInt64(index * 2)) + Self.lengthField(2, Self.varintField(1, id)))
+            let parent = Self.lengthField(3, Self.varintField(1, 10000))
+            objects.append((id,2023,Self.lengthField(1,parent),[]))
+        }
+        for index in 0..<64 {
+            let parent = Self.lengthField(3, Self.varintField(1, UInt64(10001 + index)))
+            objects.append((UInt64(10000 + index),2023,Self.lengthField(1,parent),[]))
+        }
+        let storage = Self.varintField(1,0) + Self.lengthField(3,Array(text.utf8)) + Self.lengthField(7,runs)
+        objects.append((1,2001,storage,[]))
+        let data = Self.makeZip([(name: "Index/Document.iwa", data: Self.snappyFrame(Self.makeIWAStream(objects: objects)))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "shared-styles.pages")
+        #expect(result.markdown().filter { $0 == "x" }.count == count)
+    }
+
     @Test func tableCodePipesAndLiteralCellsSurviveCSVDecoding() async throws {
         for value in ["a|b", #"a\|b"#, #"a\\|b"#, #"a\\path | b"#] {
             let converted = try HTMLToMarkdown.convert(html: "<table><tr><td><code>\(value)</code></td></tr></table>")

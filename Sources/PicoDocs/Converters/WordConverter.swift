@@ -348,6 +348,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     private static func escapeLinkDestination(_ url: String) -> String {
+        let url = url.replacingOccurrences(of: "\\", with: "\\\\")
         // Spaces / parens break inline link destinations; wrap in <> (a valid
         // CommonMark destination form) when present.
         if url.contains(" ") || url.contains("(") || url.contains(")") {

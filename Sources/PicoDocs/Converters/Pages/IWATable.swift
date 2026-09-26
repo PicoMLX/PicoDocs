@@ -230,8 +230,10 @@ enum IWATable {
             if let url = hyperlinkURL(of: id, in: objects) { links[id] = url }
         }
         var listMarkers: [UInt64: ListMarker] = [:]
-        for id in Set(listStyles.compactMap(\.id)) {
-            if let marker = listMarker(of: id, in: objects) { listMarkers[id] = marker }
+        var remainingStyleWork = 65_536
+        for id in Set(listStyles.compactMap(\.id)).sorted() {
+            guard remainingStyleWork > 0 else { break }
+            if let marker = listMarker(of: id, in: objects, remainingWork: &remainingStyleWork) { listMarkers[id] = marker }
         }
         return BodyStorage(units: Array(text.utf16),
                            paragraphStyles: indexedReferences(in: storage, field: 5),
@@ -559,7 +561,8 @@ enum IWATable {
     /// Spaces or parentheses break a bare inline-link destination; wrap such URLs in
     /// `<>` (a valid CommonMark destination form).
     private static func escapeLinkDestination(_ url: String) -> String {
-        (url.contains(" ") || url.contains("(") || url.contains(")")) ? "<\(url)>" : url
+        let url = url.replacingOccurrences(of: "\\", with: "\\\\")
+        return (url.contains(" ") || url.contains("(") || url.contains(")")) ? "<\(url)>" : url
     }
 
     // MARK: - Style & run resolution
@@ -713,14 +716,15 @@ enum IWATable {
     /// bullets, …) is not a list. A style that inherits its marker array instead of
     /// carrying its own resolves through the parent chain (as names/traits do).
     /// Nesting levels beyond the first aren't resolved yet, so nested items render flat.
-    private static func listMarker(of listStyleID: UInt64, in objects: [UInt64: IWAArchive.Object]) -> ListMarker? {
+    private static func listMarker(of listStyleID: UInt64, in objects: [UInt64: IWAArchive.Object], remainingWork: inout Int) -> ListMarker? {
         // Iterative DFS preserves parent precedence, visits shared ancestors once,
         // and bounds work on hostile acyclic graphs as well as cycles.
         var pending: [(UInt64, Int)] = [(listStyleID, 0)]
         var seen: Set<UInt64> = []
         var remaining = 4096
-        while let (id, depth) = pending.popLast(), remaining > 0 {
+        while let (id, depth) = pending.popLast(), remaining > 0, remainingWork > 0 {
             remaining -= 1
+            remainingWork -= 1
             guard depth < 64, seen.insert(id).inserted, let object = objects[id] else { continue }
             var hasMarker = false
             var reader = ProtobufReader(object.payload)

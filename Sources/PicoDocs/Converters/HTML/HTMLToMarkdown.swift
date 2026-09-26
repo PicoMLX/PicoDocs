@@ -109,12 +109,12 @@ enum HTMLToMarkdown {
 
         case "a":
             let text = inlineString(element, inList: inList, depth: depth)
-            let href = resolvedURL(element, attribute: "href")
+            let href = canonicalDestination(resolvedURL(element, attribute: "href"))
             out += (href.isEmpty || text.isEmpty) ? text : "[\(text)](\(href))"
 
         case "img":
             let alt = escapeLiteral((try? element.attr("alt")) ?? "", blockSyntax: false)
-            let src = resolvedURL(element, attribute: "src")
+            let src = canonicalDestination(resolvedURL(element, attribute: "src"))
             if !src.isEmpty { out += "![\(alt)](\(src))" }
 
         case "ul":
@@ -148,18 +148,27 @@ enum HTMLToMarkdown {
     }
 
     private static func flattenedText(_ root: Node) -> String {
-        var pending = [root], output = ""
-        while let node = pending.popLast() {
+        // Enter/exit events preserve separation on both sides of block elements
+        // without recursively walking an adversarially deep tree.
+        let boundaries: Set<String> = ["address", "article", "aside", "blockquote", "br", "caption", "dd", "details", "dialog", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr", "legend", "li", "main", "menu", "nav", "ol", "p", "pre", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul"]
+        var pending: [(Node, Bool)] = [(root, false)], output = ""
+        while let (node, exiting) = pending.popLast() {
+            if exiting { output += " "; continue }
             if let text = node as? TextNode { output += text.getWholeText(); continue }
             if let element = node as? Element {
                 let tag = element.tagName().lowercased()
                 if ["script", "style", "noscript", "head", "title", "meta", "link", "svg"].contains(tag) { continue }
-                if ["br", "p", "div", "li", "tr"].contains(tag) { output += " " }
+                if boundaries.contains(tag) { output += " "; pending.append((node, true)) }
                 if tag == "img" { output += (try? element.attr("alt")) ?? "" }
             }
-            pending.append(contentsOf: node.getChildNodes().reversed())
+            pending.append(contentsOf: node.getChildNodes().reversed().map { ($0, false) })
         }
         return output
+    }
+
+    private static func canonicalDestination(_ url: String) -> String {
+        let escaped = url.replacingOccurrences(of: "\\", with: "\\\\")
+        return escaped.contains(where: { $0.isWhitespace || $0 == "(" || $0 == ")" }) ? "<\(escaped)>" : escaped
     }
 
     private static func escapeLiteral(_ text: String, blockSyntax: Bool) -> String {
