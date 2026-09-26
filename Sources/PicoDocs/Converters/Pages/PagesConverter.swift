@@ -86,7 +86,7 @@ public struct PagesConverter: DocumentConverter {
             for block in blocks {
                 switch block {
                 case .text(let raw):
-                    let cleaned = Self.normalize(raw)
+                    let cleaned = Self.normalize(raw, preservingLeadingIndent: raw.hasPrefix("  "))
                     if !cleaned.isEmpty {
                         sections.append(DocumentSection(kind: .body, markdown: cleaned, sourcePath: "Index/Document.iwa"))
                     }
@@ -102,12 +102,12 @@ public struct PagesConverter: DocumentConverter {
                 // Render headings even on the fallback path; degrade to plain text
                 // extraction only if the style-aware renderer yields nothing.
                 let rendered = try IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams)
-                bodyText = rendered.isEmpty ? IWAArchive.text(in: documentStream) : rendered
+                bodyText = rendered.isEmpty ? IWAArchive.text(in: documentStream).replacingOccurrences(of: "\\", with: "\\\\") : rendered
             } else {
                 var firstText = ""
                 for entry in streams.sorted(by: { $0.name < $1.name }) {
                     let extracted = IWAArchive.text(in: entry.stream)
-                    if !extracted.isEmpty { firstText = extracted; break }
+                    if !extracted.isEmpty { firstText = extracted.replacingOccurrences(of: "\\", with: "\\\\"); break }
                 }
                 bodyText = firstText
             }
@@ -176,7 +176,7 @@ public struct PagesConverter: DocumentConverter {
     /// exception to trimming: a line directly under a list item (no blank line
     /// between) keeps its leading spaces, which `IWATable` emits as the continuation
     /// indent of a multi-line item — trimming them would split the item.
-    static func normalize(_ text: String) -> String {
+    static func normalize(_ text: String, preservingLeadingIndent: Bool = false) -> String {
         var unified = text
         for separator in ["\r\n", "\r", "\u{2028}", "\u{2029}", "\u{000B}", "\u{000C}"] {
             unified = unified.replacingOccurrences(of: separator, with: "\n")
@@ -195,14 +195,14 @@ public struct PagesConverter: DocumentConverter {
         let inlineWhitespace = CharacterSet(charactersIn: " \t")
         var out: [String] = []
         var pendingBlank = false
-        var inListItem = false   // the previous kept line is a list item or its continuation
+        var inListItem = preservingLeadingIndent   // the previous kept line is a list item or its continuation
         for rawLine in unified.components(separatedBy: "\n") {
             let line = rawLine.trimmingCharacters(in: inlineWhitespace)
             if line.isEmpty {
                 pendingBlank = true
             } else {
                 let indent = rawLine.prefix { $0 == " " }
-                let continuation = inListItem && !pendingBlank && indent.count >= 2
+                let continuation = inListItem && indent.count >= 2
                 if pendingBlank && !out.isEmpty { out.append("") }
                 pendingBlank = false
                 out.append(continuation ? String(indent) + line : line)
@@ -215,9 +215,9 @@ public struct PagesConverter: DocumentConverter {
     /// Whether a trimmed line opens a Markdown list item (`- x` or `N. x`), the
     /// markers `IWATable` renders for Pages list styles.
     private static func isListItem(_ line: String) -> Bool {
-        if line.hasPrefix("- ") { return true }
+        if line == "-" || line.hasPrefix("- ") { return true }
         let digits = line.prefix { $0.isASCII && $0.isNumber }
-        return !digits.isEmpty && line.dropFirst(digits.count).hasPrefix(". ")
+        return !digits.isEmpty && (line.dropFirst(digits.count) == "." || line.dropFirst(digits.count).hasPrefix(". "))
     }
 
     // MARK: - ZIP helper

@@ -334,7 +334,7 @@ struct PagesConverterTests {
         // The table sits at the end of item 2; item 3 continues the same list.
         let pages = Self.makeListPagesFile(text: "a\nb \u{FFFC}\nc", style: .ordered, restarts: [], tableCell: "X")
         let markdown = try await PicoDocsEngine.convert(data: pages, filename: "lists.pages").markdown()
-        #expect(markdown == "1. a\n2. b\n\n| X |\n| --- |\n\n3. c")
+        #expect(markdown == "1. a\n2. b\n\n   | X |\n   | --- |\n\n3. c")
     }
 
     @Test("Explicit list start numbers survive plaintext and HTML rendering")
@@ -357,7 +357,7 @@ struct PagesConverterTests {
         }
         let table = Self.makeListPagesFile(text: "a\n\n\u{FFFC}\nc", style: .ordered, restarts: [], tableCell: "X")
         let result = try await PicoDocsEngine.convert(data: table, filename: "lists.pages")
-        #expect(result.markdown().contains("1. a\n2.\n3.\n\n| X |"))
+        #expect(result.markdown().contains("1. a\n2.\n3.\n\n   | X |"))
         #expect(result.markdown().contains("4. c"))
         let markers = Self.makeListPagesFile(text: "- literal\u{2028}1. note", style: .bullet, restarts: [])
         let content = try await PicoDocsEngine.convert(data: markers, filename: "lists.pages")
@@ -418,7 +418,7 @@ struct PagesConverterTests {
         #expect(try DocumentRenderer.render(literal, to: .plaintext) == "- # heading\n- > quote\n- | a |\n- ```\n- ---")
         let table = try await convert("\u{FFFC}\nb", tableCell: "X")
         let tableHTML = try DocumentRenderer.render(table, to: .html)
-        #expect(tableHTML.contains("<li></li>"))
+        #expect(tableHTML.contains("<li>\n<table>"))
         #expect(tableHTML.contains("<ol start=\"2\">"))
         #expect(!tableHTML.contains("<p>1.</p>"))
     }
@@ -432,6 +432,41 @@ struct PagesConverterTests {
         #expect(html.contains("[^n]"))
         #expect(!html.contains("Hidden definition"))
         #expect(!html.contains("<sup"))
+    }
+
+    @Test func finalPagesListBoundaryRegressions() async throws {
+        let noteData = Self.makeListPagesFile(text: "Intro\u{2028}[^n]: literal\n\\* regex", style: .bullet, restarts: [])
+        let note = try await PicoDocsEngine.convert(data: noteData, filename: "list.pages")
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            let text = try DocumentRenderer.render(note, to: format)
+            #expect(text.contains("[^n]: literal"))
+            #expect(text.contains(#"\* regex"#))
+        }
+        let tableData = Self.makeListPagesFile(text: "\u{FFFC}text\nnext", style: .ordered, restarts: [], tableCell: "X")
+        let table = try await PicoDocsEngine.convert(data: tableData, filename: "table.pages")
+        #expect(table.markdown().contains("   text\n2. next"))
+        let html = try DocumentRenderer.render(table, to: .html)
+        #expect(html.contains("<li>\n<table>"))
+        #expect(html.contains("<p>text</p>\n</li>"))
+        #expect(html.contains("<li>next</li>"))
+        #expect(!html.contains("<p>1.</p>"))
+        let bare = ConverterResult(sections: [.init(markdown: "2020.\n\n1. item")])
+        #expect(try DocumentRenderer.render(bare, to: .html).contains("<p>2020.</p>"))
+        let nested = (0..<100).map { String(repeating: "  ", count: $0) + "- item" }.joined(separator: "\n")
+        let deep = ConverterResult(sections: [.init(markdown: nested + "[^n]\n\n[^n]: Note")])
+        #expect(try DocumentRenderer.render(deep, to: .html).contains("item"))
+    }
+
+    @Test func wordListBlockSyntaxRemainsLiteral() async throws {
+        let body = ["# heading", "&gt; quote", "| a |", "---", "\\* regex"].map {
+            "<w:p><w:pPr><w:numPr/></w:pPr><w:r><w:t>\($0)</w:t></w:r></w:p>"
+        }.joined()
+        let xml = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>\(body)</w:body></w:document>"
+        let result = try await PicoDocsEngine.convert(data: Self.makeZip([(name: "word/document.xml", data: Array(xml.utf8))]), filename: "literal.docx")
+        let html = try DocumentRenderer.render(result, to: .html)
+        for tag in ["<h1", "<blockquote", "<table", "<hr"] { #expect(!html.contains(tag)) }
+        #expect(html.contains(#"\* regex"#))
+        #expect(html.contains("# heading"))
     }
 
     // MARK: - Fixture builders

@@ -321,6 +321,7 @@ public enum DocumentRenderer {
     /// definitions get no number (and so aren't rendered), matching how Markdown
     /// footnote processors treat them.
     private static func footnoteNumbers(blocks: [Block], notes: [(id: String, text: String)]) -> [String: Int] {
+        guard !notes.isEmpty else { return [:] }
         let noteText = Dictionary(notes.map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })
         var numbers: [String: Int] = [:]
         var next = 1
@@ -346,14 +347,16 @@ public enum DocumentRenderer {
             }
         }
 
-        func scanBlocks(_ blocks: [Block]) {
+        func scanBlocks(_ blocks: [Block], depth: Int = 0) {
             for block in blocks {
                 switch block {
                 case .code, .rule: continue        // code blocks never render footnote refs
                 case .heading(_, let text): scan(text)
                 case .paragraph(let text): scan(text)
                 case .blockquote(let lines): lines.forEach(scan)
-                case .list(_, _, let items): items.forEach { scanBlocks(parseBlocks($0)) }
+                case .list(_, _, let items):
+                    if depth < maxListNesting { items.forEach { scanBlocks(parseBlocks($0), depth: depth + 1) } }
+                    else { items.forEach(scan) }
                 case .table(let rows): rows.forEach { $0.forEach(scan) }
                 }
             }
@@ -548,16 +551,14 @@ public enum DocumentRenderer {
             }
 
             let leadingBare = bareListMarker(trimmed)
-            var following = i + 1
-            if leadingBare != nil {
-                while following < lines.count, isBlank(lines[following]) { following += 1 }
-                if following < lines.count, lines[following].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    while following < lines.count, lines[following].trimmingCharacters(in: .whitespaces).hasPrefix("|") { following += 1 }
-                    while following < lines.count, isBlank(lines[following]) { following += 1 }
-                }
-            }
-            let confirmedBare = leadingBare != nil && following < lines.count
-                && (listMarker(lines[following].trimmingCharacters(in: .whitespaces)) ?? bareListMarker(lines[following].trimmingCharacters(in: .whitespaces))) == leadingBare
+            let next = i + 1
+            let adjacent = next < lines.count && !isBlank(lines[next])
+                && (listMarker(lines[next].trimmingCharacters(in: .whitespaces)) ?? bareListMarker(lines[next].trimmingCharacters(in: .whitespaces))) == leadingBare
+            var following = next
+            while following < lines.count, isBlank(lines[following]) { following += 1 }
+            let nestedTable = following < lines.count && indentWidth(lines[following]) >= indentWidth(line) + 2
+                && lines[following].trimmingCharacters(in: .whitespaces).hasPrefix("|")
+            let confirmedBare = leadingBare != nil && (adjacent || nestedTable)
             if listMarker(trimmed) != nil || confirmedBare {
                 let ordered = (listMarker(trimmed) ?? leadingBare) == .ordered
                 let start = ordered ? listStart(trimmed) : 1
@@ -578,6 +579,12 @@ public enum DocumentRenderer {
                     } else if indent < base + 2, let marker = bareListMarker(itemLine), (marker == .ordered) == ordered {
                         items.append("")                  // an empty item inside the list
                         contentColumn = indent + itemLine.count + 1; i += 1
+                    } else if isBlank(raw), !items.isEmpty {
+                        var next = i + 1
+                        while next < lines.count, isBlank(lines[next]) { next += 1 }
+                        guard next < lines.count, indentWidth(lines[next]) >= contentColumn else { break }
+                        items[items.count - 1] += "\n"
+                        i = next
                     } else if !isBlank(raw), indent >= base + 2, !items.isEmpty {
                         items[items.count - 1] += "\n" + String(raw.dropFirst(min(indent, contentColumn)))
                         i += 1

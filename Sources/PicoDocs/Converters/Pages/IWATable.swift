@@ -163,7 +163,8 @@ enum IWATable {
                 let segment = try renderParagraphs(body, segmentStart ..< marker, objects: objects,
                                                lists: &lists, continuesParagraph: continuesParagraph, flushEmptyAtEnd: true)
                 if !segment.isEmpty { blocks.append(.text(segment)) }
-                blocks.append(.table(markdown))
+                let indent = lists.lastList == nil ? "" : String(repeating: " ", count: lists.markerWidth)
+                blocks.append(.table(markdown.components(separatedBy: "\n").map { indent + $0 }.joined(separator: "\n")))
                 placed.insert(tile)
                 segmentStart = marker + 1                                   // drop the table ￼
                 continuesParagraph = true
@@ -254,6 +255,7 @@ enum IWATable {
         var lastList: UInt64?      // list style of the immediately preceding paragraph, if a list item
         var orderedList: UInt64?   // style of the ordered run currently counting
         var counter = 0
+        var markerWidth = 2
     }
 
     /// Renders a UTF-16 range as Markdown: split into paragraphs at true paragraph
@@ -281,7 +283,11 @@ enum IWATable {
             if fragment, index == range.upperBound || isParagraphSeparator(body.units[index]) {
                 fragment = false
                 switch renderParagraph(body, start ..< index, objects: objects) {
-                case .heading(let text)?, .body(let text)?: parts.append((text, false))
+                case .heading(let text)?, .body(let text)?:
+                    let rendered = lists.lastList == nil ? text : text.components(separatedBy: "\n").map {
+                        String(repeating: " ", count: lists.markerWidth) + escapingListMarker($0)
+                    }.joined(separator: "\n")
+                    parts.append((rendered, false))
                 case nil: break
                 }
                 start = index + 1
@@ -349,7 +355,7 @@ enum IWATable {
         case .bullet:
             let restart = listRestart(at: offset, in: body.listRestarts)
             let tight = lists.lastList != nil && (restart == 0 || (restart == nil && style == lists.lastList))
-            lists.lastList = style; lists.orderedList = nil
+            lists.lastList = style; lists.orderedList = nil; lists.markerWidth = 2
             return ("-", tight)
         case .ordered:
             let restart = listRestart(at: offset, in: body.listRestarts)
@@ -363,6 +369,7 @@ enum IWATable {
             let tight = lists.lastList != nil && (restart == 0 || (restart == nil && style == lists.lastList))
             lists.orderedList = style
             lists.lastList = style
+            lists.markerWidth = String(lists.counter).count + 2
             return ("\(lists.counter).", tight)
         }
     }
@@ -405,29 +412,7 @@ enum IWATable {
     /// `line` with a leading list marker (`- x`, `* x`, `+ x`, `1. x`, `1) x`)
     /// backslash-escaped, so inside a list item it reads as text: CommonMark would
     /// otherwise open a nested list there, splitting one Pages item into several.
-    static func escapingListMarker(_ line: String) -> String {
-        let content = line.drop { $0 == " " || $0 == "\t" }
-        let lead = String(line[..<content.startIndex])
-        if content.hasPrefix("```") {
-            return lead + content.replacingOccurrences(of: "`", with: "\\`")
-        }
-        if let first = content.first, "#>|".contains(first) { return lead + "\\" + content }
-        let compact = content.filter { !$0.isWhitespace }
-        if compact.count >= 3, let first = compact.first, "-*_".contains(first), compact.allSatisfy({ $0 == first }) {
-            return lead + content.map { $0 == first ? "\\" + String($0) : String($0) }.joined()
-        }
-        func endsMarker(_ rest: Substring) -> Bool { rest.isEmpty || rest.first == " " || rest.first == "\t" }
-        if let first = content.first, "-*+".contains(first), endsMarker(content.dropFirst()) {
-            return lead + "\\" + String(content)
-        }
-        let digits = content.prefix { $0.isASCII && $0.isNumber }
-        let rest = content.dropFirst(digits.count)
-        if (1...9).contains(digits.count), let delimiter = rest.first, delimiter == "." || delimiter == ")",
-           endsMarker(rest.dropFirst()) {
-            return lead + String(digits) + "\\" + String(rest)
-        }
-        return line
-    }
+    static func escapingListMarker(_ line: String) -> String { MarkdownLiteral.escapeBlockStart(line) }
 
     /// The explicit list-number restart for the paragraph starting at `index`, or
     /// nil when it continues the current count. Paragraph data (storage field 6) is a
@@ -542,7 +527,7 @@ enum IWATable {
             let italic = items[i].italic
             var j = i
             while j < items.endIndex, items[j].bold == bold, items[j].italic == italic { j += 1 }
-            let text = String(decoding: items[i ..< j].map(\.unit), as: UTF16.self)
+            let text = String(decoding: items[i ..< j].map(\.unit), as: UTF16.self).replacingOccurrences(of: "\\", with: "\\\\")
             output += emphasize(text, bold: bold, italic: italic)
             i = j
         }

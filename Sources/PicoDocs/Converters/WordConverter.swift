@@ -198,7 +198,7 @@ public struct WordConverter: DocumentConverter {
             return String(repeating: "#", count: level) + " " + text
         }
         if isListItem {
-            return "- " + text
+            return "- " + text.components(separatedBy: "\n").map { MarkdownLiteral.escapeBlockStart($0) }.joined(separator: "\n  ")
         }
         return text
     }
@@ -280,7 +280,7 @@ public struct WordConverter: DocumentConverter {
                 // Read raw text nodes to preserve significant whitespace
                 // (w:t may carry xml:space="preserve").
                 for child in node.getChildNodes() {
-                    if let textNode = child as? TextNode { textBuffer += textNode.getWholeText() }
+                    if let textNode = child as? TextNode { textBuffer += textNode.getWholeText().replacingOccurrences(of: "\\", with: "\\\\") }
                 }
             case "w:tab":
                 textBuffer += "\t"
