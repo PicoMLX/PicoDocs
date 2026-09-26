@@ -998,9 +998,9 @@ enum IWATable {
                 || (0x7F...0x9F).contains(value)             // DEL + C1 controls
                 || value == 0xFFFC                           // object-replacement placeholder
         }
-        let escaped = String(scalars)
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "|", with: "\\|")
+        let escaped = String(scalars).map {
+            #"\`*_{}[]<>|"#.contains($0) ? "\\" + String($0) : String($0)
+        }.joined()
         return escaped.trimmingCharacters(in: .whitespaces)
     }
 }

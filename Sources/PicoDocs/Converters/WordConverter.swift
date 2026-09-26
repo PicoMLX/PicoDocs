@@ -247,7 +247,7 @@ public struct WordConverter: DocumentConverter {
                         // label needs a structured inline representation (a run-level
                         // "contains image" signal) — a deliberately deferred
                         // enhancement for this narrow icon+label case.
-                        out += "[\(escapeLinkLabel(inner))](\(escapeLinkDestination(url)))"
+                        out += "[\(escapeCanonicalLabel(inner))](\(escapeLinkDestination(url)))"
                     }
                 } else {
                     out += inner
@@ -285,7 +285,7 @@ public struct WordConverter: DocumentConverter {
                 // Read raw text nodes to preserve significant whitespace
                 // (w:t may carry xml:space="preserve").
                 for child in node.getChildNodes() {
-                    if let textNode = child as? TextNode { textBuffer += textNode.getWholeText() }
+                    if let textNode = child as? TextNode { textBuffer += escapeLiteralText(textNode.getWholeText()) }
                 }
             case "w:tab":
                 textBuffer += "\t"
@@ -317,6 +317,26 @@ public struct WordConverter: DocumentConverter {
             return val != "false" && val != "0" && val != "none"
         }
         return true
+    }
+
+    private static func escapeLiteralText(_ text: String) -> String {
+        text.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+    }
+
+    /// Generated inline content already has escaped source text. Preserve those
+    /// pairs while protecting brackets introduced by embedded image markup.
+    private static func escapeCanonicalLabel(_ text: String) -> String {
+        var result = "", index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            if text[index] == "\\", next < text.endIndex {
+                result.append(text[index]); result.append(text[next]); index = text.index(after: next)
+            } else {
+                if text[index] == "[" || text[index] == "]" { result.append("\\") }
+                result.append(text[index]); index = next
+            }
+        }
+        return result
     }
 
     private static func escapeLinkLabel(_ text: String) -> String {
@@ -361,8 +381,7 @@ public struct WordConverter: DocumentConverter {
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
-                cells.append(MarkdownTableCell.escapeDelimiters(cellText)
-                    .replacingOccurrences(of: "<br>", with: "\\<br>")
+                cells.append(cellText.replacingOccurrences(of: "|", with: "\\|")
                     .replacingOccurrences(of: "\r\n", with: "<br>")
                     .replacingOccurrences(of: "\r", with: "<br>")
                     .replacingOccurrences(of: "\n", with: "<br>"))

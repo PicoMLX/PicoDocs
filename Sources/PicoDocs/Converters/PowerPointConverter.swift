@@ -55,10 +55,10 @@ public struct PowerPointConverter: DocumentConverter {
             var context = SlideContext(archive: archive, partPath: slidePath, relationships: relationships, images: images)
             // Layout and master supply inherited list formatting for placeholders.
             let layoutPath = Self.relatedPart(of: slidePath, type: "/slideLayout", relationships: relationships)
-            context.layout = layoutPath.flatMap { parts.document($0) }
+            context.layout = layoutPath.flatMap { parts.document($0, root: "p:sldlayout") }
             context.master = layoutPath
                 .flatMap { Self.relatedPart(of: $0, type: "/slideMaster", relationships: Self.relationships(archive, forPart: $0)) }
-                .flatMap { parts.document($0) }
+                .flatMap { parts.document($0, root: "p:sldmaster") }
             let rendered = Self.renderSlide(slide, context: &context)
             images = context.images
             let notes = Self.notes(forSlide: slidePath, relationships: relationships, archive: archive, parts: &parts)
@@ -113,7 +113,7 @@ public struct PowerPointConverter: DocumentConverter {
         guard !relation.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         let target = relation.target
         let notesPath = WordConverter.resolvePartPath(target, relativeTo: directory(of: slidePath))
-        guard let notes = parts.document(notesPath) else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+        guard let notes = parts.document(notesPath, root: "p:notes") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         var context = SlideContext(archive: archive, partPath: notesPath,
                                    relationships: Self.relationships(archive, forPart: notesPath),
                                    images: ImageCollector(), embedsImages: false)
@@ -121,7 +121,7 @@ public struct PowerPointConverter: DocumentConverter {
         if let master = notesRels.values.first(where: { $0.type.hasSuffix("/notesMaster") }) {
             guard !master.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
             let path = WordConverter.resolvePartPath(master.target, relativeTo: directory(of: notesPath))
-            guard let document = parts.document(path) else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+            guard let document = parts.document(path, root: "p:notesmaster") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
             context.master = document
         }
         let paragraphs = ((try? notes.getElementsByTag("p:sp").array()) ?? [])
@@ -171,11 +171,17 @@ public struct PowerPointConverter: DocumentConverter {
 
         init(archive: PowerPointPackage) { self.archive = archive }
 
-        mutating func document(_ path: String) -> Document? {
-            if let cached = documents[path] { return cached }
-            let parsed = PowerPointConverter.xml(archive, path: path)
-            if parsed == nil { archive.fail(PicoDocsError.fileCorrupted) }
-            documents[path] = parsed
+        mutating func document(_ path: String, root: String) -> Document? {
+            let parsed: Document?
+            if let cached = documents[path] { parsed = cached }
+            else {
+                parsed = PowerPointConverter.xml(archive, path: path)
+                documents[path] = parsed
+            }
+            guard let parsed, parsed.children().first()?.tagName().lowercased() == root else {
+                archive.fail(PicoDocsError.fileCorrupted)
+                return nil
+            }
             return parsed
         }
     }

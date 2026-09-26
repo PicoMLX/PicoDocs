@@ -4,6 +4,44 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func referencedDocumentsMustHaveExpectedRootTypes() async throws {
+        typealias B = PowerPointConverterTests
+        for type in ["notesSlide", "slideLayout"] {
+            for wrongXML in ["<root/>", "<root \(B.namespaces)><p:notes/></root>"] {
+                let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title"), relationships: [("part", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/" + type, "wrong.xml")])], extraParts: [("ppt/slides/wrong.xml", Array(wrongXML.utf8))])
+                await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: data, filename: "wrong-root.pptx") }
+            }
+        }
+    }
+
+    @Test func iWorkAndWordTablesPreserveLiteralSourceSyntax() async throws {
+        typealias B = PagesConverterTests
+        func field(_ n: Int, _ value: UInt64) -> [UInt8] { B.tag(field: n, wire: 0) + B.varint(value) }
+        func bytes(_ n: Int, _ value: [UInt8]) -> [UInt8] { B.tag(field: n, wire: 2) + B.varint(UInt64(value.count)) + value }
+        let literal = #"<br> *stars* `code` [label](target) \path |"#
+        let cell: [UInt8] = [5, 3] + Array(repeating: 0, count: 10) + [1,0,0,0]
+        let tile = bytes(5, bytes(6, cell) + bytes(7, [0,0]))
+        let strings = field(1, 1) + bytes(3, field(1, 1) + bytes(3, Array(literal.utf8)))
+        let objects: [(UInt64, UInt64, [UInt8], [UInt64])] = [(20,6001,[],[21,22]), (21,6002,tile,[]), (22,6005,strings,[])]
+        var stream: [UInt8] = []
+        for (id,type,payload,references) in objects {
+            var info = field(1,type) + field(3,UInt64(payload.count))
+            for reference in references { info += field(5,reference) }
+            let header = field(1,id) + bytes(2,info)
+            stream += B.varint(UInt64(header.count)) + header + payload
+        }
+        let table = try #require(IWATable.markdownTables(from: [stream]).first)
+        let iwork = ConverterResult(sections: [.init(kind: .table, markdown: table)])
+        let document = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>&lt;br&gt; *stars* `code` [label](target) \path |</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
+        let word = try await PicoDocsEngine.convert(data: B.makeZip([(name: "word/document.xml", data: Array(document.utf8))]), filename: "literal.docx")
+        for result in [iwork,word] {
+            for format in [ExportFileType.plaintext,.csv] { #expect(try DocumentRenderer.render(result, to: format).contains(literal)) }
+            let html = try DocumentRenderer.render(result, to: .html)
+            #expect(html.contains("&lt;br&gt; *stars* `code` [label](target) \\path |"))
+            #expect(!html.contains("<br>"))
+        }
+    }
+
     @Test func notesMasterUsesConversionWideDocumentCache() throws {
         typealias B = PowerPointConverterTests
         let notes = "<p:notes \(B.namespaces)>" + B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: ["<a:p><a:r><a:t>Note</a:t></a:r></a:p>"]) + "</p:notes>"
