@@ -181,10 +181,10 @@ public enum DocumentRenderer {
     private static func renderHTMLTable(_ rows: [[String]], footnoteNumbers: [String: Int] = [:]) -> String {
         guard let header = rows.first else { return "" }
         var out = "<table>\n<thead>\n<tr>"
-        out += header.map { "<th>\(inlineHTML($0, footnoteNumbers: footnoteNumbers))</th>" }.joined()
+        out += header.map { "<th>\(inlineHTML($0, footnoteNumbers: footnoteNumbers).replacingOccurrences(of: "\n", with: "<br>"))</th>" }.joined()
         out += "</tr>\n</thead>\n<tbody>\n"
         for row in rows.dropFirst() {
-            out += "<tr>" + row.map { "<td>\(inlineHTML($0, footnoteNumbers: footnoteNumbers))</td>" }.joined() + "</tr>\n"
+            out += "<tr>" + row.map { "<td>\(inlineHTML($0, footnoteNumbers: footnoteNumbers).replacingOccurrences(of: "\n", with: "<br>"))</td>" }.joined() + "</tr>\n"
         }
         out += "</tbody>\n</table>"
         return out
@@ -414,7 +414,7 @@ public enum DocumentRenderer {
                 // (second row), so all-dash data rows elsewhere are preserved.
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.unescape($0) }
+                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.unescape($0).replacingOccurrences(of: "<br>", with: "\n") }
                     if !(rowIndex == 1 && isTableSeparatorRow(cells)) {
                         rows.append(cells.map { csvField($0) }.joined(separator: ","))
                     }
@@ -477,7 +477,7 @@ public enum DocumentRenderer {
                 var rows: [[String]] = []
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.unescape($0) }
+                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.unescape($0).replacingOccurrences(of: "<br>", with: "\n") }
                     // The header/body separator is conventionally the second row;
                     // only drop an all-dash row there, so real data rows that
                     // happen to be all dashes elsewhere are kept.
@@ -674,7 +674,8 @@ public enum DocumentRenderer {
     /// out first (so their contents/URLs aren't touched by escaping or emphasis),
     /// the remaining text is HTML-escaped and emphasized, then they're restored.
     private static func inlineHTML(_ text: String, footnoteNumbers: [String: Int] = [:]) -> String {
-        let (afterCode, spans) = extractCodeSpans(text)
+        let (protected, escaped) = protectEscapes(text)
+        let (afterCode, spans) = extractCodeSpans(protected)
         let (afterLinks, links) = extractLinks(afterCode)
         var result = applyEmphasisHTML(escapeHTML(afterLinks))
         // Footnote references: `[^id]` -> a superscript link. Done here, where code
@@ -705,7 +706,7 @@ public enum DocumentRenderer {
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
         }
-        return result
+        return restoreEscapes(result, escaped: escaped, html: true)
     }
 
     /// URL schemes the HTML export emits as live links. Link and image URLs come
@@ -743,7 +744,8 @@ public enum DocumentRenderer {
     /// Strips inline Markdown to plain text (links/images become their label/alt;
     /// code spans keep their literal contents).
     private static func stripInline(_ text: String, footnoteNumbers: [String: Int] = [:]) -> String {
-        let (afterCode, spans) = extractCodeSpans(text)
+        let (protected, escaped) = protectEscapes(text)
+        let (afterCode, spans) = extractCodeSpans(protected)
         let (afterLinks, links) = extractLinks(afterCode)
         var result = applyEmphasisStrip(afterLinks)
         // Footnote references become `[N]` here (code spans already extracted, so
@@ -757,7 +759,7 @@ public enum DocumentRenderer {
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: span)
         }
-        return result
+        return restoreEscapes(result, escaped: escaped, html: false)
     }
 
     private static func applyEmphasisStrip(_ text: String) -> String {
@@ -766,6 +768,29 @@ public enum DocumentRenderer {
         result = result.replacingOccurrences(of: "\\*\\*(.+?)\\*\\*", with: "$1", options: .regularExpression)
         result = result.replacingOccurrences(of: "\\*(.+?)\\*", with: "$1", options: .regularExpression)
         return result
+    }
+
+    private static func protectEscapes(_ text: String) -> (String, [String]) {
+        var out = "", escaped: [String] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            if text[index] == "\\", next < text.endIndex,
+               #"\`*_{}[]<>()#+-.!|"#.contains(text[next]) {
+                escaped.append(String(text[next]))
+                out += "\u{E006}\(escaped.count - 1)\u{E007}"
+                index = text.index(after: next)
+            } else { out.append(text[index]); index = next }
+        }
+        return (out, escaped)
+    }
+
+    private static func restoreEscapes(_ text: String, escaped: [String], html: Bool) -> String {
+        var out = text
+        for (index, value) in escaped.enumerated() {
+            out = out.replacingOccurrences(of: "\u{E006}\(index)\u{E007}", with: html ? escapeHTML(value) : value)
+        }
+        return out
     }
 
     // MARK: - Escaping

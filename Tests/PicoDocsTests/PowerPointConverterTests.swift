@@ -210,7 +210,7 @@ struct PowerPointConverterTests {
 
         Grouped text
 
-        Choice text
+        Fallback text
 
         ![Revenue chart](image1.png)
         """)
