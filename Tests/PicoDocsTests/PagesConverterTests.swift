@@ -14,6 +14,58 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func PagesAndRTFCodeKeepLiteralBackslashesAcrossParagraphs() async throws {
+        let paragraphs = [#"`a\*b`"#, "```", #"c\*d"#, "```", #"outside \*"#]
+        let pages = Self.makePagesFile(paragraphs: paragraphs)
+        let rtf = #"{\rtf1\ansi "# + paragraphs.map { $0.replacingOccurrences(of:"\\",with:"\\\\") }.joined(separator:#"\par "#) + "}"
+        for (filename, data) in [("code.pages", pages), ("code.rtf", Data(rtf.utf8))] {
+            let result = try await PicoDocsEngine.convert(data:data,filename:filename)
+            for format in [ExportFileType.html,.plaintext,.csv] {
+                let output = try DocumentRenderer.render(result,to:format)
+                #expect(output.contains(#"a\*b"#)); #expect(output.contains(#"c\*d"#))
+                #expect(!output.contains(#"a\\*b"#)); #expect(!output.contains(#"c\\*d"#))
+                #expect(output.contains(#"outside \*"#))
+            }
+        }
+    }
+
+    @Test func lazyProseContinuesBelowALongMarker() throws {
+        for continuation in ["continuation", "#hashtag"] {
+            let result = ConverterResult(sections:[.init(markdown:"1234. item\n  " + continuation)])
+            #expect(try DocumentRenderer.render(result,to:.html).contains("<li>item " + continuation + "</li>"))
+        }
+    }
+
+    @Test func malformedPackedListMarkerStillInherits() throws {
+        let text = "Item"
+        var storage = Self.varintField(1,0) + Self.lengthField(3,Array(text.utf8))
+        storage += Self.lengthField(7,Self.lengthField(1,Self.varintField(1,0) + Self.lengthField(2,Self.varintField(1,10))))
+        let parent = Self.lengthField(1,Self.lengthField(3,Self.varintField(1,11)))
+        let malformed = Self.lengthField(11,Array(repeating:UInt8(0x80),count:9) + [0x02])
+        let stream = Self.makeIWAStream(objects:[(1,2001,storage,[]),(10,2023,parent + malformed,[]),(11,2023,Self.varintField(11,3),[])])
+        #expect(try IWATable.bodyMarkdown(documentStream:stream,in:[stream]) == "1. Item")
+    }
+
+    @Test func tableFirstHeadingsKeepHeadingPrecedence() async throws {
+        let data = Self.makeListPagesFile(text:"\u{FFFC}Heading",style:.ordered,restarts:[],tableCell:"Cell",heading:true)
+        let result = try await PicoDocsEngine.convert(data:data,filename:"heading.pages")
+        #expect(result.markdown().contains("# Heading"))
+        let html = try DocumentRenderer.render(result,to:.html)
+        #expect(html.contains("<h1>Heading</h1>")); #expect(!html.contains("<ol"))
+    }
+
+    @Test func escapedFootnoteIDsStillMatchDefinitions() throws {
+        for id in [#"a\*"#, #"a\<"#, "a&b"] {
+            let result = ConverterResult(sections:[.init(markdown:"Body[^" + id + "]\n\n[^" + id + "]: Note")])
+            let html = try DocumentRenderer.render(result,to:.html)
+            #expect(html.contains("footnote-ref")); #expect(html.contains("Note"))
+            let text = try DocumentRenderer.render(result,to:.plaintext)
+            #expect(text.contains("Body[1]")); #expect(text.contains("Note"))
+        }
+        let escaped = ConverterResult(sections:[.init(markdown:#"Body\[^a\*]"# + "\n\n" + #"[^a\*]: Note"#)])
+        #expect(!(try DocumentRenderer.render(escaped,to:.html)).contains("footnote-ref"))
+    }
+
     @Test func structuralContinuationNeedsTheContentColumn() throws {
         for suffix in ["  | A |\n  | --- |", "  # Heading"] {
             let result = ConverterResult(sections: [.init(markdown: "1234. item\n" + suffix)])
@@ -820,7 +872,7 @@ struct PagesConverterTests {
     /// attachment object through a table model → tile, as in real Pages files.
     static func makeListPagesFile(text: String, style: ListKind,
                                   restarts: [(offset: Int, restart: UInt64)],
-                                  tableCell: String? = nil, styleChange: Int? = nil) -> Data {
+                                  tableCell: String? = nil, styleChange: Int? = nil, heading: Bool = false) -> Data {
         let listStyleID: UInt64 = 10
         let listStyle = varintField(11, style == .bullet ? 2 : 3)
         var storage = varintField(1, 0) + lengthField(3, Array(text.utf8))
@@ -840,6 +892,10 @@ struct PagesConverterTests {
             (listStyleID, 2023, listStyle, []),
             (11, 2023, listStyle, []),
         ]
+        if heading {
+            storage += lengthField(5, lengthField(1, varintField(1, 0) + lengthField(2, varintField(1, 12))))
+            objects.append((12, 2021, lengthField(1, lengthField(1, Array("Title".utf8))), []))
+        }
         if let tableCell, let marker = Array(text.utf16).firstIndex(of: 0xFFFC) {
             let (modelID, tileID, listID): (UInt64, UInt64, UInt64) = (20, 21, 22)
             // Attachment run (storage field 9): {1: charIndex, 2: Reference{1: id}}.

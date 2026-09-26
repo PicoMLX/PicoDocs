@@ -205,6 +205,7 @@ enum IWATable {
     /// needs no further object lookups.
     private struct BodyStorage {
         let units: [UInt16]
+        let escapedBackslashes: [Bool]
         let paragraphStyles: [(offset: Int, id: UInt64?)]
         let characterStyles: [(offset: Int, id: UInt64?)]
         let smartFields: [(offset: Int, id: UInt64?)]
@@ -235,7 +236,7 @@ enum IWATable {
             guard remainingStyleWork > 0 else { break }
             if let marker = listMarker(of: id, in: objects, remainingWork: &remainingStyleWork) { listMarkers[id] = marker }
         }
-        return BodyStorage(units: Array(text.utf16),
+        return BodyStorage(units: Array(text.utf16), escapedBackslashes: MarkdownLiteral.backslashEscapeMask(text),
                            paragraphStyles: indexedReferences(in: storage, field: 5),
                            characterStyles: characterStyles, smartFields: smartFields,
                            listStyles: listStyles, listRestarts: listRestarts(in: storage),
@@ -304,7 +305,9 @@ enum IWATable {
                 let visibleStart = paragraphRange.first { !isDroppedUnit(body.units[$0]) }
                 let listStyle = visibleStart == nil ? referenceID(at: paragraphStart, in: body.listStyles)
                     : majorityStyle(body.units, body.listStyles, paragraphRange, total: body.units.count, includeUnstyled: true)
-                let listKind = listStyle.flatMap { body.listMarkers[$0] }
+                let paragraphStyle = majorityStyle(body.units, body.paragraphStyles, paragraphRange, total: body.units.count)
+                let isHeading = headingLevel(styleName(paragraphStyle, objects: objects)) != nil
+                let listKind = isHeading ? nil : listStyle.flatMap { body.listMarkers[$0] }
                 switch renderParagraph(body, start ..< index, objects: objects) {
                 case .heading(let text)?:
                     parts.append((text, false))
@@ -513,6 +516,7 @@ enum IWATable {
             if emphasis { trait = referenceID(at: index, in: body.characterStyles).flatMap { body.traits[$0] } }
             let url = referenceID(at: index, in: body.smartFields).flatMap { body.links[$0] }
             items.append((unit, trait?.bold ?? false, trait?.italic ?? false, url))
+            if body.escapedBackslashes[index] { items.append((unit, trait?.bold ?? false, trait?.italic ?? false, url)) }
         }
         var output = ""
         var i = 0
@@ -541,7 +545,7 @@ enum IWATable {
             let italic = items[i].italic
             var j = i
             while j < items.endIndex, items[j].bold == bold, items[j].italic == italic { j += 1 }
-            let text = String(decoding: items[i ..< j].map(\.unit), as: UTF16.self).replacingOccurrences(of: "\\", with: "\\\\")
+            let text = String(decoding: items[i ..< j].map(\.unit), as: UTF16.self)
             output += emphasize(text, bold: bold, italic: italic)
             i = j
         }
@@ -773,6 +777,7 @@ enum IWATable {
         var value: UInt64 = 0
         var shift: UInt64 = 0
         for byte in bytes {
+            guard shift < 64, shift != 63 || byte & 0x7F <= 1 else { return nil }
             value |= UInt64(byte & 0x7F) << shift
             if byte & 0x80 == 0 { return value }
             shift += 7

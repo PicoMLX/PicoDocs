@@ -33,6 +33,25 @@ enum MarkdownLiteral {
         return output
     }
 
+    /// Identify source backslashes that need an escape while retaining source
+    /// UTF-16 indices, so styled runs can share whole-document code context.
+    static func backslashEscapeMask(_ text: String) -> [Bool] {
+        let source = Array(text.utf16), escaped = Array(escapeBackslashes(text).utf16)
+        var mask = Array(repeating: false, count: source.count)
+        var i = 0, j = 0
+        while i < source.count {
+            if source[i] == 0x5C {
+                let start = i, escapedStart = j
+                while i < source.count, source[i] == 0x5C { i += 1 }
+                while j < escaped.count, escaped[j] == 0x5C { j += 1 }
+                if j - escapedStart == 2 * (i - start) {
+                    for index in start..<i { mask[index] = true }
+                }
+            } else { i += 1; j += 1 }
+        }
+        return mask
+    }
+
     static func escapeBlockStart(_ line: String) -> String {
         let content = line.drop { $0 == " " || $0 == "\t" }
         let lead = String(line[..<content.startIndex])

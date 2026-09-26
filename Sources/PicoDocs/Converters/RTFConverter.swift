@@ -267,7 +267,7 @@ public struct RTFConverter: DocumentConverter {
         }
         flushBytes()
         flushParagraph()
-        return paragraphs.joined(separator: "\n\n")
+        return MarkdownLiteral.escapeBackslashes(paragraphs.joined(separator: "\n\n"))
     }
 
     /// Windows code pages that are double-byte (DBCS): one character may span two
@@ -345,7 +345,7 @@ public struct RTFConverter: DocumentConverter {
         let leading = String(run.text.prefix(run.text.count - afterLeading.count))
         let trailingCount = afterLeading.reversed().prefix(while: isSpace).count
         let trailing = String(afterLeading.suffix(trailingCount))
-        var core = MarkdownLiteral.escapeBackslashes(String(afterLeading.dropLast(trailingCount)))
+        var core = String(afterLeading.dropLast(trailingCount))
         if run.italic { core = "*\(core)*" }
         if run.bold { core = "**\(core)**" }
         return leading + core + trailing
