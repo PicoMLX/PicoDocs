@@ -298,7 +298,11 @@ public struct WordConverter: DocumentConverter {
                 // Read raw text nodes to preserve significant whitespace
                 // (w:t may carry xml:space="preserve").
                 for child in node.getChildNodes() {
-                    if let textNode = child as? TextNode { textBuffer += textNode.getWholeText() }
+                    if let textNode = child as? TextNode {
+                        // Literal source backslashes must survive canonical
+                        // Markdown escape decoding in downstream renderers.
+                        textBuffer += textNode.getWholeText().replacingOccurrences(of: "\\", with: "\\\\")
+                    }
                 }
             case "w:tab":
                 textBuffer += "\t"

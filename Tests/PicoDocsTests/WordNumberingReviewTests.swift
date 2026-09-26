@@ -23,6 +23,18 @@ struct WordNumberingReviewTests {
         #expect(childEnd.upperBound < after.lowerBound)
     }
 
+    @Test func sourceBackslashesSurviveListRendering() throws {
+        let xml = try SwiftSoup.parse(#"<w:p><w:pPr><w:numPr/></w:pPr><w:r><w:t>First</w:t><w:br/><w:t>\- literal</w:t><w:br/><w:t>C:\folder\file</w:t></w:r></w:p>"#, "", SwiftSoup.Parser.xmlParser())
+        let paragraph = try #require(xml.getElementsByTag("w:p").first())
+        let markdown = try #require(WordConverter.renderParagraph(paragraph, relationships: [:]))
+        let result = ConverterResult(sections: [.init(markdown: markdown)])
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            let rendered = try DocumentRenderer.render(result, to: format)
+            #expect(rendered.contains(#"\- literal"#))
+            #expect(rendered.contains(#"C:\folder\file"#))
+        }
+    }
+
     private let ns = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\""
 
     @Test func concreteCountersOverridesDefaultsAndRestarts() throws {
