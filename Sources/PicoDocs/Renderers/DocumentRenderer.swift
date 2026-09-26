@@ -194,23 +194,25 @@ public enum DocumentRenderer {
     /// in place) and the footnote definitions (`[^id]: text`, with indented
     /// continuation lines folded in), in definition order.
     private static func extractFootnotes(_ markdown: String) -> (body: String, notes: [(id: String, text: String)]) {
-        let lines = markdown.components(separatedBy: "\n")
+        let lines = MarkdownBlockParser.normalizedLineEndings(markdown).components(separatedBy: "\n")
         var bodyLines: [String] = []
         var notes: [(id: String, text: String)] = []
         var i = 0
-        var inFence = false
+        var openingFence: (character: Character, length: Int)?
         while i < lines.count {
             // A `[^id]: text` line inside a fenced code block is literal code, not
             // a definition — track the fence so it stays in the body.
-            if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                inFence.toggle()
-                bodyLines.append(lines[i])
-                i += 1
-                continue
+            if let opening = openingFence {
+                if MarkdownBlockParser.closesFence(lines[i], opening: opening) { openingFence = nil }
+                bodyLines.append(lines[i]); i += 1; continue
+            }
+            if let opening = MarkdownBlockParser.fence(lines[i].trimmingCharacters(in: .whitespaces)) {
+                openingFence = opening
+                bodyLines.append(lines[i]); i += 1; continue
             }
             // Allow up to 3 leading spaces before a definition (Markdown block
             // indentation); 4+ spaces is an indented code block, left in the body.
-            if !inFence, let (id, first) = parseFootnoteDefinition(dropLeadingSpaces(lines[i], max: 3)) {
+            if let (id, first) = parseFootnoteDefinition(dropLeadingSpaces(lines[i], max: 3)) {
                 var textLines = [first]
                 i += 1
                 while i < lines.count {                       // indented continuation lines

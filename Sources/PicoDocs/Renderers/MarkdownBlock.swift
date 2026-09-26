@@ -33,8 +33,12 @@ enum MarkdownBlock: Equatable {
 /// renderer's CSV path and the exporters reuse them.
 enum MarkdownBlockParser {
 
+    static func normalizedLineEndings(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+    }
+
     static func parse(_ markdown: String) -> [MarkdownBlock] {
-        let lines = markdown.components(separatedBy: "\n")
+        let lines = normalizedLineEndings(markdown).components(separatedBy: "\n")
         var blocks: [MarkdownBlock] = []
         var i = 0
 
@@ -117,14 +121,14 @@ enum MarkdownBlockParser {
         return blocks
     }
 
-    private static func fence(_ line: String) -> (character: Character, length: Int)? {
+    static func fence(_ line: String) -> (character: Character, length: Int)? {
         guard let first = line.first, first == "`" || first == "~" else { return nil }
         let length = line.prefix { $0 == first }.count
         guard length >= 3, first != "`" || !line.dropFirst(length).contains("`") else { return nil }
         return (first, length)
     }
 
-    private static func closesFence(_ line: String, opening: (character: Character, length: Int)) -> Bool {
+    static func closesFence(_ line: String, opening: (character: Character, length: Int)) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         let length = trimmed.prefix { $0 == opening.character }.count
         return length >= opening.length && trimmed.dropFirst(length).trimmingCharacters(in: .whitespaces).isEmpty
@@ -144,20 +148,11 @@ enum MarkdownBlockParser {
     enum ListKind: Equatable { case ordered, unordered }
 
     static func listMarker(_ line: String) -> ListKind? {
-        if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") { return .unordered }
-        // ordered: one-or-more digits, then ". "
-        var index = line.startIndex
-        var digits = 0
-        while index < line.endIndex, line[index].isNumber { digits += 1; index = line.index(after: index) }
-        if digits > 0, index < line.endIndex, line[index] == "." {
-            let after = line.index(after: index)
-            if after < line.endIndex, line[after] == " " { return .ordered }
-        }
-        return nil
+        MarkdownList.isOrderedMarker(line).map { $0 ? .ordered : .unordered }
     }
 
     static func stripListMarker(_ line: String) -> String {
-        if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
+        if listMarker(line) == .unordered {
             return String(line.dropFirst(2))
         }
         if let dot = line.firstIndex(of: "."), line[line.startIndex..<dot].allSatisfy(\.isNumber) {

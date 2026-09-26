@@ -61,8 +61,9 @@ public struct PPTXExporter: DocumentExporter {
         init(text: String, ordered: Bool? = nil, number: Int = 1, level: Int = 0, inlines: [MarkdownInline]? = nil) {
             self.text = text; self.ordered = ordered; self.number = number; self.level = level; self.inlines = inlines
         }
-        init(markdown: String, ordered: Bool? = nil, number: Int = 1, level: Int = 0) {
-            let nodes = MarkdownInlineParser.parse(markdown)
+        init(markdown: String, ordered: Bool? = nil, number: Int = 1, level: Int = 0, normalizeLineBreaks: Bool = false) {
+            let parsed = MarkdownInlineParser.parse(markdown)
+            let nodes = normalizeLineBreaks ? normalizedBreaks(parsed) : parsed
             self.init(text: nodes.plainText, ordered: ordered, number: number, level: level, inlines: nodes)
         }
     }
@@ -129,10 +130,10 @@ public struct PPTXExporter: DocumentExporter {
             case .heading(_, let text):
                 lines.append(Paragraph(markdown: text))
             case .paragraph(let text):
-                lines.append(Paragraph(markdown: normalizedBreaks(text)))
+                lines.append(Paragraph(markdown: text, normalizeLineBreaks: true))
             case .list(let list):
                 for item in list.paragraphs() {
-                    lines.append(Paragraph(markdown: normalizedBreaks(item.text), ordered: item.continuation ? nil : item.ordered, number: item.number ?? 1, level: item.level))
+                    lines.append(Paragraph(markdown: item.text, ordered: item.continuation ? nil : item.ordered, number: item.number ?? 1, level: item.level, normalizeLineBreaks: true))
                 }
             case .code(let code):
                 for line in code.components(separatedBy: "\n") { lines.append(Paragraph(text: line)) }
@@ -145,6 +146,18 @@ public struct PPTXExporter: DocumentExporter {
             }
         }
         return lines
+    }
+
+    private static func normalizedBreaks(_ nodes: [MarkdownInline]) -> [MarkdownInline] {
+        nodes.map { node in
+            switch node {
+            case .text(let text): return .text(normalizedBreaks(text))
+            case .strong(let children): return .strong(normalizedBreaks(children))
+            case .emphasis(let children): return .emphasis(normalizedBreaks(children))
+            case .link(let label, let destination): return .link(label: normalizedBreaks(label), destination: destination)
+            default: return node
+            }
+        }
     }
 
     private static func normalizedBreaks(_ text: String) -> String {

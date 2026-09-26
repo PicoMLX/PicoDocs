@@ -116,7 +116,7 @@ public struct XLSXExporter: DocumentExporter {
         var field = ""
         var inQuotes = false
         var fieldStarted = false
-        let chars = Array(csv)
+        let chars = Array(csv.unicodeScalars)
         var i = 0
         func endField() { row.append(field); field = ""; fieldStarted = false }
         func endRow() { endField(); rows.append(row); row = [] }
@@ -127,7 +127,7 @@ public struct XLSXExporter: DocumentExporter {
                     if i + 1 < chars.count, chars[i + 1] == "\"" { field.append("\""); i += 2; continue }
                     inQuotes = false; i += 1; continue
                 }
-                field.append(c); i += 1
+                field.unicodeScalars.append(c); i += 1
             } else {
                 switch c {
                 case "\"": fieldStarted = true; inQuotes = true; i += 1
@@ -136,7 +136,7 @@ public struct XLSXExporter: DocumentExporter {
                     if i + 1 < chars.count, chars[i + 1] == "\n" { i += 1 }
                     endRow(); i += 1
                 case "\n": endRow(); i += 1
-                default: field.append(c); i += 1
+                default: field.unicodeScalars.append(c); i += 1
                 }
             }
         }
@@ -155,14 +155,24 @@ public struct XLSXExporter: DocumentExporter {
         var suffix = 2
         while used.contains(candidate.lowercased()) {
             let tail = " (\(suffix))"
-            candidate = String(name.prefix(31 - tail.count)) + tail
+            candidate = truncateSheetName(name, limit: 31 - tail.utf16.count) + tail
             suffix += 1
         }
         used.insert(candidate.lowercased())
         return candidate
     }
 
-    /// Excel sheet names: ≤31 chars and none of `: \ / ? * [ ]`.
+    private static func truncateSheetName(_ name: String, limit: Int) -> String {
+        var result = "", length = 0
+        for character in name {
+            let text = String(character)
+            guard length + text.utf16.count <= limit else { break }
+            result += text; length += text.utf16.count
+        }
+        return result
+    }
+
+    /// Excel sheet names: ≤31 UTF-16 units and none of `: \ / ? * [ ]`.
     private static func sanitizeSheetName(_ name: String) -> String {
         let invalid = CharacterSet(charactersIn: ":\\/?*[]")
         // Map scalars (not characters) so multi-scalar grapheme clusters — flag
@@ -172,7 +182,7 @@ public struct XLSXExporter: DocumentExporter {
         let cleanedScalars = name.unicodeScalars.filter(OOXMLPackageWriter.isValidXMLScalar).map { invalid.contains($0) || [9, 10, 13].contains($0.value) ? space : $0 }
         let cleaned = String(String.UnicodeScalarView(cleanedScalars))
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return String(cleaned.prefix(31)).trimmingCharacters(in: CharacterSet(charactersIn: "'"))
+        return truncateSheetName(cleaned, limit: 31).trimmingCharacters(in: CharacterSet(charactersIn: "'"))
     }
 
     // MARK: - Package parts
@@ -224,7 +234,7 @@ public struct XLSXExporter: DocumentExporter {
             var cells = ""
             for (c, value) in row.enumerated() {
                 let ref = "\(columnName(c + 1))\(rowNumber)"
-                cells += "<c r=\"\(ref)\" t=\"inlineStr\"><is><t xml:space=\"preserve\">\(OOXMLPackageWriter.escape(value))</t></is></c>"
+                cells += "<c r=\"\(ref)\" t=\"inlineStr\"><is><t xml:space=\"preserve\">\(OOXMLPackageWriter.escape(value).replacingOccurrences(of: "\r", with: "&#13;"))</t></is></c>"
             }
             data += "<row r=\"\(rowNumber)\">\(cells)</row>"
         }

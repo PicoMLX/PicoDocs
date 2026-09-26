@@ -1,9 +1,63 @@
 import Foundation
 import Testing
 import ZIPFoundation
+import SwiftSoup
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func canonicalLineEndingsFencesAndTabMarkers() throws {
+        let expected: [MarkdownBlock] = [.heading(1, "Title"), .code("code"), .paragraph("after")]
+        for newline in ["\r\n", "\r", "\n"] {
+            #expect(MarkdownBlockParser.parse(["# Title", "", "```", "code", "```", "after"].joined(separator: newline)) == expected)
+        }
+        for source in ["~~~\n[^n]: literal\n~~~", "````\n```\n[^n]: literal\n````"] {
+            for format in [ExportFileType.html, .plaintext] {
+                let text = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: source)]), to: format)
+                #expect(text.contains("[^n]: literal"))
+            }
+        }
+        for marker in ["-", "*", "+", "2."] {
+            let data = try PicoDocsEngine.write(markdown: marker + "\tfirst\n\tcontinued", to: .docx)
+            #expect(try xml(data, "word/document.xml").contains("<w:numPr>"))
+        }
+        let sibling = try PicoDocsEngine.write(markdown: "- first\n - second", to: .pptx)
+        #expect(try !xml(sibling, "ppt/slides/slide1.xml").contains(#"lvl="1""#))
+    }
+
+    @Test func inlineCodeNormalizesItsOwnSlideNewlines() throws {
+        let data = try PicoDocsEngine.write(markdown: "`one\\\ntwo` and `one  \ntwo`\n\n- `list\\\n  continuation`", to: .pptx)
+        let slide = try xml(data, "ppt/slides/slide1.xml")
+        #expect(slide.contains(#">one\ two</a:t>"#))
+        #expect(slide.contains(">one   two</a:t>"))
+        #expect(!slide.contains("<a:br/>"))
+        #expect(MarkdownInlineParser.parse(#"[x](<https://e.test/a\>b\~c>)"#) == [.link(label: [.text("x")], destination: "https://e.test/a>b~c")])
+        let linked = try PicoDocsEngine.write(markdown: #"[x](<https://e.test/a\>b\~c>)"#, to: .docx)
+        #expect(try xml(linked, "word/_rels/document.xml.rels").contains("https://e.test/a%3Eb~c"))
+    }
+
+    @Test func CSVCRLFRecordsAndCarriageReturnsStayLossless() throws {
+        let csv = "A,B\r\n\"one\rtwo\",\"three\r\nfour\"\r\nlast,value"
+        let result = ConverterResult(sections: [.init(kind: .sheet, markdown: "", metadata: ["csv": csv])])
+        let sheet = try xml(PicoDocsEngine.write(result, to: .xlsx), "xl/worksheets/sheet1.xml")
+        #expect(sheet.components(separatedBy: "<row ").count - 1 == 3)
+        #expect(sheet.contains("one&#13;two"))
+        #expect(sheet.contains("three&#13;\nfour"))
+        #expect(sheet.contains(#"r="B3""#))
+    }
+
+    @Test func sheetNamesRespectUTF16BudgetAndGraphemeBoundaries() throws {
+        let flag = "🇺🇸", family = "👨‍👩‍👧‍👦"
+        let result = ConverterResult(sections: [flag, flag, family].map { .init(title: String(repeating: $0, count: 31), markdown: "value") })
+        let workbook = try xml(PicoDocsEngine.write(result, to: .xlsx), "xl/workbook.xml")
+        let document = try SwiftSoup.parse(workbook, "", SwiftSoup.Parser.xmlParser())
+        let names = try document.getElementsByTag("sheet").array().map { try $0.attr("name") }
+        #expect(names.count == 3)
+        #expect(names.allSatisfy { $0.utf16.count <= 31 })
+        #expect(names[0] == String(repeating: flag, count: 7))
+        #expect(names[1] == String(repeating: flag, count: 6) + " (2)")
+        #expect(names[2] == String(repeating: family, count: 2))
+    }
+
     @Test func nestedEmphasisSharedClosersAndAllPunctuationEscapes() {
         #expect(MarkdownInlineParser.parse("**bold *italic***") == [.strong([.text("bold "), .emphasis([.text("italic")])])])
         #expect(MarkdownInlineParser.parse("*italic **bold***") == [.emphasis([.text("italic "), .strong([.text("bold")])])])

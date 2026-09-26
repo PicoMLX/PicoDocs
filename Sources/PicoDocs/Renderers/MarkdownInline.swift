@@ -59,7 +59,7 @@ enum MarkdownInlineParser {
             else if chars[index] == ")", let open = stack.popLast() { parenCloses[open] = index }
         }
         for index in chars.indices.reversed() {
-            nextAngle[index] = chars[index] == ">" ? index : nextAngle[index + 1]
+            nextAngle[index] = chars[index] == ">" && !escapedPositions.contains(index) ? index : nextAngle[index + 1]
         }
         var tickRuns: [(start: Int, length: Int)] = [], scan = 0
         while scan < chars.count {
@@ -176,7 +176,7 @@ enum MarkdownInlineParser {
         var cursor = destStart
         if destStart < chars.count, chars[destStart] == "<" {
             guard let gt = nextAngle[destStart + 1] else { return nil }
-            dest = String(chars[(destStart + 1)..<gt])
+            dest = unescape(String(chars[(destStart + 1)..<gt]))
             cursor = gt + 1
             guard cursor < chars.count, chars[cursor] == ")" else { return nil }
         } else {
