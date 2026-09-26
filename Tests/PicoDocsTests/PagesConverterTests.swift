@@ -14,6 +14,15 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func sourceInlineCodeStopsAtParagraphBoundaries() async throws {
+        let source = "`a\\*\n\nb`"
+        let inputs = [("literal.txt",Data(source.utf8)),("literal.rtf",Data(#"{\rtf1\ansi `a\\*\par b`}"#.utf8)),("literal.pages",Self.makePagesFile(paragraphs:["`a\\*","","b`"]))]
+        for (filename,data) in inputs {
+            let result = try await PicoDocsEngine.convert(data:data,filename:filename)
+            for format in [ExportFileType.html,.plaintext] { #expect(try DocumentRenderer.render(result,to:format).contains(#"`a\*"#)) }
+        }
+    }
+
     @Test func bareItemsAcceptAllContentColumnContinuations() throws {
         for continuation in ["# Heading", "> Quote", "prose", "- child", "```\n   code\n   ```"] {
             let source = "1.\n   " + continuation + "\n2. Next"

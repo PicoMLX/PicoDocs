@@ -24,6 +24,11 @@ enum MarkdownLiteral {
             } else if inFence {
                 output += line
                 if index < lines.count - 1 { output += "\n" }
+            } else if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                // Inline spans stop at paragraph boundaries; fences retain state.
+                flushProse()
+                output += line
+                if index < lines.count - 1 { output += "\n" }
             } else {
                 prose += line
                 if index < lines.count - 1 { prose += "\n" }
