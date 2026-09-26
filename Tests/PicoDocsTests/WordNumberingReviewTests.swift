@@ -5,6 +5,17 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func RTFBackslashesSurviveProseAndCode() async throws {
+        let paragraphs = [#"literal \* and \\server"#, #"`a\*b` and ``c\*d``"#, "```", #"e\*f"#, "```"]
+        let rtf = #"{\rtf1\ansi "# + paragraphs.map { $0.replacingOccurrences(of:"\\",with:"\\\\") }.joined(separator:#"\par "#) + "}"
+        let result = try await PicoDocsEngine.convert(data:Data(rtf.utf8),filename:"literal.rtf")
+        for format in [ExportFileType.html,.plaintext] {
+            let output = try DocumentRenderer.render(result,to:format)
+            for text in [#"literal \* and \\server"#, #"a\*b"#, #"c\*d"#, #"e\*f"#] { #expect(output.contains(text)) }
+            #expect(!output.contains(#"a\\*b"#)); #expect(!output.contains(#"e\\*f"#))
+        }
+    }
+
     @Test func omittedSuffixDefaultsToTabs() async throws {
         for format in ["bullet", "decimal"] {
             let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"\(format)\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"

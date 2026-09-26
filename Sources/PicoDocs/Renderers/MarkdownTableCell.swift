@@ -12,6 +12,40 @@
 import Foundation
 
 enum MarkdownTableCell {
+    /// Transform semantic code spans separately from canonical literal text.
+    static func mapCodeSpans(_ text: String, keepDelimiters: Bool = true, code: (String) -> String, plain: (String) -> String) -> String {
+        let chars = Array(text)
+        var runs: [(Int, Int)] = [], index = 0
+        while index < chars.count {
+            if chars[index] == "`" {
+                let start = index
+                while index < chars.count, chars[index] == "`" { index += 1 }
+                runs.append((start, index - start))
+            } else { index += 1 }
+        }
+        var closers: [Int: (Int, Int)] = [:], next: [Int: Int] = [:]
+        for (start, length) in runs.reversed() {
+            if let close = next[length] { closers[start] = (close, length) }
+            next[length] = start
+        }
+        index = 0
+        var buffer = "", output = ""
+        while index < chars.count {
+            if chars[index] == "\\", index + 1 < chars.count {
+                buffer.append(chars[index]); buffer.append(chars[index + 1]); index += 2
+            } else if chars[index] == "`", let (close, length) = closers[index] {
+                output += plain(buffer); buffer = ""
+                let delimiter = keepDelimiters ? String(repeating: "`", count: length) : ""
+                output += delimiter + code(String(chars[(index + length)..<close])) + delimiter
+                index = close + length
+            } else {
+                buffer.append(chars[index]); index += 1
+            }
+        }
+        return output + plain(buffer)
+    }
+
+
 
     /// Escapes the characters that are structural in a pipe-table cell: a literal
     /// backslash (`\` -> `\\`, done first) and the pipe delimiter (`|` -> `\|`).

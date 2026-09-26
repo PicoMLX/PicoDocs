@@ -267,7 +267,7 @@ public struct RTFConverter: DocumentConverter {
         }
         flushBytes()
         flushParagraph()
-        return paragraphs.joined(separator: "\n\n")
+        return MarkdownLiteral.escapeBackslashes(paragraphs.joined(separator: "\n\n"))
     }
 
     /// Windows code pages that are double-byte (DBCS): one character may span two
