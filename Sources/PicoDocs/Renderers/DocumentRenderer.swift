@@ -526,7 +526,7 @@ public enum DocumentRenderer {
                 var rows: [[String]] = []
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.unescape($0) }
+                    let cells = parseTableRow(lines[i])
                     // The header/body separator is conventionally the second row;
                     // only drop an all-dash row there, so real data rows that
                     // happen to be all dashes elsewhere are kept.

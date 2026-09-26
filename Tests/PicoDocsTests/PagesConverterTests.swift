@@ -14,6 +14,17 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func tableSourceBackslashesSurviveInlineRendering() async throws {
+        let result = try await PicoDocsEngine.convert(data: Data("value\n\\* regex".utf8), filename: "literal.csv")
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            #expect(try DocumentRenderer.render(result, to: format).contains(#"\* regex"#))
+        }
+        let xml = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>\* regex</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
+        let word = try await PicoDocsEngine.convert(data: Self.makeZip([(name: "word/document.xml", data: Array(xml.utf8))]), filename: "literal.docx")
+        #expect(word.markdown().contains(#"\\* regex"#))
+        #expect(!word.markdown().contains(#"\\\\* regex"#))
+        #expect(try DocumentRenderer.render(word, to: .plaintext).contains(#"\* regex"#))
+    }
 
     // MARK: - Snappy
 

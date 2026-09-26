@@ -356,7 +356,7 @@ public struct WordConverter: DocumentConverter {
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
-                cells.append(MarkdownTableCell.escapeDelimiters(cellText)
+                cells.append(cellText.replacingOccurrences(of: "|", with: "\\|")
                     .replacingOccurrences(of: "\r\n", with: "<br>")
                     .replacingOccurrences(of: "\r", with: "<br>")
                     .replacingOccurrences(of: "\n", with: "<br>"))
