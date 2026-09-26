@@ -279,14 +279,17 @@ public struct WordConverter: DocumentConverter {
 
     static func renderRun(_ run: Element, relationships: [String: String]) -> String {
         let properties = try? run.getElementsByTag("w:rPr").first()
+        let bold = isFormattingEnabled(properties, tag: "w:b")
+        let italic = isFormattingEnabled(properties, tag: "w:i")
         if (try? properties?.getElementsByTag("w:rStyle").first()?.attr("w:val")) == "PicoCode" {
             let code = codeText(run)
             let delimiter = String(repeating: "`", count: max(1, (code.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0) + 1))
             let pad = code.hasPrefix("`") || code.hasSuffix("`") || (code.hasPrefix(" ") && code.hasSuffix(" ") && code.contains(where: { $0 != " " })) ? " " : ""
-            return delimiter + pad + code + pad + delimiter
+            var fragment = delimiter + pad + code + pad + delimiter
+            if bold { fragment = "**\(fragment)**" }
+            if italic { fragment = "*\(fragment)*" }
+            return fragment
         }
-        let bold = isFormattingEnabled(properties, tag: "w:b")
-        let italic = isFormattingEnabled(properties, tag: "w:i")
 
         var out = ""
         var textBuffer = ""
@@ -611,7 +614,7 @@ public struct WordConverter: DocumentConverter {
     static func imageMarkdown(in drawing: Element, relationships: [String: String]) -> String {
         guard let target = imageTarget(in: drawing, relationships: relationships) else { return "" }
         let path = resolvePartPath(target, relativeTo: "word")
-        return "![\(escapeLinkLabel(imageAltText(in: drawing)))](\(escapeLinkDestination(path)))"
+        return "![\(escapeLiteralText(imageAltText(in: drawing)))](\(escapeLinkDestination(path)))"
     }
 
     /// The relationship Target (e.g. "media/image1.png") an image references via

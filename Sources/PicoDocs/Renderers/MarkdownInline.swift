@@ -210,7 +210,7 @@ enum MarkdownInlineParser {
         guard cursor < chars.count, chars[cursor] == ")" else { return nil }
         let labelText = String(chars[(bracket + 1)..<labelEnd])
         let node: MarkdownInline = isImage
-            ? .image(alt: unescape(labelText), source: dest)
+            ? .image(alt: parse(labelText).plainText, source: dest)
             : .link(label: parse(labelText), destination: dest)
         return (node, cursor + 1)   // past the ")"
     }

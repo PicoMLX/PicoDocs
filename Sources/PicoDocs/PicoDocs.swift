@@ -159,7 +159,7 @@ public enum PicoDocsEngine {
             let alt = section.title ?? (reference as NSString).lastPathComponent
             refs.append(DocumentSection(
                 kind: .body,
-                markdown: "![\(Self.escapeMarkdown(alt, "\\[]"))](\(Self.escapeMarkdown(reference, "\\()")))"
+                markdown: "![\(Self.escapeMarkdown(alt, "\\`*_{}[]<>"))](<\(Self.escapeMarkdown(reference, "\\<>"))>)"
             ))
         }
         guard !refs.isEmpty else { return result }

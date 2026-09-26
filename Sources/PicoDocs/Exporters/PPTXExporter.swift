@@ -136,7 +136,7 @@ public struct PPTXExporter: DocumentExporter {
                     lines.append(Paragraph(markdown: item.text, ordered: item.continuation ? nil : item.ordered, number: item.number ?? 1, level: item.level, normalizeLineBreaks: true))
                 }
             case .code(let code):
-                for line in code.components(separatedBy: "\n") { lines.append(Paragraph(text: line)) }
+                for line in code.components(separatedBy: "\n") { lines.append(Paragraph(text: line, inlines: [.code(line)])) }
             case .blockquote(let quoteLines):
                 for line in quoteLines { lines.append(Paragraph(markdown: line)) }
             case .table(let rows):

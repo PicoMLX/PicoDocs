@@ -8,6 +8,29 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func emphasizedCodeAndFencedCodeFonts() async throws {
+        let data = try PicoDocsEngine.write(markdown: "**`bold`** *`italic`* ***`both`***", to: .docx)
+        let recovered = try await PicoDocsEngine.convert(data: data, filename: "code.docx")
+        #expect(recovered.markdown().contains("**`bold`**"))
+        #expect(recovered.markdown().contains("*`italic`*"))
+        #expect(recovered.markdown().contains("***`both`***"))
+        let pptx = try PicoDocsEngine.write(markdown: "```swift\nlet x = 1\nprint(x)\n```", to: .pptx)
+        let slide = try xml(pptx, "ppt/slides/slide1.xml")
+        #expect(slide.components(separatedBy: "Courier New").count - 1 == 2)
+    }
+
+    @Test func imageLabelsAndWhitespacePaths() throws {
+        #expect(MarkdownInlineParser.parse("![**Bold** and `code`](image.png)") == [.image(alt: "Bold and code", source: "image.png")])
+        let image = DocumentSection(title: "**literal**", kind: .image, markdown: "", sourcePath: "assets/company logo.png", metadata: ["mimeType": "image/png", "base64": Data([1,2,3]).base64EncodedString()])
+        for format in [ExportableFileType.docx, .pptx] {
+            let data = try PicoDocsEngine.write(ConverterResult(sections: [image]), to: format)
+            let part = try xml(data, format == .docx ? "word/document.xml" : "ppt/slides/slide1.xml")
+            if format == .docx { #expect(part.contains("<w:drawing>")) }
+            if format == .pptx { #expect(!part.contains("company logo.png")) }
+            #expect(part.contains("**literal**"))
+        }
+    }
+
     @Test func importedImagesKeepPackageIdentity() async throws {
         let namespaces = #"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main""#
         let document = "<w:document \(namespaces)><w:body><w:p>" + ["a","b"].map { "<w:r><w:drawing><a:blip r:embed=\"\($0)\"/></w:drawing></w:r>" }.joined() + "</w:p></w:body></w:document>"
