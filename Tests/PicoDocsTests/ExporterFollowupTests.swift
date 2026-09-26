@@ -4,6 +4,54 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func completeCodeDelimitersAndMalformedDestinations() async throws {
+        #expect(MarkdownInlineParser.parse("Use ``a`b`` now") == [.text("Use "), .code("a`b"), .text(" now")])
+        #expect(MarkdownInlineParser.parse("`` `x` ``") == [.code("`x`")])
+        let fenced = "````\n```\ncontent\n```\n````"
+        #expect(MarkdownBlockParser.parse(fenced) == [.code("```\ncontent\n```")])
+        #expect(MarkdownBlockParser.parse("~~~\n```\n~~~") == [.code("```")])
+        let incomplete = String(repeating: "[](", count: 20_000)
+        #expect(MarkdownInlineParser.parse(incomplete).plainText == incomplete)
+        let markdown = "Use ``a`b`` now\n\n" + fenced
+        let docx = try PicoDocsEngine.write(markdown: markdown, to: .docx)
+        let recovered = try await PicoDocsEngine.convert(data: docx, filename: "code.docx")
+        #expect(recovered.markdown().contains("``a`b``"))
+        #expect(recovered.markdown().contains(fenced))
+    }
+
+    @Test func quotesListsSlideMarkersAndTitleImages() async throws {
+        let source = "> Quoted\n\n1. Plan\n2. Ship\n\n- Bullet"
+        let data = try PicoDocsEngine.write(markdown: source, to: .docx)
+        let recovered = try await PicoDocsEngine.convert(data: data, filename: "roundtrip.docx")
+        #expect(recovered.markdown().contains("> Quoted"))
+        #expect(recovered.markdown().contains("1. Plan"))
+        #expect(recovered.markdown().contains("2. Ship"))
+        #expect(recovered.markdown().contains("- Bullet"))
+        let second = try PicoDocsEngine.write(recovered, to: .docx)
+        let reread = try await PicoDocsEngine.convert(data: second, filename: "second.docx")
+        #expect(reread.markdown().contains("2. Ship"))
+        let slide = try xml(PicoDocsEngine.write(markdown: source, to: .pptx), "ppt/slides/slide1.xml")
+        #expect(slide.contains(#"<a:buAutoNum type="arabicPeriod" startAt="1"/>"#))
+        #expect(slide.contains(#"<a:buAutoNum type="arabicPeriod" startAt="2"/>"#))
+        #expect(slide.contains("<a:buChar"))
+        let image = ConverterResult(sections: [.init(title: "icons/logo.png", kind: .image, markdown: "", metadata: ["base64": Data([1,2,3]).base64EncodedString(), "mimeType": "image/png"])])
+        #expect(try xml(PicoDocsEngine.write(image, to: .docx), "word/document.xml").contains("<w:drawing>"))
+    }
+
+    @Test func sheetWhitespaceAndAttributedBreaks() throws {
+        let sheets = ConverterResult(sections: ["A B", "A\nB", "A\tB", "A\rB"].map { .init(title: $0, kind: .sheet, markdown: "x") })
+        let workbook = try xml(PicoDocsEngine.write(sheets, to: .xlsx), "xl/workbook.xml")
+        #expect(workbook.components(separatedBy: #"name="A B""#).count == 2)
+        #expect(workbook.contains(#"name="A B (2)""#))
+        #if canImport(AppKit) || canImport(UIKit)
+        let result = ConverterResult(sections: [.init(markdown: "first\nsecond\n\nfirst\\\nsecond\n\nfirst  \nsecond")])
+        let text = AttributedStringDocumentBuilder.attributedString(from: result).string
+        #expect(text.contains("first second"))
+        #expect(text.components(separatedBy: "first\nsecond").count == 3)
+        #expect(!text.contains("\\"))
+        #endif
+    }
+
     private func xml(_ data: Data, _ path: String) throws -> String {
         let archive = try #require(Archive(data: data, accessMode: .read))
         let entry = try #require(archive[path])

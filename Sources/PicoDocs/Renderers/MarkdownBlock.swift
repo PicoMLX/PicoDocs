@@ -46,10 +46,10 @@ enum MarkdownBlockParser {
 
             if isBlank(line) { i += 1; continue }
 
-            if trimmed.hasPrefix("```") {
+            if let opening = fence(trimmed) {
                 i += 1
                 var code: [String] = []
-                while i < lines.count, !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                while i < lines.count, !closesFence(lines[i], opening: opening) {
                     code.append(lines[i]); i += 1
                 }
                 if i < lines.count { i += 1 }   // closing fence
@@ -114,7 +114,7 @@ enum MarkdownBlockParser {
             var paragraph: [String] = []
             while i < lines.count {
                 let candidate = lines[i].trimmingCharacters(in: .whitespaces)
-                if isBlank(lines[i]) || candidate.hasPrefix("```") || candidate.hasPrefix("|")
+                if isBlank(lines[i]) || fence(candidate) != nil || candidate.hasPrefix("|")
                     || candidate.hasPrefix(">") || candidate == "---" || candidate == "***"
                     || headingMatch(candidate) != nil || listMarker(candidate) != nil {
                     break
@@ -126,6 +126,19 @@ enum MarkdownBlockParser {
             }
         }
         return blocks
+    }
+
+    private static func fence(_ line: String) -> (character: Character, length: Int)? {
+        guard let first = line.first, first == "`" || first == "~" else { return nil }
+        let length = line.prefix { $0 == first }.count
+        guard length >= 3, first != "`" || !line.dropFirst(length).contains("`") else { return nil }
+        return (first, length)
+    }
+
+    private static func closesFence(_ line: String, opening: (character: Character, length: Int)) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let length = trimmed.prefix { $0 == opening.character }.count
+        return length >= opening.length && trimmed.dropFirst(length).trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     static func headingMatch(_ line: String) -> (level: Int, text: String)? {

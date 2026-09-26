@@ -35,10 +35,11 @@ public struct WordConverter: DocumentConverter {
             throw PicoDocsError.emptyDocument
         }
 
-        var blocks = try Self.renderBlocks(in: body, relationships: relationships)
+        let numbering = WordListNumbering(archive: archive)
+        var blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering)
         // Text boxes (shapes with text) store their content in `w:txbxContent`
         // outside the normal block flow; extract it and append as body blocks.
-        blocks += try Self.extractTextBoxes(from: body, relationships: relationships)
+        blocks += try Self.extractTextBoxes(from: body, relationships: relationships, numbering: numbering)
         var markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Footnote/endnote text lives in separate parts; append the referenced
@@ -95,21 +96,29 @@ public struct WordConverter: DocumentConverter {
     /// Renders the block-level children of a container (the body, or a content
     /// control's content) to Markdown blocks, recursing into `w:sdt` content
     /// controls (forms/templates wrap paragraphs and tables in them).
-    static func renderBlocks(in container: Element, relationships: [String: String]) throws -> [String] {
+    static func renderBlocks(in container: Element, relationships: [String: String], numbering: WordListNumbering? = nil) throws -> [String] {
         var blocks: [String] = []
+        var previousList: MarkdownBlockParser.ListKind?
         for element in container.children().array() {
             try Task.checkCancellation()
             switch element.tagName().lowercased() {
             case "w:p":
-                if let markdown = renderParagraph(element, relationships: relationships), !markdown.isEmpty {
-                    blocks.append(markdown)
+                if let markdown = renderParagraph(element, relationships: relationships, numbering: numbering), !markdown.isEmpty {
+                    let marker = MarkdownBlockParser.listMarker(markdown.trimmingCharacters(in: .whitespaces))
+                    if marker != nil, marker == previousList, !blocks.isEmpty,
+                       !markdown.trimmingCharacters(in: .whitespaces).hasPrefix("1. ") {
+                        blocks[blocks.count - 1] += "\n" + markdown
+                    } else { blocks.append(markdown) }
+                    previousList = marker
                 }
             case "w:tbl":
-                let table = renderTable(element, relationships: relationships)
+                previousList = nil
+                let table = renderTable(element, relationships: relationships, numbering: numbering)
                 if !table.isEmpty { blocks.append(table) }
             case "w:sdt":
+                previousList = nil
                 if let content = try? element.getElementsByTag("w:sdtContent").first() {
-                    blocks.append(contentsOf: try renderBlocks(in: content, relationships: relationships))
+                    blocks.append(contentsOf: try renderBlocks(in: content, relationships: relationships, numbering: numbering))
                 }
             default:
                 continue
@@ -123,13 +132,13 @@ public struct WordConverter: DocumentConverter {
     /// blocks. Honors markup-compatibility (`mc:AlternateContent`) semantics by
     /// rendering only one branch per AlternateContent, so a text box isn't
     /// duplicated across `mc:Choice`/`mc:Fallback` (or multiple choices).
-    static func extractTextBoxes(from body: Element, relationships: [String: String]) throws -> [String] {
+    static func extractTextBoxes(from body: Element, relationships: [String: String], numbering: WordListNumbering? = nil) throws -> [String] {
         var blocks: [String] = []
         // Iterate the Elements sequence directly (no intermediate array copy).
         guard let textBoxes = try? body.getElementsByTag("w:txbxContent") else { return blocks }
         for txbx in textBoxes {
             if !shouldRenderTextBox(txbx) { continue }
-            blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships))
+            blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships, numbering: numbering))
         }
         return blocks
     }
@@ -188,23 +197,26 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Paragraphs
 
-    static func renderParagraph(_ paragraph: Element, relationships: [String: String]) -> String? {
-        let style = try? paragraph.getElementsByTag("w:pStyle").first()?.attr("w:val")
+    static func renderParagraph(_ paragraph: Element, relationships: [String: String], numbering: WordListNumbering? = nil) -> String? {
+        let properties = paragraph.children().first { $0.tagName().lowercased() == "w:ppr" }
+        let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
         if style == "PicoCodeBlock" {
             let code = codeText(paragraph)
             let fence = String(repeating: "`", count: max(3, (code.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0) + 1))
             return fence + "\n" + code + "\n" + fence
         }
-        let isListItem = (try? paragraph.getElementsByTag("w:numPr").first()) != nil
+        let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
+        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style) } ?? (numPr != nil ? "- " : nil)
         let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return nil }
 
         if let level = headingLevel(forStyle: style) {
             return String(repeating: "#", count: level) + " " + text
         }
-        if isListItem {
-            return "- " + text
+        if style?.lowercased() == "quote" {
+            return text.components(separatedBy: "\n").map { "> " + $0 }.joined(separator: "\n")
         }
+        if let prefix { return prefix + text }
         return text
     }
 
@@ -363,7 +375,7 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Tables
 
-    static func renderTable(_ table: Element, relationships: [String: String]) -> String {
+    static func renderTable(_ table: Element, relationships: [String: String], numbering: WordListNumbering? = nil) -> String {
         var rows: [[String]] = []
         for tr in table.children().array() where tr.tagName().lowercased() == "w:tr" {
             var cells: [String] = []
@@ -455,7 +467,7 @@ public struct WordConverter: DocumentConverter {
 
     /// The Target of the first `document.xml.rels` relationship whose Type ends
     /// with `typeSuffix` (e.g. "/footnotes"); relative to `word/`.
-    private static func relationshipTarget(_ archive: Archive, typeSuffix: String) -> String? {
+    static func relationshipTarget(_ archive: Archive, typeSuffix: String) -> String? {
         guard let data = readEntry(archive, path: "word/_rels/document.xml.rels"),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {

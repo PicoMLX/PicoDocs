@@ -50,6 +50,29 @@ enum MarkdownInlineParser {
                 nextBracket[index] = chars[index] == "]" && !escapedPositions.contains(index) ? index : nextBracket[index + 1]
             }
         }
+        // Pair destinations once; failed candidates never rescan a suffix.
+        var parenCloses: [Int: Int] = [:], stack: [Int] = []
+        var nextAngle = Array<Int?>(repeating: nil, count: chars.count + 1)
+        for index in chars.indices where !escapedPositions.contains(index) {
+            if chars[index] == "(" { stack.append(index) }
+            else if chars[index] == ")", let open = stack.popLast() { parenCloses[open] = index }
+        }
+        for index in chars.indices.reversed() {
+            nextAngle[index] = chars[index] == ">" ? index : nextAngle[index + 1]
+        }
+        var tickRuns: [(start: Int, length: Int)] = [], scan = 0
+        while scan < chars.count {
+            if chars[scan] == "`" {
+                let start = scan
+                while scan < chars.count, chars[scan] == "`" { scan += 1 }
+                tickRuns.append((start, scan - start))
+            } else { scan += 1 }
+        }
+        var nextTicks: [Int: (close: Int, length: Int)] = [:], lastTick: [Int: Int] = [:]
+        for tick in tickRuns.reversed() {
+            if let close = lastTick[tick.length] { nextTicks[tick.start] = (close, tick.length) }
+            lastTick[tick.length] = tick.start
+        }
         var nodes: [MarkdownInline] = []
         var run = ""
         var i = 0
@@ -68,17 +91,23 @@ enum MarkdownInlineParser {
                 run.append(c); run.append(chars[i + 1]); i += 2; continue
             }
 
-            // Inline code span: `...` (literal, no nested formatting).
-            if c == "`", let close = firstIndex(of: "`", in: chars, from: i + 1) {
-                flush()
-                nodes.append(.code(String(chars[(i + 1)..<close])))
-                i = close + 1
+            // Code delimiters match the complete run; content is literal.
+            if c == "`" {
+                if let (close, length) = nextTicks[i] {
+                    flush()
+                    var code = String(chars[(i + length)..<close]).replacingOccurrences(of: "\n", with: " ")
+                    if code.hasPrefix(" "), code.hasSuffix(" "), code.contains(where: { $0 != " " }) { code = String(code.dropFirst().dropLast()) }
+                    nodes.append(.code(code))
+                    i = close + length
+                } else {
+                    repeat { run.append(chars[i]); i += 1 } while i < chars.count && chars[i] == "`"
+                }
                 continue
             }
 
             // Image: ![alt](dest)
             if c == "!", i + 1 < chars.count, chars[i + 1] == "[",
-               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: nextBracket[min(i + 2, chars.count)]) {
+               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: nextBracket[min(i + 2, chars.count)], parenCloses: parenCloses, nextAngle: nextAngle) {
                 flush()
                 nodes.append(parsed.node)
                 i = parsed.next
@@ -98,7 +127,7 @@ enum MarkdownInlineParser {
                     }
                 }
                 // Link: [label](dest)
-                if let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: nextBracket[min(i + 1, chars.count)]) {
+                if let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: nextBracket[min(i + 1, chars.count)], parenCloses: parenCloses, nextAngle: nextAngle) {
                     flush()
                     nodes.append(parsed.node)
                     i = parsed.next
@@ -119,7 +148,7 @@ enum MarkdownInlineParser {
     /// link, the `!` for an image). Supports CommonMark angle-bracket destinations
     /// `(<url with spaces>)` that `WordConverter` emits. Returns the node and the
     /// index just past the closing `)`, or nil if the syntax doesn't match.
-    private static func parseLinkOrImage(_ chars: [Character], from: Int, isImage: Bool, labelEnd: Int?) -> (node: MarkdownInline, next: Int)? {
+    private static func parseLinkOrImage(_ chars: [Character], from: Int, isImage: Bool, labelEnd: Int?, parenCloses: [Int: Int], nextAngle: [Int?]) -> (node: MarkdownInline, next: Int)? {
         let bracket = isImage ? from + 1 : from
         guard bracket < chars.count, chars[bracket] == "[" else { return nil }
         // Find the label's closing `]`, skipping backslash-escaped delimiters:
@@ -133,7 +162,7 @@ enum MarkdownInlineParser {
         var dest = ""
         var cursor = destStart
         if destStart < chars.count, chars[destStart] == "<" {
-            guard let gt = firstIndex(of: ">", in: chars, from: destStart + 1) else { return nil }
+            guard let gt = nextAngle[destStart + 1] else { return nil }
             dest = String(chars[(destStart + 1)..<gt])
             cursor = gt + 1
             guard cursor < chars.count, chars[cursor] == ")" else { return nil }
@@ -141,7 +170,7 @@ enum MarkdownInlineParser {
             // Bare destination: match balanced parentheses so a URL such as
             // `https://example.com/Foo_(bar)` (common in raw LLM Markdown) isn't
             // truncated at the first `)`.
-            guard let parenClose = balancedParenClose(chars, from: destStart) else { return nil }
+            guard let parenClose = parenCloses[parenOpen] else { return nil }
             dest = unescape(String(chars[destStart..<parenClose]))
             cursor = parenClose
         }
@@ -150,35 +179,6 @@ enum MarkdownInlineParser {
             ? .image(alt: unescape(labelText), source: dest)
             : .link(label: parse(labelText), destination: dest)
         return (node, cursor + 1)   // past the ")"
-    }
-
-    /// First index of `character` at or after `start` that isn't backslash-escaped.
-    private static func indexOfUnescaped(_ character: Character, in chars: [Character], from start: Int) -> Int? {
-        var i = start
-        while i < chars.count {
-            if chars[i] == "\\" { i += 2; continue }   // skip the escape and its target
-            if chars[i] == character { return i }
-            i += 1
-        }
-        return nil
-    }
-
-    /// Index of the `)` that closes a bare destination opened just past `(`,
-    /// honoring nested balanced parens and backslash escapes; nil if unbalanced.
-    private static func balancedParenClose(_ chars: [Character], from start: Int) -> Int? {
-        var depth = 0
-        var i = start
-        while i < chars.count {
-            let c = chars[i]
-            if c == "\\" { i += 2; continue }
-            if c == "(" { depth += 1 }
-            else if c == ")" {
-                if depth == 0 { return i }
-                depth -= 1
-            }
-            i += 1
-        }
-        return nil
     }
 
     /// Removes backslash escapes (`\x` -> `x`), recovering the literal label/destination

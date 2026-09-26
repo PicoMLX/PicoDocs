@@ -49,7 +49,12 @@ public struct PPTXExporter: DocumentExporter {
 
     // MARK: - Slide model
 
-    struct Slide { let title: String; let body: [String] }
+    struct Paragraph {
+        let text: String
+        var ordered: Bool? = nil
+        var number: Int = 1
+    }
+    struct Slide { let title: String; let body: [Paragraph] }
 
     private static func slides(from result: ConverterResult) -> [Slide] {
         // Preserve associated tables, including slides containing only tables.
@@ -78,7 +83,7 @@ public struct PPTXExporter: DocumentExporter {
         // Otherwise segment the merged Markdown at top-level headings.
         var slides: [Slide] = []
         var title = ""
-        var body: [String] = []
+        var body: [Paragraph] = []
         var started = false
         func flush() { if started { slides.append(Slide(title: title, body: body)) } }
 
@@ -99,24 +104,24 @@ public struct PPTXExporter: DocumentExporter {
         return slides
     }
 
-    private static func bodyLines(_ blocks: [MarkdownBlock]) -> [String] {
-        var lines: [String] = []
+    private static func bodyLines(_ blocks: [MarkdownBlock]) -> [Paragraph] {
+        var lines: [Paragraph] = []
         for block in blocks {
             switch block {
             case .heading(_, let text):
-                lines.append(plain(text))
+                lines.append(Paragraph(text: plain(text)))
             case .paragraph(let text):
                 for line in text.components(separatedBy: "\n") where !line.isEmpty {
-                    lines.append(plain(line))
+                    lines.append(Paragraph(text: plain(line)))
                 }
-            case .list(_, let items):
-                for item in items { lines.append(plain(item)) }
+            case .list(let ordered, let items):
+                for (index, item) in items.enumerated() { lines.append(Paragraph(text: plain(item), ordered: ordered, number: index + 1)) }
             case .code(let code):
-                for line in code.components(separatedBy: "\n") { lines.append(line) }
+                for line in code.components(separatedBy: "\n") { lines.append(Paragraph(text: line)) }
             case .blockquote(let quoteLines):
-                for line in quoteLines { lines.append(plain(line)) }
+                for line in quoteLines { lines.append(Paragraph(text: plain(line))) }
             case .table(let rows):
-                for row in rows { lines.append(row.map { plain($0.replacingOccurrences(of: "<br>", with: "\n")) }.joined(separator: "\t")) }
+                for row in rows { lines.append(Paragraph(text: row.map { plain($0.replacingOccurrences(of: "<br>", with: "\n")) }.joined(separator: "\t"))) }
             case .rule:
                 continue
             }
@@ -136,8 +141,14 @@ public struct PPTXExporter: DocumentExporter {
         if slide.body.isEmpty {
             bodyParagraphs = "<a:p/>"
         } else {
-            bodyParagraphs = slide.body.map {
-                "<a:p><a:r><a:t>\(OOXMLPackageWriter.escape($0))</a:t></a:r></a:p>"
+            bodyParagraphs = slide.body.map { paragraph in
+                let properties: String
+                switch paragraph.ordered {
+                case true?: properties = "<a:pPr><a:buAutoNum type=\"arabicPeriod\" startAt=\"\(paragraph.number)\"/></a:pPr>"
+                case false?: properties = "<a:pPr><a:buChar char=\"•\"/></a:pPr>"
+                case nil: properties = "<a:pPr><a:buNone/></a:pPr>"
+                }
+                return "<a:p>\(properties)<a:r><a:t>\(OOXMLPackageWriter.escape(paragraph.text))</a:t></a:r></a:p>"
             }.joined()
         }
         return OOXMLPackageWriter.xmlDeclaration + """

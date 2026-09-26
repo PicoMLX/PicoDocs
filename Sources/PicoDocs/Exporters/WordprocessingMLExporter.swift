@@ -78,7 +78,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                   let data = Data(base64Encoded: base64) else { continue }
 
             // The carrier's display name (basename of the source path, else title).
-            let name = (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
+            let name = (section.sourcePath as NSString?)?.lastPathComponent ?? (section.title as NSString?)?.lastPathComponent
             // Pick a stem + extension; fall back to the declared MIME for the
             // extension so a name like "logo" (or no name) still gets a type Office
             // recognizes rather than `.bin`/octet-stream.

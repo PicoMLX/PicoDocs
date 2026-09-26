@@ -85,13 +85,13 @@ enum AttributedStringDocumentBuilder {
             for (i, item) in items.enumerated() {
                 let marker = ordered ? "\(i + 1).\t" : "•\t"
                 output.append(NSAttributedString(string: marker, attributes: [.font: bodyFont()]))
-                output.append(inline(item.replacingOccurrences(of: "\n", with: " ")))
+                output.append(inline(item))
                 output.append(NSAttributedString(string: "\n"))
             }
 
         case .table(let rows):
             for row in rows {
-                output.append(inline(row.map { $0.replacingOccurrences(of: "<br>", with: "\n") }.joined(separator: "\t")))
+                output.append(inline(row.map { $0.replacingOccurrences(of: "<br>", with: "  \n") }.joined(separator: "\t")))
                 output.append(NSAttributedString(string: "\n"))
             }
 
@@ -108,11 +108,21 @@ enum AttributedStringDocumentBuilder {
         return result
     }
 
+    private static func normalizedBreaks(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        return lines.enumerated().map { index, line in
+            guard index + 1 < lines.count else { return line }
+            if line.hasSuffix("\\") { return String(line.dropLast()) + "\n" }
+            if line.hasSuffix("  ") { return line.trimmingCharacters(in: .whitespaces) + "\n" }
+            return line + " "
+        }.joined()
+    }
+
     private static func render(_ nodes: [MarkdownInline], into output: NSMutableAttributedString, size: CGFloat, bold: Bool, italic: Bool, link: String?) {
         for node in nodes {
             switch node {
             case .text(let s):
-                output.append(NSAttributedString(string: s, attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
+                output.append(NSAttributedString(string: normalizedBreaks(s), attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
             case .code(let s):
                 output.append(NSAttributedString(string: s, attributes: attributes(size: size, bold: bold, italic: italic, monospace: true, link: link)))
             case .strong(let children):

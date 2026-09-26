@@ -166,7 +166,7 @@ public struct XLSXExporter: DocumentExporter {
         // emoji, skin-tone modifiers, family sequences — survive intact; rebuilding
         // a String from the scalar view re-segments them into single characters.
         let space: Unicode.Scalar = " "
-        let cleanedScalars = name.unicodeScalars.filter(OOXMLPackageWriter.isValidXMLScalar).map { invalid.contains($0) ? space : $0 }
+        let cleanedScalars = name.unicodeScalars.filter(OOXMLPackageWriter.isValidXMLScalar).map { invalid.contains($0) || [9, 10, 13].contains($0.value) ? space : $0 }
         let cleaned = String(String.UnicodeScalarView(cleanedScalars))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return String(cleaned.prefix(31)).trimmingCharacters(in: CharacterSet(charactersIn: "'"))
