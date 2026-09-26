@@ -46,7 +46,7 @@ public struct PagesConverter: DocumentConverter {
 
         // Gather the IWA component streams. Two common on-disk layouts: loose
         // `Index/*.iwa` entries, or a nested `Index.zip` containing them.
-        let components = try iwaComponents(in: archive)
+        let components = try Self.iwaComponents(in: archive)
         guard !components.isEmpty else {
             // Likely a legacy iWork '09 package (index.xml[.gz]) or an unexpected
             // layout — not supported yet.
@@ -125,7 +125,7 @@ public struct PagesConverter: DocumentConverter {
 
     // MARK: - IWA gathering
 
-    private struct Component {
+    struct Component {
         let name: String
         let bytes: [UInt8]
     }
@@ -134,7 +134,7 @@ public struct PagesConverter: DocumentConverter {
     /// failing that — from a nested `Index.zip`. A present-but-unreadable main
     /// story (`Document.iwa`) is treated as corruption; auxiliary entries that
     /// fail to extract are skipped leniently.
-    private func iwaComponents(in archive: Archive) throws -> [Component] {
+    static func iwaComponents(in archive: Archive) throws -> [Component] {
         var components: [Component] = []
         // Loose layout is `Index/*.iwa`; scope the scan to that path so a stray
         // outer `.iwa` can't shadow the nested `Index.zip` body below.

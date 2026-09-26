@@ -38,6 +38,7 @@ There are two main steps: fetching and parsing.
 - XLSX
 - TXT
 - RTF
+- Numbers (one section per sheet, tables as Markdown grids)
 - MD
 - Webloc
 - Images (PNG, JPEG, HEIC, …) via OCR
