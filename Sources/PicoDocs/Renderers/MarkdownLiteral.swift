@@ -10,7 +10,7 @@ enum MarkdownLiteral {
         var output = ""
         func flushProse() {
             output += MarkdownTableCell.mapCodeSpans(prose, code: { $0 }, plain: {
-                $0.replacingOccurrences(of: "\\", with: "\\\\")
+                escapeProseBackslashes($0)
             })
             prose = ""
         }
@@ -33,23 +33,32 @@ enum MarkdownLiteral {
         return output
     }
 
-    /// Identify source backslashes that need an escape while retaining source
+    private static func escapeProseBackslashes(_ text: String) -> String {
+        var output = "", slashes = 0
+        for character in text {
+            if character == "\\" { slashes += 1; continue }
+            let keepsEscape = slashes % 2 == 1 && #"`*_{}[]<>()#+-.!|"#.contains(character)
+            output += String(repeating: "\\", count: slashes * 2 + (keepsEscape ? 1 : 0))
+            output.append(character); slashes = 0
+        }
+        return output + String(repeating: "\\", count: slashes * 2)
+    }
+
+    /// Count added backslashes while retaining source
     /// UTF-16 indices, so styled runs can share whole-document code context.
-    static func backslashEscapeMask(_ text: String) -> [Bool] {
+    static func backslashEscapeCounts(_ text: String) -> [Int] {
         let source = Array(text.utf16), escaped = Array(escapeBackslashes(text).utf16)
-        var mask = Array(repeating: false, count: source.count)
+        var counts = Array(repeating: 0, count: source.count)
         var i = 0, j = 0
         while i < source.count {
             if source[i] == 0x5C {
                 let start = i, escapedStart = j
                 while i < source.count, source[i] == 0x5C { i += 1 }
                 while j < escaped.count, escaped[j] == 0x5C { j += 1 }
-                if j - escapedStart == 2 * (i - start) {
-                    for index in start..<i { mask[index] = true }
-                }
+                counts[start] = j - escapedStart - (i - start)
             } else { i += 1; j += 1 }
         }
-        return mask
+        return counts
     }
 
     static func escapeBlockStart(_ line: String) -> String {

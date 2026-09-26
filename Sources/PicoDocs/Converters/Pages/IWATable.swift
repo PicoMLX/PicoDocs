@@ -205,7 +205,7 @@ enum IWATable {
     /// needs no further object lookups.
     private struct BodyStorage {
         let units: [UInt16]
-        let escapedBackslashes: [Bool]
+        let escapedBackslashes: [Int]
         let paragraphStyles: [(offset: Int, id: UInt64?)]
         let characterStyles: [(offset: Int, id: UInt64?)]
         let smartFields: [(offset: Int, id: UInt64?)]
@@ -236,7 +236,7 @@ enum IWATable {
             guard remainingStyleWork > 0 else { break }
             if let marker = listMarker(of: id, in: objects, remainingWork: &remainingStyleWork) { listMarkers[id] = marker }
         }
-        return BodyStorage(units: Array(text.utf16), escapedBackslashes: MarkdownLiteral.backslashEscapeMask(text),
+        return BodyStorage(units: Array(text.utf16), escapedBackslashes: MarkdownLiteral.backslashEscapeCounts(text),
                            paragraphStyles: indexedReferences(in: storage, field: 5),
                            characterStyles: characterStyles, smartFields: smartFields,
                            listStyles: listStyles, listRestarts: listRestarts(in: storage),
@@ -516,7 +516,7 @@ enum IWATable {
             if emphasis { trait = referenceID(at: index, in: body.characterStyles).flatMap { body.traits[$0] } }
             let url = referenceID(at: index, in: body.smartFields).flatMap { body.links[$0] }
             items.append((unit, trait?.bold ?? false, trait?.italic ?? false, url))
-            if body.escapedBackslashes[index] { items.append((unit, trait?.bold ?? false, trait?.italic ?? false, url)) }
+            for _ in 0..<body.escapedBackslashes[index] { items.append((unit, trait?.bold ?? false, trait?.italic ?? false, url)) }
         }
         var output = ""
         var i = 0

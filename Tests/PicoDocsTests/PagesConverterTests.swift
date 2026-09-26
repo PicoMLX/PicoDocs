@@ -14,6 +14,22 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func verbatimEscapesKeepPairedPunctuationLiteral() async throws {
+        for literal in [#"\*literal\*"#, #"\`code\`"#, #"\[label\](url)"#, #"\\\*literal\\\*"#] {
+            let rtf = #"{\rtf1\ansi "# + literal.replacingOccurrences(of:"\\",with:"\\\\") + "}"
+            let sources = [("text.txt",Data(literal.utf8)),("text.rtf",Data(rtf.utf8)),("text.pages",Self.makePagesFile(paragraphs:[literal]))]
+            for (filename,data) in sources {
+                let result = try await PicoDocsEngine.convert(data:data,filename:filename)
+                #expect(try DocumentRenderer.render(result,to:.plaintext) == literal)
+                let html = try DocumentRenderer.render(result,to:.html)
+                #expect(html.contains(literal)); #expect(!html.contains("<em>")); #expect(!html.contains("<code>"))
+            }
+        }
+        let styledRTF = #"{\rtf1\ansi \b bold\\\b0  plain}"#
+        let styled = try await PicoDocsEngine.convert(data:Data(styledRTF.utf8),filename:"styled.rtf")
+        #expect(try DocumentRenderer.render(styled,to:.html).contains(#"<strong>bold\</strong>"#))
+    }
+
     @Test func PagesAndRTFCodeKeepLiteralBackslashesAcrossParagraphs() async throws {
         let paragraphs = [#"`a\*b`"#, "```", #"c\*d"#, "```", #"outside \*"#]
         let pages = Self.makePagesFile(paragraphs: paragraphs)
