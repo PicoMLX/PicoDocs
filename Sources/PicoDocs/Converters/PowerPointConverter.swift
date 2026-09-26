@@ -109,9 +109,11 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// Speaker notes for a slide, from its notes-slide part's body placeholder.
     static func notes(forSlide slidePath: String, relationships: [String: Relationship], archive: PowerPointPackage) -> String? {
-        guard let target = relationships.values.first(where: { $0.type.hasSuffix("/notesSlide") })?.target else { return nil }
+        guard let relation = relationships.values.first(where: { $0.type.hasSuffix("/notesSlide") }) else { return nil }
+        guard !relation.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+        let target = relation.target
         let notesPath = WordConverter.resolvePartPath(target, relativeTo: directory(of: slidePath))
-        guard let notes = xml(archive, path: notesPath) else { return nil }
+        guard let notes = xml(archive, path: notesPath) else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         var context = SlideContext(archive: archive, partPath: notesPath,
                                    relationships: Self.relationships(archive, forPart: notesPath),
                                    images: ImageCollector(), embedsImages: false)
@@ -251,7 +253,7 @@ public struct PowerPointConverter: DocumentConverter {
     enum Bullet: Equatable {
         case plain
         case bullet
-        case number(startAt: Int)
+        case number(startAt: Int, scheme: String)
     }
 
     /// No inherited list formatting (titles, notes, table cells).
@@ -264,7 +266,8 @@ public struct PowerPointConverter: DocumentConverter {
         if child(of: properties, named: "a:bunone") != nil { return .plain }
         if let number = child(of: properties, named: "a:buautonum") {
             let raw = (try? number.attr("startAt")) ?? ""
-            return .number(startAt: raw.isEmpty ? 1 : (Int(raw) ?? 0))
+            let scheme = (try? number.attr("type")) ?? ""
+            return .number(startAt: raw.isEmpty ? 1 : (Int(raw) ?? 0), scheme: scheme.isEmpty ? "arabicPeriod" : scheme)
         }
         if child(of: properties, named: "a:buchar") != nil || child(of: properties, named: "a:bublip") != nil {
             return .bullet
@@ -352,19 +355,20 @@ public struct PowerPointConverter: DocumentConverter {
         var blocks: [String] = []
         var listLines: [String] = []
         var markerWidths: [Int] = []          // marker width per open level
+        var schemes: [Int: String] = [:]
         var counters: [Int: Int] = [:]        // numbered-list count per level
         var baseLevel = 0                     // shallowest level in the current list
 
         func flushList() {
             if !listLines.isEmpty { blocks.append(listLines.joined(separator: "\n")) }
-            listLines = []; markerWidths = []; counters = [:]
+            listLines = []; markerWidths = []; counters = [:]; schemes = [:]
         }
 
         for paragraph in body.children().array() where paragraph.tagName().lowercased() == "a:p" {
             if Task.isCancelled { return [] }
             let properties = child(of: paragraph, named: "a:ppr")
             let level = min(max(Int((try? properties?.attr("lvl")) ?? "") ?? 0, 0), 8)
-            let text = renderRuns(paragraph, context: &context).trimmingCharacters(in: .whitespaces)
+            let text = escapeBlockMarkers(renderRuns(paragraph, context: &context).trimmingCharacters(in: .whitespaces))
             guard !text.isEmpty else { continue }
 
             let marker: String?
@@ -373,14 +377,22 @@ public struct PowerPointConverter: DocumentConverter {
                 marker = nil
             case .bullet:
                 marker = "- "
-            case .number(let start):
+            case .number(let start, let scheme):
                 guard (1...32767).contains(start), (counters[level] ?? 0) < Int.max else {
                     context.archive.fail(PicoDocsError.fileCorrupted)
                     return []
                 }
+                if schemes[level] != scheme { counters[level] = nil }
+                schemes[level] = scheme
                 let number = counters[level].map { $0 + 1 } ?? start
                 counters[level] = number
-                marker = "\(number). "
+                guard let formatted = automaticNumber(number, scheme: scheme) else {
+                    context.archive.fail(PicoDocsError.unableToExportToRequestedFormat)
+                    return []
+                }
+                // CommonMark only has decimal markers. Preserve other schemes as
+                // visible labels within a bullet item instead of changing them.
+                marker = scheme == "arabicPeriod" ? formatted + " " : "- " + formatted + " "
             }
 
             guard let marker else {
@@ -476,12 +488,47 @@ public struct PowerPointConverter: DocumentConverter {
             if #"\`*_{}[]<>"#.contains(character) { out.append("\\") }
             out.append(character)
         }
-        if out.trimmingCharacters(in: .whitespaces).count >= 3,
-           out.trimmingCharacters(in: .whitespaces).allSatisfy({ $0 == "-" || $0 == " " }) {
-            return out.replacingOccurrences(of: "-", with: "\\-")
-        }
-        return out.replacingOccurrences(of: #"(?m)^(#{1,6}|[-+])(?=\s)"#, with: #"\\$1"#, options: .regularExpression)
-            .replacingOccurrences(of: #"(?m)^([0-9]+)([.)])(?=\s)"#, with: #"$1\\$2"#, options: .regularExpression)
+        return out
+    }
+
+    private static func escapeBlockMarkers(_ text: String) -> String {
+        text.components(separatedBy: "\n").map { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.count >= 3, trimmed.allSatisfy({ $0 == "-" || $0 == " " }) {
+                return line.replacingOccurrences(of: "-", with: "\\-")
+            }
+            return line.replacingOccurrences(of: #"^(\s*)(#{1,6}|[-+]|\|)(?=\s|$)"#, with: #"$1\\$2"#, options: .regularExpression)
+                .replacingOccurrences(of: #"^(\s*)([0-9]+)([.)])(?=\s|$)"#, with: #"$1$2\\$3"#, options: .regularExpression)
+                .replacingOccurrences(of: #"^(\s*)\|"#, with: #"$1\\|"#, options: .regularExpression)
+        }.joined(separator: "\n")
+    }
+
+    /// Latin, Roman and decimal schemes specified by DrawingML. Unknown schemes
+    /// fail explicitly rather than silently turning their labels into decimals.
+    static func automaticNumber(_ number: Int, scheme: String) -> String? {
+        let value: String
+        if scheme.hasPrefix("alphaLc") || scheme.hasPrefix("alphaUc") {
+            var n = number, letters = ""
+            while n > 0 {
+                n -= 1
+                letters = String(UnicodeScalar(65 + n % 26)!) + letters
+                n /= 26
+            }
+            value = scheme.hasPrefix("alphaLc") ? letters.lowercased() : letters
+        } else if scheme.hasPrefix("romanLc") || scheme.hasPrefix("romanUc") {
+            guard number < 4000 else { return nil }
+            var n = number, roman = ""
+            for (amount, symbol) in [(1000,"M"),(900,"CM"),(500,"D"),(400,"CD"),(100,"C"),(90,"XC"),(50,"L"),(40,"XL"),(10,"X"),(9,"IX"),(5,"V"),(4,"IV"),(1,"I")] {
+                while n >= amount { roman += symbol; n -= amount }
+            }
+            value = scheme.hasPrefix("romanLc") ? roman.lowercased() : roman
+        } else if scheme.hasPrefix("arabic") { value = String(number) }
+        else { return nil }
+        if scheme.hasSuffix("ParenBoth") { return "(" + value + ")" }
+        if scheme.hasSuffix("ParenR") { return value + ")" }
+        if scheme.hasSuffix("Period"), !scheme.hasPrefix("arabicDb") { return value + "." }
+        if scheme == "arabicPlain" { return value }
+        return nil
     }
 
     private static func linkDestination(_ url: String) -> String {
@@ -572,13 +619,18 @@ public struct PowerPointConverter: DocumentConverter {
     static func contentType(_ path: String, archive: PowerPointPackage) -> String? {
         guard let manifest = xml(archive, path: "[Content_Types].xml") else { return nil }
         for entry in (try? manifest.getElementsByTag("Override").array()) ?? [] {
-            if (try? entry.attr("PartName")) == "/" + path { return try? entry.attr("ContentType") }
+            if (try? entry.attr("PartName")) == "/" + path { return validatedMIME(try? entry.attr("ContentType")) }
         }
         let ext = (path as NSString).pathExtension.lowercased()
         for entry in (try? manifest.getElementsByTag("Default").array()) ?? [] {
-            if ((try? entry.attr("Extension")) ?? "").lowercased() == ext { return try? entry.attr("ContentType") }
+            if ((try? entry.attr("Extension")) ?? "").lowercased() == ext { return validatedMIME(try? entry.attr("ContentType")) }
         }
         return nil
+    }
+
+    private static func validatedMIME(_ value: String?) -> String? {
+        guard let value, value.range(of: #"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$"#, options: .regularExpression) != nil else { return nil }
+        return value
     }
 
     static func mimeType(forExtension ext: String) -> String {
