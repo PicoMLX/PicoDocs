@@ -14,6 +14,7 @@ struct MarkdownList {
         let indent: Int
         let number: Int?
         let text: String
+        let contentIndent: Int
     }
 
     private static func marker(_ line: String) -> Marker? {
@@ -22,34 +23,36 @@ struct MarkdownList {
         let content = String(line.dropFirst(whitespace.count))
         if let first = content.first, "-*+".contains(first),
            content.count == 1 || content.dropFirst().hasPrefix(" ") {
-            return Marker(indent: indent, number: nil, text: String(content.dropFirst(2)))
+            return Marker(indent: indent, number: nil, text: String(content.dropFirst(2)), contentIndent: indent + 2)
         }
         let digits = content.prefix { $0.isASCII && $0.isNumber }
         let tail = content.dropFirst(digits.count)
         guard !digits.isEmpty, let number = Int(digits), tail == "." || tail.hasPrefix(". ") else { return nil }
-        return Marker(indent: indent, number: number, text: String(tail.dropFirst(2)))
+        return Marker(indent: indent, number: number, text: String(tail.dropFirst(2)), contentIndent: indent + digits.count + 2)
     }
 
-    static func parse(_ lines: [String], index: inout Int, depth: Int = 0) -> MarkdownList? {
+    static func parse(_ lines: [String], index: inout Int, depth: Int = 0, minimumIndent: Int = 0) -> MarkdownList? {
         guard index < lines.count, depth < 32, let first = marker(lines[index]) else { return nil }
         var list = MarkdownList(ordered: first.number != nil)
+        var contentIndent = first.contentIndent
         while index < lines.count {
             var next = index
             while next < lines.count, String(lines[next].drop { $0 == " " || $0 == "\t" }).isEmpty { next += 1 }
             guard next < lines.count else { break }
             let blank = next > index
             if let current = marker(lines[next]) {
-                if current.indent < first.indent { break }
-                if current.indent == first.indent {
+                if current.indent < minimumIndent { break }
+                if list.items.isEmpty || current.indent < contentIndent {
                     guard (current.number != nil) == list.ordered else { break }
                     // An explicit restart following a blank line opens a new list.
                     if blank, !list.items.isEmpty, current.number == first.number, list.ordered { break }
                     index = next + 1
                     list.items.append(Item(number: current.number, text: current.text))
+                    contentIndent = current.contentIndent
                 } else {
                     guard !list.items.isEmpty else { break }
                     var childIndex = next
-                    guard let child = parse(lines, index: &childIndex, depth: depth + 1) else { break }
+                    guard let child = parse(lines, index: &childIndex, depth: depth + 1, minimumIndent: contentIndent) else { break }
                     list.items[list.items.count - 1].children.append(child)
                     index = childIndex
                 }

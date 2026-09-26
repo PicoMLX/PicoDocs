@@ -4,6 +4,49 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func exactSlideRootAndPresentationDefaults() async throws {
+        typealias B = PowerPointConverterTests
+        let shape = B.shape(placeholder: nil, paragraphs: ["<a:p><a:r><a:t>Defaulted</a:t></a:r></a:p>"])
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: shape)])
+        let archive = try #require(Archive(data: data, accessMode: .read))
+        func changed(_ path: String, _ transform: (String) -> String) throws -> Data {
+            var entries: [(name: String, data: [UInt8])] = []
+            for entry in archive {
+                var bytes = Data(); _ = try archive.extract(entry) { bytes.append($0) }
+                entries.append((entry.path, entry.path == path ? Array(transform(String(decoding: bytes, as: UTF8.self)).utf8) : Array(bytes)))
+            }
+            return PagesConverterTests.makeZip(entries)
+        }
+        let corrupt = try changed("ppt/slides/s.xml") { $0.replacingOccurrences(of: "<p:sld ", with: "<root><p:sld ").replacingOccurrences(of: "</p:sld>", with: "</p:sld></root>") }
+        await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: corrupt, filename: "bad.pptx") }
+        let defaults = try changed("ppt/presentation.xml") { $0.replacingOccurrences(of: "</p:presentation>", with: #"<p:defaultTextStyle><a:lvl1pPr><a:buAutoNum type="arabicPeriod" startAt="4"/><a:defRPr b="1" i="1"/></a:lvl1pPr></p:defaultTextStyle></p:presentation>"#) }
+        let result = try await PicoDocsEngine.convert(data: defaults, filename: "defaults.pptx")
+        #expect(result.markdown() == "4. ***Defaulted***")
+    }
+
+    @Test func notesStyleSuppliesBulletsAndRunDefaults() throws {
+        typealias B = PowerPointConverterTests
+        let notes = "<p:notes \(B.namespaces)>" + B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: ["<a:p><a:r><a:t>Note</a:t></a:r></a:p>"]) + "</p:notes>"
+        let master = "<p:notesMaster \(B.namespaces)>" + #"<p:notesStyle><a:lvl1pPr><a:buAutoNum type="arabicPeriod" startAt="3"/><a:defRPr b="1" i="1"/></a:lvl1pPr></p:notesStyle></p:notesMaster>"#
+        let rels = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster", "../notesMasters/m.xml")])
+        let entries = [(name: "ppt/notesSlides/n.xml", data: Array(notes.utf8)), (name: "ppt/notesSlides/_rels/n.xml.rels", data: Array(rels.utf8)), (name: "ppt/notesMasters/m.xml", data: Array(master.utf8))]
+        let package = PowerPointPackage(archive: try #require(Archive(data: PagesConverterTests.makeZip(entries), accessMode: .read)))
+        var cache = PowerPointConverter.PartCache(archive: package)
+        let relations = ["notes": PowerPointConverter.Relationship(type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide", target: "../notesSlides/n.xml", external: false)]
+        #expect(PowerPointConverter.notes(forSlide: "ppt/slides/s.xml", relationships: relations, archive: package, parts: &cache) == "3. ***Note***")
+    }
+
+    @Test func optionalListIndentDoesNotCreateChildren() throws {
+        for source in ["- one\n - two", "10. one\n 11. two", "  - one\n- two"] {
+            let result = ConverterResult(sections: [.init(markdown: source)])
+            let html = try DocumentRenderer.render(result, to: .html)
+            #expect(html.components(separatedBy: "<li").count - 1 == 2)
+            #expect(html.components(separatedBy: source.hasPrefix("10.") ? "<ol" : "<ul").count - 1 == 1)
+        }
+        let nested = ConverterResult(sections: [.init(markdown: "10. Parent\n    - child\n 11. Sibling")])
+        #expect(try DocumentRenderer.render(nested, to: .plaintext) == "10. Parent\n    - child\n11. Sibling")
+    }
+
     @Test func referencedDocumentsMustHaveExpectedRootTypes() async throws {
         typealias B = PowerPointConverterTests
         for type in ["notesSlide", "slideLayout"] {

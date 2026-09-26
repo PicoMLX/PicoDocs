@@ -40,7 +40,7 @@ public struct PowerPointConverter: DocumentConverter {
             throw PicoDocsError.fileCorrupted
         }
         let archive = PowerPointPackage(archive: zip)
-        guard let presentation = Self.xml(archive, path: "ppt/presentation.xml") else {
+        guard let presentation = Self.xml(archive, path: "ppt/presentation.xml"), presentation.children().first()?.tagName().lowercased() == "p:presentation" else {
             try archive.check()
             throw PicoDocsError.fileCorrupted
         }
@@ -50,9 +50,10 @@ public struct PowerPointConverter: DocumentConverter {
         var parts = PartCache(archive: archive)
         for (index, slidePath) in try Self.slidePaths(presentation, archive: archive).enumerated() {
             try Task.checkCancellation()
-            guard let slide = Self.xml(archive, path: slidePath), (try? slide.getElementsByTag("p:sld").first()) != nil else { try archive.check(); throw PicoDocsError.fileCorrupted }
+            guard let slide = Self.xml(archive, path: slidePath), slide.children().first()?.tagName().lowercased() == "p:sld" else { try archive.check(); throw PicoDocsError.fileCorrupted }
             let relationships = Self.relationships(archive, forPart: slidePath)
             var context = SlideContext(archive: archive, partPath: slidePath, relationships: relationships, images: images)
+            context.defaultTextStyle = try? presentation.getElementsByTag("p:defaultTextStyle").first()
             // Layout and master supply inherited list formatting for placeholders.
             let layoutPath = Self.relatedPart(of: slidePath, type: "/slideLayout", relationships: relationships)
             context.layout = layoutPath.flatMap { parts.document($0, root: "p:sldlayout") }
@@ -162,6 +163,7 @@ public struct PowerPointConverter: DocumentConverter {
         /// The slide's layout and master parts, when resolvable.
         var layout: Document?
         var master: Document?
+        var defaultTextStyle: Element?
     }
 
     /// Parses each shared part (layouts, masters) once per deck.
@@ -332,10 +334,12 @@ public struct PowerPointConverter: DocumentConverter {
             if let master = context.master {
                 sources.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "").flatMap(listStyle))
                 if bodyLike {
-                    sources.append(try? master.getElementsByTag("p:bodyStyle").first())
+                    let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : "p:bodyStyle"
+                    sources.append(try? master.getElementsByTag(style).first())
                 }
             }
         }
+        sources.append(context.defaultTextStyle)
         return (0..<9).map { level in
             for source in sources {
                 if let source, let bullet = bullet(in: child(of: source, named: "a:lvl\(level + 1)ppr")) ?? bullet(in: child(of: source, named: "a:defppr")) {
@@ -357,10 +361,11 @@ public struct PowerPointConverter: DocumentConverter {
             if let layout = context.layout { styles.append(matchingPlaceholder(in: layout, type: type, index: index).flatMap(listStyle)) }
             if let master = context.master {
                 styles.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "").flatMap(listStyle))
-                let style = bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle")
+                let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
                 styles.append(try? master.getElementsByTag(style).first())
             }
         }
+        styles.append(context.defaultTextStyle)
         return (0..<9).map { level in
             styles.flatMap { source -> [Element] in
                 guard let source else { return [] }
