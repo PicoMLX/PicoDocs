@@ -4,6 +4,56 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func blankLinesEndListScopedFencesAtTheContentColumn() async throws {
+        let source = "1. x\n   ```\n\n  a\\*b"
+        let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "fence.txt")
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            let rendered = try DocumentRenderer.render(result, to: format)
+            #expect(rendered.contains(#"a\*b"#))
+            #expect(!rendered.contains(#"a\\\*b"#))
+        }
+    }
+
+    @Test func leadingListIndentationIsPreservedBeforeBlockParsing() async throws {
+        let source = "  - item\n  ```\noutside \\*"
+        let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "indented.txt")
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            let rendered = try DocumentRenderer.render(result, to: format)
+            #expect(rendered.contains(#"outside \*"#))
+            #expect(!rendered.contains(#"outside \\\*"#))
+        }
+        let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+        let code = try #require(html.getElementsByTag("pre").first())
+        #expect(code.parent()?.tagName() != "li")
+    }
+
+    @Test func blankSeparatedNestedTablesResumeTheSameList() throws {
+        for source in ["1. a\n2. b\n\n   | X |\n   | --- |\n\n3. c", "- a\n- b\n\n  | X |\n  | --- |\n\n- c"] {
+            let result = ConverterResult(sections: [.init(markdown: source)])
+            let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+            let lists = try html.getElementsByTag(source.hasPrefix("1") ? "ol" : "ul")
+            #expect(lists.count == 1)
+            let list = try #require(lists.first())
+            #expect(list.children().count == 3)
+            #expect(try list.children().get(1).getElementsByTag("table").count == 1)
+            #expect(try list.children().get(2).text() == "c")
+        }
+    }
+
+    @Test func outerFootnotesSurviveUnclosedListFences() throws {
+        for source in ["- x\n  ```\noutside[^n]\n[^n]: note", "1. x\n   ```\n\n  outside[^n]\n[^n]: note"] {
+            let result = ConverterResult(sections: [.init(markdown: source)])
+            let plain = try DocumentRenderer.render(result, to: .plaintext)
+            #expect(plain.contains("outside[1]")); #expect(plain.contains("[1] note"))
+            #expect(!plain.contains("[^n]"))
+            let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+            #expect(try html.getElementsByClass("footnote-ref").count == 1)
+        }
+        let inside = ConverterResult(sections: [.init(markdown: "- x\n  ```\n  [^n]: literal")])
+        #expect(try DocumentRenderer.render(inside, to: .plaintext).contains("[^n]: literal"))
+    }
+
+
     @Test func unmatchedTickRunsStayWholeWithoutAnEscape() throws {
         for source in ["``x`", "```x``", "\\\\``x`"] {
             let result = ConverterResult(sections: [.init(markdown: "prefix " + source)])

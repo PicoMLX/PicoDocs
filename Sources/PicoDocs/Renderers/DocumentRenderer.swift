@@ -247,10 +247,15 @@ public enum DocumentRenderer {
         var notes: [(id: String, text: String)] = []
         var i = 0
         var inFence = false
+        var fenceList: (base: Int, content: Int)?
         var lists: [(base: Int, content: Int)] = []
         var followsBlank = false
         while i < lines.count {
             let blank = lines[i].trimmingCharacters(in: .whitespaces).isEmpty
+            if inFence, let container = fenceList, !blank,
+               !literalListContains(lines[i], base: container.base, content: container.content, afterBlank: followsBlank) {
+                inFence = false; fenceList = nil
+            }
             if !inFence, !blank {
                 while let last = lists.last, !literalListContains(lines[i], base: last.base, content: last.content, afterBlank: followsBlank) { lists.removeLast() }
                 if let item = literalListIndent(lines, index: i) { lists.append(item) }
@@ -260,6 +265,7 @@ public enum DocumentRenderer {
             // a definition — track the fence so it stays in the body.
             if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
                 inFence.toggle()
+                fenceList = inFence ? lists.last : nil
                 bodyLines.append(lines[i])
                 i += 1
                 continue
@@ -293,7 +299,7 @@ public enum DocumentRenderer {
                 i += 1
             }
         }
-        let body = bodyLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = bodyLines.joined(separator: "\n").trimmingCharacters(in: .newlines)
         return (body, notes)
     }
 
@@ -475,7 +481,7 @@ public enum DocumentRenderer {
         while i < lines.count {
             let line = lines[i].trimmingCharacters(in: .whitespaces)
             if inCodeFence, let container = fenceList, !line.isEmpty,
-               !literalListContains(lines[i], base: container.base, content: container.content) {
+               !literalListContains(lines[i], base: container.base, content: container.content, afterBlank: followsBlank) {
                 inCodeFence = false; fenceList = nil
             }
             if !inCodeFence, !line.isEmpty {
@@ -639,8 +645,17 @@ public enum DocumentRenderer {
                     } else if isBlank(raw), !items.isEmpty {
                         var next = i + 1
                         while next < lines.count, isBlank(lines[next]) { next += 1 }
-                        guard next < lines.count, indentWidth(lines[next]) >= contentColumn else { break }
-                        items[items.count - 1] += "\n"
+                        guard next < lines.count else { break }
+                        let nextText = lines[next].trimmingCharacters(in: .whitespaces)
+                        let nextMarker = listMarker(nextText) ?? bareListMarker(nextText)
+                        // Native inline tables insert blank separators but do not
+                        // restart their enclosing list. Explicit list restarts do.
+                        let endsTable = items.last?.split(separator: "\n").last?.trimmingCharacters(in: .whitespaces).hasPrefix("|") == true
+                        let resumesList = endsTable && indentWidth(lines[next]) == base
+                            && nextMarker.map { ($0 == .ordered) == ordered } == true
+                            && (!ordered || listStart(nextText) == start + items.count)
+                        guard resumesList || indentWidth(lines[next]) >= contentColumn else { break }
+                        if !resumesList { items[items.count - 1] += "\n" }
                         i = next
                     } else if !isBlank(raw), !items.isEmpty, literalListContains(raw, base: base, content: contentColumn) {
                         items[items.count - 1] += "\n" + String(raw.dropFirst(min(indent, contentColumn)))

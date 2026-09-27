@@ -33,7 +33,7 @@ enum MarkdownLiteral {
             let structure = structuralLines[index]
             let blank = structure.trimmingCharacters(in: .whitespaces).isEmpty
             if inFence, let container = fenceList, !blank,
-               !DocumentRenderer.literalListContains(structure, base: container.base, content: container.content) {
+               !DocumentRenderer.literalListContains(structure, base: container.base, content: container.content, afterBlank: followsBlank) {
                 inFence = false; fenceList = nil
             }
             // Footnote extraction joins continued paragraphs into one inline value.

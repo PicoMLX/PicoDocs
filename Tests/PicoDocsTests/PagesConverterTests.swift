@@ -833,7 +833,8 @@ struct PagesConverterTests {
         let table = try await convert("\u{FFFC}\nb", tableCell: "X")
         let tableHTML = try DocumentRenderer.render(table, to: .html)
         #expect(tableHTML.contains("<li>\n<table>"))
-        #expect(tableHTML.contains("<ol start=\"2\">"))
+        #expect(!tableHTML.contains("<ol start=\"2\">"))
+        #expect(tableHTML.components(separatedBy: "<ol>").count == 2)
         #expect(!tableHTML.contains("<p>1.</p>"))
     }
 
