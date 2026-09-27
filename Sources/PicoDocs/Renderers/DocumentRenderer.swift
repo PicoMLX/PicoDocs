@@ -259,6 +259,8 @@ public enum DocumentRenderer {
             // Allow up to 3 leading spaces before a definition (Markdown block
             // indentation); 4+ spaces is an indented code block, left in the body.
             if !inFence, let (id, first) = parseFootnoteDefinition(dropLeadingSpaces(lines[i], max: 3)) {
+                // A removed block definition must still separate body paragraphs.
+                if !bodyLines.isEmpty, bodyLines.last != "" { bodyLines.append("") }
                 var textLines = [first]
                 i += 1
                 while i < lines.count {                       // indented continuation lines
@@ -448,11 +450,15 @@ public enum DocumentRenderer {
         let lines = markdown.components(separatedBy: "\n")
         var i = 0
         var inCodeFence = false
+        var fenceListBase: Int?
         var lists: [(base: Int, content: Int)] = []
         var followsBlank = false
         var inNote = false
         while i < lines.count {
             let line = lines[i].trimmingCharacters(in: .whitespaces)
+            if inCodeFence, let base = fenceListBase, !line.isEmpty, indentWidth(lines[i]) < base + 2 {
+                inCodeFence = false; fenceListBase = nil
+            }
             if !inCodeFence, !line.isEmpty {
                 if inNote, !lines[i].hasPrefix("    "), !lines[i].hasPrefix("\t") { inNote = false }
                 if literalFootnoteDefinition(lines[i]) { inNote = true }
@@ -463,6 +469,7 @@ public enum DocumentRenderer {
             followsBlank = line.isEmpty
             if line.hasPrefix("```") {
                 inCodeFence.toggle()
+                fenceListBase = inCodeFence ? lists.last?.base : nil
                 i += 1
                 continue
             }
@@ -492,7 +499,7 @@ public enum DocumentRenderer {
                 if !literalBlockBoundary(line).ends {
                     while i < lines.count {
                         let candidate = lines[i].trimmingCharacters(in: .whitespaces)
-                        if candidate.isEmpty || candidate.hasPrefix("```") || literalBlockBoundary(candidate).starts { break }
+                        if candidate.isEmpty || candidate.hasPrefix("```") || literalBlockBoundary(candidate).starts || confirmedBareMarker(lines, index: i) != nil { break }
                         if let list = lists.last, indentWidth(lines[i]) < list.base + 2 { break }
                         if inNote, !lines[i].hasPrefix("    "), !lines[i].hasPrefix("\t") { break }
                         paragraph.append(candidate)
@@ -621,7 +628,7 @@ public enum DocumentRenderer {
                 let candidate = lines[i].trimmingCharacters(in: .whitespaces)
                 if isBlank(lines[i]) || candidate.hasPrefix("```") || candidate.hasPrefix("|")
                     || candidate.hasPrefix(">") || candidate == "---" || candidate == "***" || candidate == "___"
-                    || headingMatch(candidate) != nil || listMarker(candidate) != nil {
+                    || headingMatch(candidate) != nil || listMarker(candidate) != nil || confirmedBareMarker(lines, index: i) != nil {
                     break
                 }
                 // Preserve canonical escapes until inline parsing has protected them.

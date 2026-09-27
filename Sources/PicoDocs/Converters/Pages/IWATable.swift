@@ -210,7 +210,7 @@ enum IWATable {
         let characterStyles: [(offset: Int, id: UInt64?)]
         let smartFields: [(offset: Int, id: UInt64?)]
         let listStyles: [(offset: Int, id: UInt64?)]
-        let listRestarts: [(offset: Int, value: Int)]
+        let listRestarts: [(offset: Int, value: UInt64)]
         let traits: [UInt64: (bold: Bool, italic: Bool)]
         let links: [UInt64: String]
         let listMarkers: [UInt64: ListMarker]
@@ -275,7 +275,7 @@ enum IWATable {
     private struct ListState {
         var lastList: UInt64?      // list style of the immediately preceding paragraph, if a list item
         var orderedList: UInt64?   // style of the ordered run currently counting
-        var counter = 0
+        var counter = "0"
         var markerWidth = 2
     }
 
@@ -392,17 +392,17 @@ enum IWATable {
         case .ordered:
             let restart = listRestart(at: offset, in: body.listRestarts)
             if let restart, restart > 0 {
-                lists.counter = restart - 1; lists.orderedList = style
+                lists.counter = String(restart - 1); lists.orderedList = style
             } else if lists.orderedList == nil || (restart == nil && style != lists.orderedList) {
-                lists.counter = 0; lists.orderedList = style
+                lists.counter = "0"; lists.orderedList = style
             }
-            guard lists.counter < Int(maxListStart) else { throw PicoDocsError.fileCorrupted }
-            lists.counter += 1
+            lists.counter = incrementDecimal(lists.counter)
             let tight = lists.lastList != nil && (restart == 0 || (restart == nil && style == lists.lastList))
             lists.orderedList = style
             lists.lastList = style
-            lists.markerWidth = String(lists.counter).count + 2
-            return ("\(lists.counter).", tight)
+            lists.markerWidth = lists.counter.count + 2
+            let representable = lists.counter.count <= 9
+            return (lists.counter + (representable ? "." : "\\."), representable && tight)
         }
     }
 
@@ -454,10 +454,10 @@ enum IWATable {
     /// run table of `{1: charOffset, 2: list level, 3: restart}`; Pages sets the
     /// restart on the first item of each list (and to N for "Start at N"), 0 to
     /// continue.
-    private static func listRestart(at index: Int, in runs: [(offset: Int, value: Int)]) -> Int? {
+    private static func listRestart(at index: Int, in runs: [(offset: Int, value: UInt64)]) -> UInt64? {
         var low = 0
         var high = runs.count - 1
-        var value: Int?
+        var value: UInt64?
         while low <= high {                               // last run at or before `index`
             let mid = (low + high) / 2
             if runs[mid].offset <= index { value = runs[mid].value; low = mid + 1 } else { high = mid - 1 }
@@ -465,13 +465,20 @@ enum IWATable {
         return value
     }
 
-    /// The largest list number CommonMark accepts (nine digits).
-    private static let maxListStart: UInt64 = 999_999_999
+    /// Advance without imposing Markdown's nine-digit marker limit on Pages data.
+    private static func incrementDecimal(_ value: String) -> String {
+        var digits = Array(value.utf8)
+        for index in digits.indices.reversed() {
+            if digits[index] < 57 { digits[index] += 1; return String(decoding: digits, as: UTF8.self) }
+            digits[index] = 48
+        }
+        return "1" + String(decoding: digits, as: UTF8.self)
+    }
 
     /// The paragraph-data run table (storage field 6) as sorted `(offset, restart)`
     /// pairs. Level (field 2) isn't read yet: nested items render flat.
-    private static func listRestarts(in storage: IWAArchive.Object) -> [(offset: Int, value: Int)] {
-        var runs: [(offset: Int, value: Int)] = []
+    private static func listRestarts(in storage: IWAArchive.Object) -> [(offset: Int, value: UInt64)] {
+        var runs: [(offset: Int, value: UInt64)] = []
         var reader = ProtobufReader(storage.payload)
         while let outer = reader.next() {
             guard outer.number == 6, case .length(let wrapper) = outer.value else { continue }
@@ -479,14 +486,12 @@ enum IWATable {
             while let entry = wrapperReader.next() {
                 guard entry.number == 1, case .length(let runBytes) = entry.value else { continue }
                 var offset: Int?
-                var restart = 0
+                var restart: UInt64 = 0
                 var runReader = ProtobufReader(runBytes)
                 while let field = runReader.next() {
                     switch (field.number, field.value) {
                     case (1, .varint(let value)): offset = Int(exactly: value)
-                    // Clamped to CommonMark's nine-digit list numbers, so a corrupt
-                    // start can't overflow the counter as items follow it.
-                    case (3, .varint(let value)): restart = Int(min(value, maxListStart))
+                    case (3, .varint(let value)): restart = value
                     default: continue
                     }
                 }

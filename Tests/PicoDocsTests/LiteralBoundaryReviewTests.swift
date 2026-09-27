@@ -3,6 +3,66 @@ import Testing
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func removedFootnotesRetainBodyParagraphBoundaries() async throws {
+        let source = "`open\n[^x]: note\nclose " + #"\* `end"#
+        let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "body-around-note.txt")
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            let rendered = try DocumentRenderer.render(result, to: format)
+            #expect(rendered.contains(#"close \* `end"#))
+            #expect(!rendered.contains(#"close \\\*"#))
+        }
+    }
+
+    @Test func confirmedBareMarkersInterruptParagraphContext() async throws {
+        for marker in ["-", "1."] {
+            let source = "`open\n" + marker + "\n" + marker + "\noutside " + #"\* `close"#
+            let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "bare-boundary.txt")
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                let rendered = try DocumentRenderer.render(result, to: format)
+                #expect(rendered.contains(#"outside \* `close"#))
+                #expect(!rendered.contains(#"outside \\\*"#))
+            }
+        }
+    }
+
+    @Test func listScopedFencesStopAtTheirContainerExit() async throws {
+        for marker in ["-", "123."] {
+            let indent = String(repeating: " ", count: marker.count + 1)
+            let source = marker + " item\n" + indent + "```\n" + indent + #"inside \*"# + "\noutside " + #"\*"#
+            let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "nested-fence.txt")
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                let rendered = try DocumentRenderer.render(result, to: format)
+                #expect(rendered.contains(#"inside \*"#)); #expect(rendered.contains(#"outside \*"#))
+                #expect(!rendered.contains(#"outside \\\*"#))
+            }
+        }
+    }
+
+    @Test func PagesLargeListNumbersDegradeWithoutLosingTheDocument() async throws {
+        for (start, next): (UInt64, String) in [(999_999_999, "1000000000"), (1_000_000_000, "1000000001"), (UInt64.max, "18446744073709551616")] {
+            let data = PagesConverterTests.makeListPagesFile(text: "First\nNext", style: .ordered, restarts: [(0, start), (6, 0)])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "large-list.pages")
+            let text = try DocumentRenderer.render(result, to: .plaintext)
+            #expect(text.contains(String(start) + ". First"))
+            #expect(text.contains(next + ". Next"))
+        }
+    }
+
+    @Test func PagesRawFallbackEscapesTheNormalizedIndentation() async throws {
+        typealias B = PagesConverterTests
+        for marker in ["-", "+", "*"] {
+            let source = marker + " `open\n  outside " + #"\* `close"#
+            let stream = B.makeIWAStream(runs: [source])
+            let data = B.makeZip([(name: "Index/Other.iwa", data: B.snappyFrame(stream))])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "fallback.pages")
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                let rendered = try DocumentRenderer.render(result, to: format)
+                #expect(rendered.contains(#"outside \*"#))
+                #expect(!rendered.contains(#"outside \\\*"#))
+            }
+        }
+    }
+
     @Test func footnoteCodeSpansContinueAcrossIndentedBlankParagraphs() async throws {
         for indent in ["    ", "\t"] {
             for blank in ["\n", "\n\n", "    \n"] {

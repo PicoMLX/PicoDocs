@@ -733,13 +733,14 @@ struct PagesConverterTests {
         #expect(try DocumentRenderer.render(orderedResult, to: .plaintext) == "1. Alpha 2. inner\n2. Beta")
     }
 
-    @Test("PagesConverter clamps oversized list restarts instead of overflowing")
+    @Test("PagesConverter preserves oversized list restarts as literal numbering")
     func oversizedListRestart() async throws {
         let pages = Self.makeListPagesFile(text: "a\nb", style: .ordered,
                                            restarts: [(0, UInt64(Int.max)), (2, 0)])
-        await #expect(throws: PicoDocsError.fileCorrupted) {
-            try await PicoDocsEngine.convert(data: pages, filename: "lists.pages")
-        }
+        let result = try await PicoDocsEngine.convert(data: pages, filename: "lists.pages")
+        let text = try DocumentRenderer.render(result, to: .plaintext)
+        #expect(text.contains("9223372036854775807. a"))
+        #expect(text.contains("9223372036854775808. b"))
     }
 
     @Test("PagesConverter keeps list numbering across an inline table")

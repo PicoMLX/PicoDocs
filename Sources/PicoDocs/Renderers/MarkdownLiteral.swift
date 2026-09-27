@@ -6,6 +6,7 @@ enum MarkdownLiteral {
     /// literal backslashes before the renderer decodes generated escapes.
     static func escapeBackslashes(_ text: String, paragraphEndLines: Set<Int> = []) -> String {
         var inFence = false
+        var fenceListBase: Int?
         var inNote = false
         var lists: [(base: Int, content: Int)] = []
         var followsBlank = false
@@ -28,6 +29,9 @@ enum MarkdownLiteral {
         }
         for (index, line) in lines.enumerated() {
             let blank = line.trimmingCharacters(in: .whitespaces).isEmpty
+            if inFence, let base = fenceListBase, !blank, line.prefix(while: { $0 == " " }).count < base + 2 {
+                inFence = false; fenceListBase = nil
+            }
             // Footnote extraction joins continued paragraphs into one inline value.
             if !inFence, inNote, line.hasPrefix("    ") || line.hasPrefix("\t") || (blank && followedByNoteContinuation[index]) {
                 prose += line
@@ -51,6 +55,7 @@ enum MarkdownLiteral {
             if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
                 flushProse()
                 inFence.toggle()
+                fenceListBase = inFence ? lists.last?.base : nil
                 output += line
                 if index < lines.count - 1 { output += "\n" }
             } else if inFence {
@@ -77,7 +82,7 @@ enum MarkdownLiteral {
                 if index < lines.count - 1 { output += "\n" }
             } else {
                 let boundary = DocumentRenderer.literalBlockBoundary(line)
-                if boundary.starts { flushProse() }
+                if boundary.starts || DocumentRenderer.literalListIndent(lines, index: index) != nil { flushProse() }
                 prose += line
                 if index < lines.count - 1 { prose += "\n" }
                 if boundary.ends || paragraphEndLines.contains(index) { flushProse() }
