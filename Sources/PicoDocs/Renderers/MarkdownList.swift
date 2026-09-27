@@ -5,14 +5,16 @@ struct MarkdownList {
     struct Item {
         let number: Int?
         let padding: String
+        let delimiter: Character
         enum Content {
             case text(String)
             case list(MarkdownList)
         }
         var content: [Content]
-        init(number: Int?, text: String, padding: String = " ") {
+        init(number: Int?, text: String, padding: String = " ", delimiter: Character = ".") {
             self.number = number
             self.padding = padding
+            self.delimiter = delimiter
             content = [.text(text)]
         }
         mutating func appendText(_ text: String) {
@@ -30,6 +32,7 @@ struct MarkdownList {
         let number: Int?
         let text: String
         let padding: String
+        let delimiter: Character
     }
 
     private static func marker(_ line: String) -> Marker? {
@@ -38,12 +41,13 @@ struct MarkdownList {
         let content = line.dropFirst(whitespace.count)
         let number: Int?
         let markerWidth: Int
+        let delimiter: Character
         if let first = content.first, "-*+".contains(first) {
-            number = nil; markerWidth = 1
+            number = nil; markerWidth = 1; delimiter = first
         } else {
             let digits = content.prefix { $0.isASCII && $0.isNumber }
-            guard (1...9).contains(digits.count), let value = Int(digits), content.dropFirst(digits.count).first == "." else { return nil }
-            number = value; markerWidth = digits.count + 1
+            guard (1...9).contains(digits.count), let value = Int(digits), let ending = content.dropFirst(digits.count).first, ending == "." || ending == ")" else { return nil }
+            number = value; markerWidth = digits.count + 1; delimiter = ending
         }
         let tail = content.dropFirst(markerWidth)
         guard tail.isEmpty || tail.first == " " || tail.first == "\t" else { return nil }
@@ -51,7 +55,7 @@ struct MarkdownList {
         let contentIndent = padding.isEmpty ? indent + markerWidth + 1 : padding.reduce(indent + markerWidth) {
             $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1
         }
-        return Marker(indent: indent, contentIndent: contentIndent, number: number, text: String(tail.dropFirst(padding.count)), padding: padding.isEmpty ? " " : String(padding))
+        return Marker(indent: indent, contentIndent: contentIndent, number: number, text: String(tail.dropFirst(padding.count)), padding: padding.isEmpty ? " " : String(padding), delimiter: delimiter)
     }
 
     static func isOrderedMarker(_ line: String) -> Bool? { marker(line).map { $0.number != nil } }
@@ -72,7 +76,7 @@ struct MarkdownList {
                     // An explicit restart following a blank line opens a new list.
                     if blank, let previous = list.items.last?.number, list.ordered, current.number != min(previous, Int.max - 1) + 1 { break }
                     index = next + 1
-                    list.items.append(Item(number: current.number, text: current.text, padding: current.padding))
+                    list.items.append(Item(number: current.number, text: current.text, padding: current.padding, delimiter: current.delimiter))
                     contentIndent = current.contentIndent
                 } else {
                     guard !list.items.isEmpty else { break }
@@ -93,7 +97,7 @@ struct MarkdownList {
 
     func plaintext(indent: String = "", inline: (String) -> String) -> String {
         items.map { item in
-            let marker = item.number.map { "\($0)." + item.padding } ?? "-" + item.padding
+            let marker = item.number.map { "\($0)\(item.delimiter)" + item.padding } ?? "-" + item.padding
             let width = (indent + marker).reduce(0) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
             let continuation = String(repeating: " ", count: width)
             return item.content.enumerated().map { index, content in

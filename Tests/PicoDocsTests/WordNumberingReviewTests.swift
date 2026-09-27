@@ -5,6 +5,29 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func parenthesizedDecimalLabelsRemainOrdered() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1)\"/><w:suff w:val=\"space\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        let doc = "<w:document \(ns)><w:body><w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>Item</w:t></w:r></w:p></w:body></w:document>"
+        let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(doc.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8))]), filename: "ordered.docx")
+        #expect(result.markdown() == "1) Item")
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == "1) Item")
+        #expect(try DocumentRenderer.render(result, to: .html).contains("<ol>"))
+        #expect(try !DocumentRenderer.render(result, to: .html).contains("<ul>"))
+    }
+
+    @Test func listContinuationEscapingLeavesInlineCodeUntouched() throws {
+        for marker in ["- second", "2. second", "2) second"] {
+            let xml = "<w:p \(ns)><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>`first</w:t><w:br/><w:t>" + marker + "`</w:t></w:r></w:p>"
+            let document = try SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser())
+            let paragraph = try #require(document.getElementsByTag("w:p").first())
+            let text = try #require(WordConverter.renderParagraph(paragraph, relationships: [:]))
+            #expect(!text.contains("\\"))
+            let result = ConverterResult(sections: [.init(markdown: text)])
+            let html = try DocumentRenderer.render(result, to: .html)
+            #expect(html.contains("<code>first " + marker + "</code>"), "Markdown: \(text), HTML: \(html)")
+        }
+    }
+
     @Test func HTMLTableCanonicalEscapesAreNotDoubled() async throws {
         for (source,expected) in [("*","*"),(#"\*"#,#"\*"#),(#"\|"#,#"\|"#),(#"<code>\\|</code>"#,#"\\|"#)] {
             let input = "<table><tr><th>Value</th></tr><tr><td>" + source + "</td></tr></table>"
@@ -295,7 +318,7 @@ struct WordNumberingReviewTests {
         #expect(disabled.markdown().contains("I.1. Item"))
         let enabled = try await convert(format: "decimal", label: "%1.%2.", override: #"<w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:isLgl/></w:lvl></w:lvlOverride>"#)
         #expect(enabled.markdown().contains("1.1. Item"))
-        for (format, start, language, expected) in [("cardinalText", 1, "en-US", "one"), ("ordinalText", 1, "en-US", "first"), ("ordinalText", 22, "en-GB", "twenty-second"), ("cardinalText", 2, "fr-FR", "deux"), ("ordinalText", 1, "fr-FR", "premier"), ("ordinalText", 5, "fr-FR", "cinquième"), ("ordinalText", 1, "de-DE", "erste"), ("ordinalText", 21, "de-DE", "einundzwanzigste"), ("hex", 10, "en-US", "A"), ("ordinal", 1, "fr-FR", "1er"), ("ordinal", 1, "de-DE", "1."), ("ordinal", 22, "en-US", "22nd"), ("decimalEnclosedCircle", 1, "en-US", "①"), ("decimalEnclosedCircle", 10, "en-US", "⑩"), ("decimalEnclosedCircle", 20, "en-US", "⑳"), ("decimalEnclosedCircle", 21, "en-US", "21")] {
+        for (format, start, language, expected) in [("cardinalText", 1, "en-US", "one"), ("ordinalText", 1, "en-US", "first"), ("ordinalText", 22, "en-GB", "twenty-second"), ("cardinalText", 2, "fr-FR", "deux"), ("ordinalText", 1, "fr-FR", "premier"), ("ordinalText", 5, "fr-FR", "cinquième"), ("ordinalText", 1, "de-DE", "erste"), ("ordinalText", 21, "de-DE", "einundzwanzigste"), ("hex", 10, "en-US", "A"), ("decimalEnclosedFullstop", 1, "en-US", "⒈"), ("decimalEnclosedFullstop", 20, "en-US", "⒛"), ("decimalEnclosedFullstop", 21, "en-US", "21"), ("ordinal", 1, "fr-FR", "1er"), ("ordinal", 1, "de-DE", "1."), ("ordinal", 22, "en-US", "22nd"), ("decimalEnclosedCircle", 1, "en-US", "①"), ("decimalEnclosedCircle", 10, "en-US", "⑩"), ("decimalEnclosedCircle", 20, "en-US", "⑳"), ("decimalEnclosedCircle", 21, "en-US", "21")] {
             let result = try await convert(format: format, label: "%2.", start: start, language: language)
             #expect(try DocumentRenderer.render(result, to: .plaintext).contains(expected + ". Item"), "\(format) \(language): \(result.markdown()) expected \(expected)")
         }

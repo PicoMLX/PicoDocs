@@ -224,12 +224,11 @@ public struct WordConverter: DocumentConverter {
         guard let prefix else { return text }
         // Keep a multi-line item (manual `w:br`) inside the item.
         let continuation = "\n" + String(repeating: " ", count: WordListNumbering.displayWidth(prefix))
-        let lines = text.components(separatedBy: "\n")
-        return prefix + lines.enumerated().map { index, line in
-            guard index > 0 else { return line }
-            return line.replacingOccurrences(of: #"^(\s*)([-*+])(?=\s|$)"#, with: #"$1\\$2"#, options: .regularExpression)
-                .replacingOccurrences(of: #"^(\s*)([0-9]+)([.)])(?=\s|$)"#, with: #"$1$2\\$3"#, options: .regularExpression)
-        }.joined(separator: continuation)
+        let escaped = MarkdownTableCell.mapCodeSpans(text, code: { $0.replacingOccurrences(of: "  \n", with: " ").replacingOccurrences(of: "\n", with: " ") }, plain: { plain in
+            plain.replacingOccurrences(of: #"(\n[ \t]*)([-*+])(?=\s|$)"#, with: #"$1\\$2"#, options: .regularExpression)
+                .replacingOccurrences(of: #"(\n[ \t]*)([0-9]+)([.)])(?=\s|$)"#, with: #"$1$2\\$3"#, options: .regularExpression)
+        })
+        return prefix + escaped.replacingOccurrences(of: "\n", with: continuation)
     }
 
     static func headingLevel(forStyle style: String?) -> Int? {

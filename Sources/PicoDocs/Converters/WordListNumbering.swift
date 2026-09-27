@@ -148,7 +148,7 @@ final class WordListNumbering {
                 let value = counters[numID]?[level] ?? numbers[numID]?.overrides[level] ?? effective?.start ?? 0
                 label = label.replacingOccurrences(of: "%\(level + 1)", with: Self.formattedNumber(value, format: definition?.legal == true ? "decimal" : (effective?.format ?? "decimal"), language: definition?.language ?? effective?.language ?? language))
             }
-            if label == "\(count).", String(count).count <= 9, !suffix.isEmpty { marker = label + suffix }
+            if ["\(count).", "\(count))"].contains(label), String(count).count <= 9, !suffix.isEmpty { marker = label + suffix }
             else {
                 let escaped = label.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
                 marker = "- " + escaped + suffix
@@ -357,6 +357,9 @@ final class WordListNumbering {
             formatter.locale = Locale(identifier: language)
             formatter.numberStyle = .ordinal
             return formatter.string(from: NSNumber(value: value)) ?? String(value)
+        }
+        if format == "decimalEnclosedFullstop", (1...20).contains(value) {
+            return String(UnicodeScalar(0x2487 + value)!)
         }
         if format == "decimalEnclosedCircle", (1...20).contains(value) {
             return String(UnicodeScalar(0x245F + value)!)
