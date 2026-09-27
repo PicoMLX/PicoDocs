@@ -602,13 +602,12 @@ public enum DocumentRenderer {
             while i < lines.count {
                 let candidate = lines[i].trimmingCharacters(in: .whitespaces)
                 if isBlank(lines[i]) || candidate.hasPrefix("```") || candidate.hasPrefix("|")
-                    || candidate.hasPrefix(">") || candidate == "---" || candidate == "***"
+                    || candidate.hasPrefix(">") || candidate == "---" || candidate == "***" || candidate == "___"
                     || headingMatch(candidate) != nil || listMarker(candidate) != nil {
                     break
                 }
-                // A backslash-escaped leading marker (`\- x`, `1\. x`) is literal text.
-                let unescaped = unescapeListMarker(candidate)
-                paragraph.append(unescaped == candidate ? lines[i] : unescaped); i += 1
+                // Preserve canonical escapes until inline parsing has protected them.
+                paragraph.append(lines[i]); i += 1
             }
             if !paragraph.isEmpty {
                 blocks.append(.paragraph(paragraph.joined(separator: "\n")))
@@ -673,15 +672,12 @@ public enum DocumentRenderer {
         return digits.count <= 9 ? Int(digits) ?? 1 : 1
     }
 
-    /// List-item text with the backslash dropped from a leading escaped marker
-    /// (`\- x`, `1\. x`) — converters escape item lines that would otherwise open
-    /// a nested list, and CommonMark renders them without the backslash.
-    private static func unescapeListMarker(_ text: String) -> String {
-        if text.hasPrefix("\\-") || text.hasPrefix("\\*") || text.hasPrefix("\\+") { return String(text.dropFirst()) }
-        let digits = text.prefix { $0.isASCII && $0.isNumber }
-        let rest = text.dropFirst(digits.count)
-        if !digits.isEmpty, rest.hasPrefix("\\.") || rest.hasPrefix("\\)") { return String(digits) + String(rest.dropFirst()) }
-        return text
+    /// Shared boundaries for verbatim-source escaping and rendered inline blocks.
+    static func literalBlockBoundary(_ line: String) -> (starts: Bool, ends: Bool) {
+        let line = line.trimmingCharacters(in: .whitespaces)
+        let single = headingMatch(line) != nil || line.hasPrefix("|") || line.hasPrefix(">")
+            || ["---", "***", "___"].contains(line)
+        return (single || listMarker(line) != nil, single)
     }
 
     private static func stripListMarker(_ line: String) -> String {

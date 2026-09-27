@@ -30,8 +30,11 @@ enum MarkdownLiteral {
                 output += line
                 if index < lines.count - 1 { output += "\n" }
             } else {
+                let boundary = DocumentRenderer.literalBlockBoundary(line)
+                if boundary.starts { flushProse() }
                 prose += line
                 if index < lines.count - 1 { prose += "\n" }
+                if boundary.ends { flushProse() }
             }
         }
         flushProse()
