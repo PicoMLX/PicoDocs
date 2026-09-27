@@ -57,6 +57,10 @@ enum MarkdownTableCell {
             .replacingOccurrences(of: "|", with: "\\|")
     }
 
+    static func escapeCanonicalDelimiters(_ text: String) -> String {
+        mapCodeSpans(text, code: { codePipes($0, encoding: true) }, plain: escapeCanonicalPipes)
+    }
+
     /// Add only the missing pipe escapes to already escaped Markdown.
     static func escapeCanonicalPipes(_ text: String) -> String {
         var output = "", slashes = 0

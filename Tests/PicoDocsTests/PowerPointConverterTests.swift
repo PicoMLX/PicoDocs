@@ -283,8 +283,12 @@ struct PowerPointConverterTests {
         let presentationRels = relationshipsXML(order.enumerated().map {
             ("rIdSlide\($0.offset)", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide", "slides/\($0.element)")
         })
+        var rootRelationships = [("office", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument", "ppt/presentation.xml")]
+        if extraParts.contains(where: { $0.name == "docProps/core.xml" }) {
+            rootRelationships.append(("core", "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties", "docProps/core.xml"))
+        }
         var parts: [(name: String, data: [UInt8])] = [
-            ("_rels/.rels", Array(relationshipsXML([("office", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument", "ppt/presentation.xml")]).utf8)),
+            ("_rels/.rels", Array(relationshipsXML(rootRelationships).utf8)),
             ("ppt/presentation.xml", Array(presentation.utf8)),
             ("ppt/_rels/presentation.xml.rels", Array(presentationRels.utf8)),
         ]

@@ -21,15 +21,21 @@ struct MarkdownList {
         let whitespace = line.prefix { $0 == " " || $0 == "\t" }
         let indent = whitespace.reduce(0) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
         let content = String(line.dropFirst(whitespace.count))
-        if let first = content.first, "-*+".contains(first),
-           content.count == 1 || content.dropFirst().hasPrefix(" ") {
-            return Marker(indent: indent, number: nil, text: String(content.dropFirst(2)), contentIndent: indent + 2)
+        func item(markerWidth: Int, number: Int?) -> Marker? {
+            let tail = content.dropFirst(markerWidth)
+            guard tail.isEmpty || tail.first == " " else { return nil }
+            let spaces = tail.prefix { $0 == " " }.count
+            let padding = (1...4).contains(spaces) ? spaces : 1
+            return Marker(indent: indent, number: number, text: String(tail.dropFirst(padding)), contentIndent: indent + markerWidth + padding)
         }
+        if let first = content.first, "-*+".contains(first) { return item(markerWidth: 1, number: nil) }
         let digits = content.prefix { $0.isASCII && $0.isNumber }
         let tail = content.dropFirst(digits.count)
-        guard !digits.isEmpty, let number = Int(digits), tail == "." || tail.hasPrefix(". ") else { return nil }
-        return Marker(indent: indent, number: number, text: String(tail.dropFirst(2)), contentIndent: indent + digits.count + 2)
+        guard (1...9).contains(digits.count), let number = Int(digits), tail.first == "." else { return nil }
+        return item(markerWidth: digits.count + 1, number: number)
     }
+
+    static func startsItem(_ line: String) -> Bool { marker(line) != nil }
 
     static func parse(_ lines: [String], index: inout Int, depth: Int = 0, minimumIndent: Int = 0) -> MarkdownList? {
         guard index < lines.count, depth < 32, let first = marker(lines[index]) else { return nil }

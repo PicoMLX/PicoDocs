@@ -17,6 +17,10 @@ final class PowerPointPackage {
         self.archive = archive
         self.entryLimit = entryLimit
         self.remaining = totalLimit
+        var names: Set<String> = []
+        for entry in archive where entry.type == .file {
+            if !names.insert(entry.path).inserted { fail(PicoDocsError.fileCorrupted); break }
+        }
     }
 
     func fail(_ error: Error) { if failure == nil { failure = error } }

@@ -153,7 +153,7 @@ public struct PowerPointConverter: DocumentConverter {
             context.master = document
             context.placeholders = parts.placeholders
         }
-        let paragraphs = tree.children().array().filter { $0.tagName().lowercased() == "p:sp" }
+        let paragraphs = selectedChildren(in: tree, descendingInto: ["p:grpsp"]).filter { $0.tagName().lowercased() == "p:sp" }
             .filter { placeholderType(of: $0) == "body" }
             .flatMap { shape in
                 context.defaultLink = shapeLink(shape, context: context)
@@ -164,10 +164,13 @@ public struct PowerPointConverter: DocumentConverter {
         return text.isEmpty ? nil : text
     }
 
-    /// Title and author from `docProps/core.xml`.
+    /// Optional core-properties metadata is located by the package relationship.
     static func coreProperties(_ archive: PowerPointPackage) -> (title: String?, author: String?) {
-        guard archive.archive["docProps/core.xml"] != nil else { return (nil, nil) }
-        guard let core = xml(archive, path: "docProps/core.xml"),
+        let properties = relationships(archive, forPart: "").values.filter { $0.type.hasSuffix("/metadata/core-properties") }
+        guard properties.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return (nil, nil) }
+        guard let relation = properties.first else { return (nil, nil) }
+        let path = WordConverter.resolvePartPath(relation.target, relativeTo: "")
+        guard !relation.external, let core = xml(archive, path: path),
               core.children().first()?.tagName().lowercased() == "cp:coreproperties" else {
             archive.fail(PicoDocsError.fileCorrupted)
             return (nil, nil)
@@ -292,7 +295,7 @@ public struct PowerPointConverter: DocumentConverter {
                     if title == nil, !text.isEmpty {
                         title = text
                         context.plainTitle = selectedParagraphs(in: body).map { paragraph in
-                            paragraph.children().array().map { node in
+                            selectedChildren(in: paragraph).map { node in
                                 if node.tagName().lowercased() == "a:br" { return " " }
                                 return ((try? node.getElementsByTag("a:t").array()) ?? []).map(wholeText).joined()
                             }.joined()
@@ -478,7 +481,7 @@ public struct PowerPointConverter: DocumentConverter {
                 indexes[key] = result; buildCount += 1
             }
             let equivalent = ["title", "ctrTitle"].contains(type) ? "title" : (["body", "obj"].contains(type) ? "body" : type)
-            return indexes[key]?.byID[index] ?? indexes[key]?.byType[equivalent]
+            return index.isEmpty ? indexes[key]?.byType[equivalent] : indexes[key]?.byID[index]
         }
     }
 
@@ -500,16 +503,21 @@ public struct PowerPointConverter: DocumentConverter {
 
     // MARK: - Paragraphs and lists
 
-    private static func selectedParagraphs(in body: Element) -> [Element] {
-        var paragraphs: [Element] = []
-        var pending = Array(body.children().array().reversed())
+    private static func selectedChildren(in container: Element, descendingInto groups: Set<String> = []) -> [Element] {
+        var children: [Element] = []
+        var pending = Array(container.children().array().reversed())
         while let element = pending.popLast() {
-            if element.tagName().lowercased() == "a:p" { paragraphs.append(element) }
-            else if element.tagName().lowercased() == "mc:alternatecontent", let branch = selectedAlternateBranch(element) {
-                pending += branch.children().array().reversed()
-            }
+            let tag = element.tagName().lowercased()
+            if tag == "mc:alternatecontent" {
+                if let branch = selectedAlternateBranch(element) { pending += branch.children().array().reversed() }
+            } else if groups.contains(tag) { pending += element.children().array().reversed() }
+            else { children.append(element) }
         }
-        return paragraphs
+        return children
+    }
+
+    private static func selectedParagraphs(in body: Element) -> [Element] {
+        selectedChildren(in: body).filter { $0.tagName().lowercased() == "a:p" }
     }
 
     /// Renders a text body's paragraphs to Markdown blocks. Consecutive list items
@@ -594,7 +602,7 @@ public struct PowerPointConverter: DocumentConverter {
         let paragraphProperties = child(of: paragraph, named: "a:ppr")
         let level = min(max(Int((try? paragraphProperties?.attr("lvl")) ?? "") ?? 0, 0), 8)
         let defaults = [paragraphProperties.flatMap { child(of: $0, named: "a:defrpr") }].compactMap { $0 } + context.runDefaults[level]
-        for node in paragraph.children().array() {
+        for node in selectedChildren(in: paragraph) {
             if Task.isCancelled { return "" }
             switch node.tagName().lowercased() {
             case "a:r", "a:fld":
@@ -782,7 +790,10 @@ public struct PowerPointConverter: DocumentConverter {
             context.images.add(path: mediaPath, filename: filename, archive: context.archive)
         }
         let label = escapeMarkdown(alt)
-        return "![\(label)](\(linkDestination(filename)))"
+        let image = "![\(label)](\(linkDestination(filename)))"
+        let click = properties.flatMap { child(of: $0, named: "a:hlinkclick") }
+        if let target = hyperlink(click, context: context) { return "[\(image)](\(linkDestination(target)))" }
+        return image
     }
 
     /// Collects each embedded image once (by archive path) as an `.image` section.
@@ -867,7 +878,8 @@ public struct PowerPointConverter: DocumentConverter {
     /// A part's relationships (`<dir>/_rels/<file>.rels`), keyed by id.
     static func relationships(_ archive: PowerPointPackage, forPart part: String) -> [String: Relationship] {
         if let cached = archive.relationshipMaps[part] { return cached }
-        let relsPath = part.isEmpty ? "_rels/.rels" : "\(directory(of: part))/_rels/\((part as NSString).lastPathComponent).rels"
+        let parent = directory(of: part)
+        let relsPath = (parent.isEmpty ? "" : parent + "/") + "_rels/\((part as NSString).lastPathComponent).rels"
         guard let document = xml(archive, path: relsPath) else {
             if archive.archive[relsPath] != nil { archive.fail(PicoDocsError.fileCorrupted) }
             archive.relationshipMaps[part] = [:]

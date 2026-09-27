@@ -506,7 +506,7 @@ public enum DocumentRenderer {
                 let candidate = lines[i].trimmingCharacters(in: .whitespaces)
                 if isBlank(lines[i]) || candidate.hasPrefix("```") || candidate.hasPrefix("|")
                     || candidate.hasPrefix(">") || candidate == "---" || candidate == "***"
-                    || headingMatch(candidate) != nil || listMarker(candidate) != nil {
+                    || headingMatch(candidate) != nil || MarkdownList.startsItem(candidate) {
                     break
                 }
                 paragraph.append(lines[i]); i += 1
@@ -529,21 +529,6 @@ public enum DocumentRenderer {
         guard level > 0, index < line.endIndex, line[index] == " " else { return nil }
         let text = String(line[line.index(after: index)...]).trimmingCharacters(in: .whitespaces)
         return (level, text)
-    }
-
-    private enum ListKind: Equatable { case ordered, unordered }
-
-    private static func listMarker(_ line: String) -> ListKind? {
-        if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") { return .unordered }
-        // ordered: one-or-more digits, then ". "
-        var index = line.startIndex
-        var digits = 0
-        while index < line.endIndex, line[index].isNumber { digits += 1; index = line.index(after: index) }
-        if digits > 0, index < line.endIndex, line[index] == "." {
-            let after = line.index(after: index)
-            if after < line.endIndex, line[after] == " " { return .ordered }
-        }
-        return nil
     }
 
     private static func stripListMarker(_ line: String) -> String {
@@ -604,7 +589,7 @@ public enum DocumentRenderer {
     private static let linkOpen = "\u{E002}"
     private static let linkClose = "\u{E003}"
 
-    private struct InlineLink { let label: String; let url: String; let isImage: Bool }
+    private struct InlineLink { let label: String; let url: String; let isImage: Bool; var imageSource: String? = nil }
 
     /// Replaces inline code spans with placeholders so the link/emphasis passes
     /// don't rewrite Markdown metacharacters inside code.
@@ -626,13 +611,28 @@ public enum DocumentRenderer {
     /// generated attribute. Handles CommonMark angle-bracket destinations
     /// `(<url with spaces (and parens)>)` that WordConverter emits.
     private static func extractLinks(_ text: String) -> (text: String, links: [InlineLink]) {
+        var links: [InlineLink] = []
+        let destination = #"\((?:<([^>]+)>|([^)]+))\)"#
+        let linkedImagePattern = #"\[!\[([^\]]*)\]"# + destination + #"\]"# + destination
+        let source = text as NSString
+        var afterImages = "", offset = 0
+        if let linkedImage = try? NSRegularExpression(pattern: linkedImagePattern) {
+            for match in linkedImage.matches(in: text, range: NSRange(location: 0, length: source.length)) {
+                afterImages += source.substring(with: NSRange(location: offset, length: match.range.location - offset))
+                let image = nsSubstring(source, match.range(at: match.range(at: 2).location != NSNotFound ? 2 : 3))
+                let target = nsSubstring(source, match.range(at: match.range(at: 4).location != NSNotFound ? 4 : 5))
+                afterImages += "\(linkOpen)\(links.count)\(linkClose)"
+                links.append(InlineLink(label: nsSubstring(source, match.range(at: 1)), url: target, isImage: false, imageSource: image))
+                offset = NSMaxRange(match.range)
+            }
+        }
+        afterImages += source.substring(from: offset)
         let pattern = "(!)?\\[([^\\]]*)\\]\\((?:<([^>]+)>|([^)]+))\\)"
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return (text, []) }
-        let ns = text as NSString
-        var links: [InlineLink] = []
+        let ns = afterImages as NSString
         var result = ""
         var last = 0
-        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+        for match in regex.matches(in: afterImages, range: NSRange(location: 0, length: ns.length)) {
             result += ns.substring(with: NSRange(location: last, length: match.range.location - last))
             let isImage = match.range(at: 1).location != NSNotFound
             let label = nsSubstring(ns, match.range(at: 2))
@@ -671,7 +671,10 @@ public enum DocumentRenderer {
         }
         for (index, link) in links.enumerated() {
             let tag: String
-            if !isSafeURL(link.url, isImage: link.isImage) {
+            if let image = link.imageSource, isSafeURL(image, isImage: true) {
+                let picture = "<img src=\"\(escapeHTML(image))\" alt=\"\(escapeHTML(link.label))\">"
+                tag = isSafeURL(link.url, isImage: false) ? "<a href=\"\(escapeHTML(link.url))\">\(picture)</a>" : picture
+            } else if !isSafeURL(link.url, isImage: link.isImage) {
                 // A script-capable URL (`javascript:` …) would make the exported
                 // page executable when displayed; keep only the visible text.
                 tag = link.isImage ? escapeHTML(link.label) : applyEmphasisHTML(escapeHTML(link.label))

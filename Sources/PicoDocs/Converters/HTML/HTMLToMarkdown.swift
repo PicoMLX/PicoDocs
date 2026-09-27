@@ -178,7 +178,7 @@ enum HTMLToMarkdown {
                 // cells can't contain newlines) and escape pipes.
                 var rendered = ""
                 renderChildren(of: cell, into: &rendered)
-                return collapseWhitespace(rendered).trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "|", with: "\\|")
+                return MarkdownTableCell.escapeCanonicalDelimiters(collapseWhitespace(rendered).trimmingCharacters(in: .whitespaces))
             })
         }
         guard !rows.isEmpty else { return "" }
