@@ -5,6 +5,17 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func graphicDataAcceptsOpaqueNamespacesAtItsSchemaExtensionPoint() async throws {
+        typealias B = PowerPointConverterTests
+        let opaque = "<c:chart xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\">" + B.titleShape("Hidden") + "</c:chart>"
+        for content in [opaque, selectedWrapper(opaque)] {
+            let frame = "<p:graphicFrame><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\">" + content + "</a:graphicData></a:graphic></p:graphicFrame>"
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Visible") + frame)])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "opaque-chart.pptx")
+            #expect(result.markdown() == "## Visible")
+        }
+    }
+
     @Test func XMLNodeAndAttributeBudgetsRejectBeforeDOMConstruction() {
         let siblings = Data("<root><a/><b/><c/></root>".utf8)
         #expect(PowerPointXML.normalize(siblings, maximumNodes: 4) != nil)

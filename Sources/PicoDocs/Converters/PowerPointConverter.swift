@@ -369,7 +369,7 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     private static func selectedDescendant(in element: Element, named name: String) -> Element? {
-        guard !element.tagName().lowercased().hasPrefix("extension") else { return nil }
+        guard !element.tagName().lowercased().hasPrefix("extension"), !element.tagName().lowercased().hasPrefix("requiredextension") else { return nil }
         if element.tagName().lowercased() == name { return element }
         if element.tagName().lowercased() == "mc:alternatecontent" {
             return selectedAlternateBranch(element).flatMap { selectedDescendant(in: $0, named: name) }
@@ -540,7 +540,7 @@ public struct PowerPointConverter: DocumentConverter {
         var pending = Array(container.children().array().reversed())
         while let element = pending.popLast() {
             let tag = element.tagName().lowercased()
-            if tag.hasPrefix("extension") || (visibleOnly && isHidden(element)) { continue }
+            if tag.hasPrefix("extension") || tag.hasPrefix("requiredextension") || (visibleOnly && isHidden(element)) { continue }
             if tag == "mc:alternatecontent" {
                 if let branch = selectedAlternateBranch(element) { pending += branch.children().array().reversed() }
             } else if groups.contains(tag) { pending += element.children().array().reversed() }
@@ -998,16 +998,22 @@ public struct PowerPointConverter: DocumentConverter {
         guard let document = try? SwiftSoup.parse(text, "", SwiftSoup.Parser.xmlParser()) else { return nil }
         // MustUnderstand applies to the processed tree, excluding ignored extension
         // subtrees and unselected AlternateContent branches.
-        var pending = document.children().array()
-        while let element = pending.popLast() {
+        var pending = document.children().array().map { ($0, false) }
+        while let (element, allowsUnknown) = pending.popLast() {
             let tag = element.tagName().lowercased()
-            if tag.hasPrefix("requiredextension") { archive.fail(PicoDocsError.fileCorrupted); return nil }
+            if tag.hasPrefix("requiredextension") {
+                if allowsUnknown { continue }
+                archive.fail(PicoDocsError.fileCorrupted); return nil
+            }
             if tag.hasPrefix("extension") || tag == "p:ext" || tag == "a:ext" { continue }
             let required = ((try? element.attr("mc:MustUnderstand")) ?? "").split(whereSeparator: \.isWhitespace)
             if required.contains("unsupported") { archive.fail(PicoDocsError.fileCorrupted); return nil }
             if tag == "mc:alternatecontent" {
-                if let selected = selectedAlternateBranch(element) { pending.append(selected) }
-            } else { pending += element.children().array() }
+                if let selected = selectedAlternateBranch(element) { pending.append((selected, allowsUnknown)) }
+            } else {
+                let childAllowsUnknown = tag == "a:graphicdata" || ((tag == "mc:choice" || tag == "mc:fallback") && allowsUnknown)
+                pending += element.children().array().map { ($0, childAllowsUnknown) }
+            }
         }
         return document
     }
