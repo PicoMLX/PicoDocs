@@ -590,7 +590,7 @@ public enum DocumentRenderer {
                 out += "\u{E006}\(escaped.count - 1)\u{E007}"
                 index = next
             } else if text[index] == "\\", next < text.endIndex,
-               #"\`*_{}[]<>()#+-.!|"#.contains(text[next]) {
+               #"\`*_{}[]<>()#+-.!|~"#.contains(text[next]) {
                 escaped.append(String(text[next]))
                 out += "\u{E006}\(escaped.count - 1)\u{E007}"
                 index = text.index(after: next)

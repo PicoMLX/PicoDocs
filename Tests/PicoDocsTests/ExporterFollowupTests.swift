@@ -9,6 +9,54 @@ import AppKit
 
 struct ExporterFollowupTests {
 
+    @Test func bareDestinationsCannotEscapeWhitespace() throws {
+        for whitespace in [" ", "\t", "\n", "\r", "\r\n"] {
+            let source = "[x](foo\\" + whitespace + "bar)"
+            #expect(!MarkdownInlineParser.parse(source).contains { if case .link = $0 { return true }; return false })
+            for (format, path) in [(ExportableFileType.docx, "word/_rels/document.xml.rels"), (.pptx, "ppt/slides/_rels/slide1.xml.rels")] {
+                #expect(!(try xml(PicoDocsEngine.write(markdown: source, to: format), path)).contains("/hyperlink"))
+            }
+        }
+        #expect(MarkdownInlineParser.parse(#"[x](foo\bar)"#) == [.link(label: [.text("x")], destination: #"foo\bar"#)])
+        #expect(MarkdownInlineParser.parse(#"[x](foo\)bar)"#) == [.link(label: [.text("x")], destination: "foo)bar")])
+    }
+
+    @Test func titleLikeBareDestinationsFollowCommonMarkPrecedence() {
+        for leading in ["", " ", "\t", "\n"] {
+            for destination in ["\"title\"", "'title'", "(title)"] {
+                #expect(MarkdownInlineParser.parse("[x](" + leading + destination + ")") == [.link(label: [.text("x")], destination: destination)])
+            }
+            for title in ["\"two words\"", "'two words'", "(two words)"] {
+                #expect(MarkdownInlineParser.parse("[x](" + leading + "<> " + title + ")") == [.link(label: [.text("x")], destination: "")])
+            }
+        }
+    }
+
+    #if canImport(AppKit)
+    @Test func RTFLiteralTildeFencesRemainParagraphs() async throws {
+        var result = ConverterResult(sections: [.init(markdown: #"\~~~ literal"#)])
+        for _ in 0..<3 {
+            result = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(result, to: .rtf), filename: "tilde.rtf")
+            #expect(MarkdownBlockParser.parse(result.markdown()) == [.paragraph(#"\~\~\~ literal"#)])
+            #expect(try DocumentRenderer.render(result, to: .plaintext).trimmingCharacters(in: .whitespacesAndNewlines) == "~~~ literal")
+        }
+    }
+    #endif
+
+    @Test func mixedDeckSortsNumberedGroupsWithoutMovingUnnumberedSlots() throws {
+        for (sections, expected) in [
+            ([DocumentSection(kind: .slide, markdown: "Third", slideNumber: 3), .init(kind: .slide, markdown: "First", slideNumber: 1), .init(kind: .slide, markdown: "Extra")], ["First", "", "Third", "Extra"]),
+            ([DocumentSection(kind: .slide, markdown: "Cover"), .init(kind: .slide, markdown: "Third", slideNumber: 3), .init(kind: .slide, markdown: "Interlude"), .init(kind: .slide, markdown: "First", slideNumber: 1), .init(kind: .table, markdown: "| Ancillary |\n| --- |", slideNumber: 1), .init(kind: .slide, markdown: "Closing")], ["Cover", "First", "Interlude", "", "Third", "Closing"])
+        ] {
+            let data = try PicoDocsEngine.write(ConverterResult(sections: sections), to: .pptx)
+            for (index, text) in expected.enumerated() {
+                #expect(try xml(data, "ppt/slides/slide\(index + 1).xml").contains(text.isEmpty ? "<a:p/>" : text))
+            }
+            if sections.count > 3 { #expect(try xml(data, "ppt/slides/slide2.xml").contains("Ancillary")) }
+        }
+    }
+
+
     @Test func indexedLinkDestinationsRejectMalformedSkippedContent() throws {
         let invalid = ["<https://example.test/a<b>", "a(b c)d", "a(b\nc)d", "a(b\rc)d", "a(b\r\nc)d", "a(b\tc)d", "a(b(c d)e)f"]
         for destination in invalid {

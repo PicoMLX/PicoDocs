@@ -131,15 +131,22 @@ public struct PPTXExporter: DocumentExporter {
             if !unnumberedSlides.isEmpty {
                 groups = []
                 var emitted: Set<Int> = []
+                let orderedNumbers = numbered.keys.sorted()
+                var numberedIndex = 0
                 var nextGap = 1
                 for section in explicit {
                     if let number = section.slideNumber, number > 0 {
                         guard emitted.insert(number).inserted else { continue }
-                        while nextGap < number {
-                            if numbered[nextGap] == nil { groups.append([]) }
+                        // Keep unnumbered section slots, but fill numbered slots
+                        // in provenance order, with associated sections together.
+                        let orderedNumber = orderedNumbers[numberedIndex]
+                        numberedIndex += 1
+                        while nextGap < orderedNumber {
+                            groups.append([])
                             nextGap += 1
                         }
-                        groups.append(numbered[number] ?? [])
+                        groups.append(numbered[orderedNumber] ?? [])
+                        nextGap = orderedNumber + 1
                     } else { groups.append([section]) }
                 }
             }

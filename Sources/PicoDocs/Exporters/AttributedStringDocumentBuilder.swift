@@ -171,7 +171,7 @@ enum AttributedStringDocumentBuilder {
         func escaped(_ text: String) -> String {
             // The reader already escapes hyperlink labels before adding Markdown.
             guard escapeLiterals, link == nil else { return text }
-            return text.map { #"\`*_{}[]<>()#+-.!|"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+            return text.map { #"\`*_{}[]<>()#+-.!|~"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
         }
         for node in nodes {
             switch node {

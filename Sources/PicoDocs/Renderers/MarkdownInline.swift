@@ -304,7 +304,7 @@ enum MarkdownInlineParser {
             // Separate the bare URL from its optional title. Balanced URL
             // parentheses are paired and checked for whitespace by the initial scan.
             while cursor < chars.count, !chars[cursor].isWhitespace, chars[cursor] != ")" {
-                if chars[cursor] == "\\", cursor + 1 < chars.count { cursor += 2 }
+                if chars[cursor] == "\\", cursor + 1 < chars.count, punctuation.contains(chars[cursor + 1]) { cursor += 2 }
                 else if chars[cursor] == "(" {
                     guard let close = parenCloses[cursor] else { return nil }
                     cursor = close + 1
