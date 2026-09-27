@@ -47,6 +47,12 @@ enum MarkdownTableCell {
 
 
 
+    /// Add table structure to already canonical inline Markdown without doubling
+    /// prose escapes or changing literal backslashes inside code.
+    static func escapeCanonicalDelimiters(_ text: String) -> String {
+        mapCodeSpans(text, code: { codePipes($0, encoding: true) }, plain: { MarkdownLiteral.escapeStructural($0, characters: "|") })
+    }
+
     /// Only runs immediately before pipes need a table layer inside code.
     /// Backslashes elsewhere are source text and must remain untouched.
     static func codePipes(_ text: String, encoding: Bool) -> String {

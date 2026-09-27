@@ -212,10 +212,13 @@ public struct WordConverter: DocumentConverter {
         let style = properties.flatMap { child(of: $0, named: "w:pstyle") }.flatMap { try? $0.attr("w:val") }
         let numPr = properties.flatMap { child(of: $0, named: "w:numpr") }
         let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
-        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style, visibleMarker: headingLevel(forStyle: style) == nil, paragraphProperties: properties) } ?? (numPr != nil ? "- " : nil)
-        guard !text.isEmpty else { return headingLevel(forStyle: style) == nil ? prefix : nil }
+        let heading: Int?
+        if let numbering { heading = numbering.headingLevel(style: style, paragraphProperties: properties) }
+        else { heading = headingLevel(forStyle: style) }
+        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style, visibleMarker: heading == nil, paragraphProperties: properties) } ?? (numPr != nil ? "- " : nil)
+        guard !text.isEmpty else { return heading == nil ? prefix : nil }
 
-        if let level = headingLevel(forStyle: style) {
+        if let level = heading {
             return String(repeating: "#", count: level) + " " + text
         }
         guard let prefix else { return text }
@@ -433,7 +436,7 @@ public struct WordConverter: DocumentConverter {
                     try textBoxes?(paragraph)
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
-                cells.append(MarkdownTableCell.mapCodeSpans(cellText, code: { MarkdownTableCell.codePipes($0, encoding: true) }, plain: { MarkdownLiteral.escapeStructural($0, characters: "|") })
+                cells.append(MarkdownTableCell.escapeCanonicalDelimiters(cellText)
                     .replacingOccurrences(of: "\r\n", with: "<br>")
                     .replacingOccurrences(of: "\r", with: "<br>")
                     .replacingOccurrences(of: "\n", with: "<br>"))

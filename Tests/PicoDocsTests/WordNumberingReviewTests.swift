@@ -5,6 +5,44 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func HTMLTableCanonicalEscapesAreNotDoubled() async throws {
+        for (source,expected) in [("*","*"),(#"\*"#,#"\*"#),(#"\|"#,#"\|"#),(#"<code>\\|</code>"#,#"\\|"#)] {
+            let input = "<table><tr><th>Value</th></tr><tr><td>" + source + "</td></tr></table>"
+            let result = try await PicoDocsEngine.convert(data:Data(input.utf8),filename:"cell.html")
+            let html = try DocumentRenderer.render(result,to:.html)
+            #expect(html.contains(expected))
+            #expect(try DocumentRenderer.render(result,to:.csv) == "Value\n" + expected)
+            if expected == "*" { #expect(!html.contains(#"\*"#)) }
+        }
+    }
+
+    @Test func LibreOfficeAliasSurvivesMultipleReplacementParagraphs() throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:suff w:val=\"space\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num><w:num w:numId=\"2\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"0\"><w:startOverride w:val=\"5\"/></w:lvlOverride></w:num></w:numbering>"
+        for libreOffice in [true,false] {
+            var entries = [(name:"word/numbering.xml",data:Array(numbering.utf8))]
+            if libreOffice { entries.append(("docProps/app.xml",Array("<Properties><Application>LibreOffice</Application></Properties>".utf8))) }
+            let resolver = WordListNumbering(archive:try #require(Archive(data:PagesConverterTests.makeZip(entries),accessMode:.read)))
+            func prefix(_ id: Int) throws -> String? {
+                let document = try SwiftSoup.parse("<w:numPr \(ns)><w:numId w:val=\"\(id)\"/></w:numPr>","",SwiftSoup.Parser.xmlParser())
+                return resolver.prefix(numPr:try document.getElementsByTag("w:numPr").first(),style:nil)
+            }
+            #expect(try prefix(1) == "1. ")
+            #expect(try prefix(2) == "5. ")
+            #expect(try prefix(2) == "6. ")
+            #expect(try prefix(1) == (libreOffice ? "7. " : "2. "))
+        }
+    }
+
+    @Test func derivedHeadingStylesTakePrecedenceAndConsumeCounters() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:suff w:val=\"space\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        let numPr = "<w:numPr><w:numId w:val=\"1\"/></w:numPr>"
+        let styles = "<w:styles \(ns)><w:style w:styleId=\"Heading1\"><w:pPr>" + numPr + "</w:pPr></w:style><w:style w:styleId=\"Custom\"><w:basedOn w:val=\"Heading1\"/></w:style><w:style w:styleId=\"Outline\"><w:pPr><w:outlineLvl w:val=\"2\"/></w:pPr></w:style></w:styles>"
+        let doc = "<w:document \(ns)><w:body><w:p><w:pPr><w:pStyle w:val=\"Custom\"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p><w:p><w:pPr>" + numPr + "</w:pPr><w:r><w:t>Next</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val=\"Outline\"/></w:pPr><w:r><w:t>Outline heading</w:t></w:r></w:p></w:body></w:document>"
+        let result = try await PicoDocsEngine.convert(data:PagesConverterTests.makeZip([(name:"word/document.xml",data:Array(doc.utf8)),(name:"word/numbering.xml",data:Array(numbering.utf8)),(name:"word/styles.xml",data:Array(styles.utf8))]),filename:"derived.docx")
+        #expect(result.markdown().contains("# Heading")); #expect(!result.markdown().contains("1. Heading"))
+        #expect(result.markdown().contains("2. Next")); #expect(result.markdown().contains("### Outline heading"))
+    }
+
     @Test func escapedWordLinkLabelsAndTablePipesStayLiteral() async throws {
         let type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
         let rels = "<Relationships><Relationship Id=\"link\" Type=\"\(type)\" Target=\"https://example.com\" TargetMode=\"External\"/></Relationships>"

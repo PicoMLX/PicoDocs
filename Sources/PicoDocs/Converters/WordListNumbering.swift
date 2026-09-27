@@ -39,6 +39,7 @@ final class WordListNumbering {
     private var counters: [String: [Int: Int]] = [:]
     private var markerWidths: [String: [Int: Int]] = [:]
     private var defaultLanguage = "en-US"
+    private var styleOutlineLevels: [String: Int] = [:]
     private var styleLanguages: [String: String] = [:]
     private var defaultStyle: String?
     private var documentDefaults: (numID: String?, level: Int?)?
@@ -98,11 +99,13 @@ final class WordListNumbering {
         let ilvl = min(max(level ?? 0, 0), 8)
         let abstract = number.abstract
         let definition = effectiveLevel(numID: numID, level: ilvl)
-        if let alias = resumeAlias, alias.original == numID {
-            counters[numID, default: [:]].merge(counters[alias.replacement] ?? [:]) { _, new in new }
-            markerWidths[numID, default: [:]].merge(markerWidths[alias.replacement] ?? [:]) { _, new in new }
+        if let alias = resumeAlias {
+            if alias.original == numID {
+                counters[numID, default: [:]].merge(counters[alias.replacement] ?? [:]) { _, new in new }
+                markerWidths[numID, default: [:]].merge(markerWidths[alias.replacement] ?? [:]) { _, new in new }
+                resumeAlias = nil
+            } else if alias.replacement != numID { resumeAlias = nil }
         }
-        resumeAlias = nil
         if isLibreOffice, counters[numID] == nil, !number.overrides.isEmpty,
            let original = lastInstance[abstract], original != numID {
             resumeAlias = (original, numID)
@@ -222,6 +225,7 @@ final class WordListNumbering {
             if (try? style.attr("w:type")) == "paragraph",
                ["1", "true", "on"].contains((try? style.attr("w:default")) ?? "") { defaultStyle = id }
             styleLanguages[id] = Self.language(in: style)
+            styleOutlineLevels[id] = Self.child(of: style, named: "w:ppr").flatMap { Self.child(of: $0, named: "w:outlinelvl") }.flatMap { try? $0.attr("w:val") }.flatMap(Int.init)
             let numPr = Self.child(of: style, named: "w:ppr").flatMap { Self.child(of: $0, named: "w:numpr") }
             styles[id] = (
                 numID: numPr.flatMap { Self.child(of: $0, named: "w:numid") }.flatMap { try? $0.attr("w:val") },
@@ -229,6 +233,20 @@ final class WordListNumbering {
                 basedOn: Self.child(of: style, named: "w:basedon").flatMap { try? $0.attr("w:val") }
             )
         }
+    }
+
+    /// Resolve direct/inherited outline semantics before deciding list visibility.
+    func headingLevel(style: String?, paragraphProperties: Element?) -> Int? {
+        func heading(_ outline: Int) -> Int? { (0...8).contains(outline) ? min(outline + 1, 6) : nil }
+        if let outline = paragraphProperties.flatMap({ Self.child(of: $0, named: "w:outlinelvl") }).flatMap({ try? $0.attr("w:val") }).flatMap(Int.init) { return heading(outline) }
+        var current = style ?? defaultStyle
+        for _ in 0..<16 {
+            guard let id = current else { break }
+            if let outline = styleOutlineLevels[id] { return heading(outline) }
+            if let named = WordConverter.headingLevel(forStyle: id) { return named }
+            current = styles[id]?.basedOn
+        }
+        return nil
     }
 
     /// The numbering a paragraph style declares, walking `w:basedOn` (bounded, so
