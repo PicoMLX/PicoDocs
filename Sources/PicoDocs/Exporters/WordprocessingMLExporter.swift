@@ -37,6 +37,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             if let failure = builder.failure { throw failure }
         }
         builder.finishRelationships()
+        if let failure = builder.failure { throw failure }
 
         var pkg = try OOXMLPackageWriter()
         try pkg.addCoreProperties(result)
@@ -207,7 +208,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
     private final class Builder {
         private(set) var body = ""
         private(set) var failure: Error?
-        private(set) var relationships: [Relationship] = []
+        private(set) var relationships = RelationshipStore()
         private(set) var media: [(filename: String, data: Data)] = []
         private(set) var mediaExtensions: Set<String> = []
         private(set) var usedBullet = false
@@ -243,6 +244,12 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 headingBookmarks.append(name)
                 fragmentBookmarks[slug] = name
             }
+        }
+
+        private func addRelationship(_ relation: Relationship) {
+            guard failure == nil else { return }
+            do { try relationships.add(id: relation.id, type: relation.type, target: relation.target, external: relation.external) }
+            catch { failure = error }
         }
 
         private func nextRelID() -> String { relCounter += 1; return "rId\(relCounter)" }
@@ -322,10 +329,10 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
         /// Allocates the numbering relationship once, after the body is built.
         func finishRelationships() {
-            relationships.append(Relationship(id: nextRelID(), type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles", target: "styles.xml", external: false))
+            addRelationship(Relationship(id: nextRelID(), type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles", target: "styles.xml", external: false))
             guard usedNumbering, !numberingRelAdded else { return }
             numberingRelAdded = true
-            relationships.append(Relationship(
+            addRelationship(Relationship(
                 id: nextRelID(),
                 type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering",
                 target: "numbering.xml",
@@ -342,6 +349,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         private func renderRuns(_ nodes: [MarkdownInline], bold: Bool, italic: Bool) -> String {
             var out = ""
             for node in nodes {
+                guard failure == nil else { return out }
                 switch node {
                 case .text(let s):
                     out += textRun(s, bold: bold, italic: italic, monospace: false)
@@ -372,12 +380,13 @@ public struct WordprocessingMLExporter: DocumentExporter {
                     if let existing = externalLinkRelationships[destination] { id = existing }
                     else {
                         id = nextRelID()
-                        relationships.append(Relationship(
+                        addRelationship(Relationship(
                             id: id,
                             type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
                             target: destination,
                             external: true
                         ))
+                        guard failure == nil else { return out }
                         externalLinkRelationships[destination] = id
                     }
                     out += "<w:hyperlink r:id=\"\(id)\">\(renderRuns(label, bold: bold, italic: italic))</w:hyperlink>"
@@ -425,12 +434,13 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 mediaExtensions.insert(ext)
                 media.append((filename, data))
                 relID = nextRelID()
-                relationships.append(Relationship(
+                addRelationship(Relationship(
                     id: relID,
                     type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
                     target: "media/\(filename.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))) ?? filename)",
                     external: false
                 ))
+                if let failure { throw failure }
                 emittedMediaRel[filename] = relID
             }
 
@@ -548,20 +558,37 @@ public struct WordprocessingMLExporter: DocumentExporter {
         """
     }
 
-    private static func documentRels(_ relationships: [Builder.Relationship]) -> String {
-        var rels = ""
-        for rel in relationships {
-            let mode = rel.external ? " TargetMode=\"External\"" : ""
-            let target = rel.external ? Self.relationshipURI(rel.target) : rel.target
-            rels += "<Relationship Id=\"\(rel.id)\" Type=\"\(rel.type)\" Target=\"\(OOXMLPackageWriter.escapeAttribute(target))\"\(mode)/>"
+    /// Retain only admitted serialized relationships, with limits enforced before
+    /// target normalization, escaping, or insertion into the builder's ID maps.
+    struct RelationshipStore {
+        private(set) var xml = ""
+        private(set) var count = 0
+        private var remainingBytes: Int
+        private let maximumCount: Int
+        init(maximumBytes: Int = 8 * 1024 * 1024, maximumCount: Int = 65_536) {
+            remainingBytes = max(0, maximumBytes - 1024) // XML declaration/root wrapper
+            self.maximumCount = max(0, maximumCount)
         }
-        return OOXMLPackageWriter.xmlDeclaration + """
-        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\(rels)</Relationships>
-        """
+        mutating func add(id: String, type: String, target: String, external: Bool) throws {
+            let sourceBytes = id.utf8.count + type.utf8.count + target.utf8.count
+            guard count < maximumCount, sourceBytes <= remainingBytes / 18 else {
+                throw ExporterError.serializationFailed("DOCX relationships exceed the supported budget")
+            }
+            let target = external ? OOXMLPackageWriter.relationshipURI(target) : target
+            let mode = external ? " TargetMode=\"External\"" : ""
+            let fragment = "<Relationship Id=\"\(OOXMLPackageWriter.escapeAttribute(id))\" Type=\"\(OOXMLPackageWriter.escapeAttribute(type))\" Target=\"\(OOXMLPackageWriter.escapeAttribute(target))\"\(mode)/>"
+            guard fragment.utf8.count <= remainingBytes else {
+                throw ExporterError.serializationFailed("DOCX relationships exceed the supported budget")
+            }
+            remainingBytes -= fragment.utf8.count; count += 1
+            xml += fragment
+        }
     }
 
-    private static func relationshipURI(_ target: String) -> String {
-        OOXMLPackageWriter.relationshipURI(target)
+    private static func documentRels(_ relationships: RelationshipStore) -> String {
+        OOXMLPackageWriter.xmlDeclaration + """
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\(relationships.xml)</Relationships>
+        """
     }
 
     private static var stylesXML: String {

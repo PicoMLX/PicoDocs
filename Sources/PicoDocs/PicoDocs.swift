@@ -132,6 +132,12 @@ public enum PicoDocsEngine {
     static func withSynthesizedImageReferences(_ result: ConverterResult) -> ConverterResult {
         guard result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return result }
         var sections = result.sections
+        // Every Office writer projects image-only carriers through this path.
+        // Clean identities before choosing visible labels or generated fallbacks.
+        for index in sections.indices where sections[index].kind == .image {
+            sections[index].title = sections[index].title.map(OOXMLPackageWriter.xmlSafeText)
+            sections[index].sourcePath = sections[index].sourcePath.map(OOXMLPackageWriter.xmlSafeText)
+        }
         var refs: [Int: DocumentSection] = [:]
         var generatedCount = 0
         let identities = sections.filter { $0.kind == .image }.compactMap {

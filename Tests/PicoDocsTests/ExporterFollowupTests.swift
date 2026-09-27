@@ -8,6 +8,47 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func DOCXRelationshipStoreBoundsCountBytesAndFailedInsertions() throws {
+        var countLimited = WordprocessingMLExporter.RelationshipStore(maximumCount: 2)
+        try countLimited.add(id: "one", type: "hyperlink", target: "https://example.com/1", external: true)
+        try countLimited.add(id: "two", type: "image", target: "media/image.png", external: false)
+        let accepted = countLimited.xml
+        #expect(throws: ExporterError.self) { try countLimited.add(id: "three", type: "styles", target: "styles.xml", external: false) }
+        #expect(countLimited.count == 2); #expect(countLimited.xml == accepted)
+        var bytesLimited = WordprocessingMLExporter.RelationshipStore(maximumBytes: 2048)
+        try bytesLimited.add(id: "r1", type: "link", target: "a&b", external: true)
+        #expect(bytesLimited.xml.contains("a&amp;b"))
+        let beforeFailure = bytesLimited.xml
+        #expect(throws: ExporterError.self) { try bytesLimited.add(id: "r2", type: "link", target: String(repeating: "&", count: 1024), external: true) }
+        #expect(bytesLimited.count == 1); #expect(bytesLimited.xml == beforeFailure)
+    }
+
+    @Test func manyDistinctDOCXLinksStopInsideRelationshipConstruction() throws {
+        let markdown = (0..<65_537).map { "[x](https://example.com/\($0))" }.joined(separator: " ")
+        let result = ConverterResult(sections: [.init(markdown: markdown)])
+        try OfficeDocumentBlocks.validateInput(result)
+        #expect(throws: ExporterError.self) { try PicoDocsEngine.write(result, to: .docx) }
+        let repeated = ConverterResult(sections: [.init(markdown: String(repeating: "[x](https://example.com) ", count: 1000))])
+        let relationships = try xml(PicoDocsEngine.write(repeated, to: .docx), "word/_rels/document.xml.rels")
+        #expect(relationships.components(separatedBy: "relationships/hyperlink").count == 2)
+    }
+
+    @Test func forbiddenImageIdentitiesHaveVisibleOfficeFallbacks() async throws {
+        for identity in ["\0", "\u{000B}", "\u{FFFE}"] {
+            for useTitle in [false, true] {
+                let image = DocumentSection(title: useTitle ? identity : nil, kind: .image, markdown: "", sourcePath: useTitle ? nil : identity, metadata: ["base64": "AQID", "mimeType": "image/png"])
+                let result = ConverterResult(sections: [image])
+                for (format, path) in [(ExportableFileType.pptx, "ppt/slides/slide1.xml"), (.xlsx, "xl/worksheets/sheet1.xml")] {
+                    let output = try xml(PicoDocsEngine.write(result, to: format), path)
+                    #expect(output.contains("image-1.png"))
+                    #expect(!output.contains(identity))
+                }
+                let imported = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(result, to: .rtf), filename: "image.rtf")
+                #expect(try DocumentRenderer.render(imported, to: .plaintext) == "image-1.png")
+            }
+        }
+    }
+
     @Test func sparseSyntaxUsesSparseCharacterStorage() {
         let prefix = String(repeating: "a", count: 8 * 1024 * 1024 - 1)
         let source = prefix + "["

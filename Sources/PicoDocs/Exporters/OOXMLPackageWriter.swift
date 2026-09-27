@@ -94,14 +94,17 @@ struct OOXMLPackageWriter {
 
     /// Document XML drops forbidden scalars; check the same visible input before export.
     static func sanitizedDocument(_ result: ConverterResult) -> ConverterResult {
-        func clean(_ text: String) -> String {
-            var output = ""
-            for scalar in text.unicodeScalars where isValidXMLScalar(scalar) { output.unicodeScalars.append(scalar) }
-            return output
-        }
+        let clean = xmlSafeText
         var result = result
         result.title = result.title.map(clean); result.author = result.author.map(clean)
-        for index in result.sections.indices where result.sections[index].kind != .image {
+        for index in result.sections.indices {
+            // Image identities become generated Markdown labels/destinations too.
+            // Clean both sides of that projection without touching encoded media.
+            if result.sections[index].kind == .image {
+                result.sections[index].title = result.sections[index].title.map(clean)
+                result.sections[index].sourcePath = result.sections[index].sourcePath.map(clean)
+                continue
+            }
             result.sections[index].markdown = clean(result.sections[index].markdown)
             result.sections[index].title = result.sections[index].title.map(clean)
             result.sections[index].sheetName = result.sections[index].sheetName.map(clean)
@@ -109,6 +112,12 @@ struct OOXMLPackageWriter {
             if let csv = result.sections[index].metadata["csv"] { result.sections[index].metadata["csv"] = clean(csv) }
         }
         return result
+    }
+
+    static func xmlSafeText(_ text: String) -> String {
+        var output = ""
+        for scalar in text.unicodeScalars where isValidXMLScalar(scalar) { output.unicodeScalars.append(scalar) }
+        return output
     }
 
     /// Escapes text content for an XML element body.
