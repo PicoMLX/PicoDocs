@@ -24,7 +24,16 @@ struct PowerPointFollowupTests {
         let one = B.deck(slides: [.init(file: "s.xml", shapes: shape)])
         let info = StreamInfo(detectedFormat: .pptx)
         let result = try await PowerPointConverter().convert(one, info: info)
-        let cost = result.sections.reduce(0) { $0 + $1.markdown.utf8.count + ($1.title?.utf8.count ?? 0) + ($1.sourcePath?.utf8.count ?? 0) + $1.metadata.filter { $0.key != "base64" }.reduce(0) { $0 + $1.key.utf8.count + $1.value.utf8.count } } + (result.title?.utf8.count ?? 0) + (result.author?.utf8.count ?? 0)
+        var cost = (result.title?.utf8.count ?? 0) + (result.author?.utf8.count ?? 0)
+        for section in result.sections {
+            cost += section.markdown.utf8.count
+            cost += section.title?.utf8.count ?? 0
+            cost += section.sourcePath?.utf8.count ?? 0
+            for (key, value) in section.metadata where key != "base64" {
+                cost += key.utf8.count
+                cost += value.utf8.count
+            }
+        }
         _ = try await PowerPointConverter(maximumRenderedBytes: cost).convert(one, info: info)
         await #expect(throws: PicoDocsError.fileCorrupted) { try await PowerPointConverter(maximumRenderedBytes: cost - 1).convert(one, info: info) }
         let two = B.deck(slides: [.init(file: "s.xml", shapes: shape), .init(file: "t.xml", shapes: shape)])
