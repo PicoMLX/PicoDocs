@@ -290,7 +290,7 @@ public enum DocumentRenderer {
             // Mirror inlineHTML/stripInline: code spans and links become
             // placeholders, so a `[^id]` inside them isn't treated as a reference.
             let (afterCode, _) = extractCodeSpans(text)
-            let (protected, _) = protectEscapes(afterCode)
+            let protected = protectEscapes(afterCode)
             let (afterLinks, _) = extractLinks(protected)
             var cursor = afterLinks.startIndex
             while let open = afterLinks.range(of: "[^", range: cursor..<afterLinks.endIndex) {
@@ -656,7 +656,7 @@ public enum DocumentRenderer {
     /// the remaining text is HTML-escaped and emphasized, then they're restored.
     private static func inlineHTML(_ text: String, footnoteNumbers: [String: Int] = [:]) -> String {
         let (afterCode, spans) = extractCodeSpans(text)
-        let (protected, escaped) = protectEscapes(afterCode)
+        let protected = protectEscapes(afterCode)
         let (afterLinks, links) = extractLinks(protected)
         var result = applyEmphasisHTML(escapeHTML(afterLinks))
         // Footnote references: `[^id]` -> a superscript link. Done here, where code
@@ -687,7 +687,7 @@ public enum DocumentRenderer {
             }
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: tag)
         }
-        result = restoreEscapes(result, escaped: escaped, html: true)
+        result = restoreEscapes(result, html: true)
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
         }
@@ -730,7 +730,7 @@ public enum DocumentRenderer {
     /// code spans keep their literal contents).
     private static func stripInline(_ text: String, footnoteNumbers: [String: Int] = [:]) -> String {
         let (afterCode, spans) = extractCodeSpans(text)
-        let (protected, escaped) = protectEscapes(afterCode)
+        let protected = protectEscapes(afterCode)
         let (afterLinks, links) = extractLinks(protected)
         var result = applyEmphasisStrip(afterLinks)
         // Footnote references become `[N]` here (code spans already extracted, so
@@ -741,7 +741,7 @@ public enum DocumentRenderer {
         for (index, link) in links.enumerated() {
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: applyEmphasisStrip(link.label))
         }
-        result = restoreEscapes(result, escaped: escaped, html: false)
+        result = restoreEscapes(result, html: false)
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: span)
         }
@@ -756,38 +756,43 @@ public enum DocumentRenderer {
         return result
     }
 
-    private static func protectEscapes(_ text: String) -> (String, [String]) {
-        var out = "", escaped: [String] = []
-        var index = text.startIndex
-        while index < text.endIndex {
-            let next = text.index(after: index)
-            if text[index] == "\u{E006}" || text[index] == "\u{E007}" {
-                escaped.append(String(text[index]))
-                out += "\u{E006}\(escaped.count - 1)\u{E007}"
-                index = next
-            } else if text[index] == "\\", next < text.endIndex,
-               #"\`*_{}[]<>()#+-.!|"#.contains(text[next]) {
-                escaped.append(String(text[next]))
-                out += "\u{E006}\(escaped.count - 1)\u{E007}"
-                index = text.index(after: next)
-            } else { out.append(text[index]); index = next }
+    /// Two-scalar tokens encode punctuation directly. Doubling the introducer
+    /// protects literal private-use text without a per-escape object/index table.
+    private static func protectEscapes(_ text: String) -> String {
+        let scalars = text.unicodeScalars
+        var output = "", index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index], next = scalars.index(after: index)
+            if scalar == "\u{E006}" {
+                output += "\u{E006}\u{E006}"; index = next
+            } else if scalar == "\\", next < scalars.endIndex,
+                      #"\`*_{}[]<>()#+-.!|"#.unicodeScalars.contains(scalars[next]) {
+                output.unicodeScalars.append("\u{E006}")
+                output.unicodeScalars.append(UnicodeScalar(0xE100 + scalars[next].value)!)
+                index = scalars.index(after: next)
+            } else { output.unicodeScalars.append(scalar); index = next }
         }
-        return (out, escaped)
+        return output
     }
 
-    private static func restoreEscapes(_ text: String, escaped: [String], html: Bool) -> String {
-        let ns = text as NSString
-        let regex = try! NSRegularExpression(pattern: "\u{E006}([0-9]+)\u{E007}")
-        var out = "", offset = 0
-        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-            out += ns.substring(with: NSRange(location: offset, length: match.range.location - offset))
-            if let index = Int(ns.substring(with: match.range(at: 1))), escaped.indices.contains(index) {
-                out += html ? escapeHTML(escaped[index]) : escaped[index]
-            } else { out += ns.substring(with: match.range) }
-            offset = NSMaxRange(match.range)
+    private static func restoreEscapes(_ text: String, html: Bool) -> String {
+        let scalars = text.unicodeScalars
+        var output = "", index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index], next = scalars.index(after: index)
+            if scalar == "\u{E006}", next < scalars.endIndex {
+                if scalars[next] == "\u{E006}" {
+                    output.unicodeScalars.append(scalar); index = scalars.index(after: next); continue
+                }
+                if (0xE100...0xE17F).contains(scalars[next].value) {
+                    let decoded = String(UnicodeScalar(scalars[next].value - 0xE100)!)
+                    output += html ? escapeHTML(decoded) : decoded
+                    index = scalars.index(after: next); continue
+                }
+            }
+            output.unicodeScalars.append(scalar); index = next
         }
-        out += ns.substring(from: offset)
-        return out
+        return output
     }
 
     // MARK: - Escaping

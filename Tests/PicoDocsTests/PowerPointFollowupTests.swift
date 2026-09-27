@@ -5,6 +5,99 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func titleWhitespaceNormalizationStreamsLargeInputs() async throws {
+        let words = Array(repeating: "word", count: 100_000).joined(separator: " \t ")
+        let expected = Array(repeating: "word", count: 100_000).joined(separator: " ")
+        #expect(PowerPointConverter.normalizedWhitespace(" \n" + words + "\u{2003}") == expected)
+        typealias B = PowerPointConverterTests
+        let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("  First \t second\nthird  "))]), filename: "title.pptx")
+        #expect(result.sections.first?.title == "First second third")
+        #expect(result.markdown() == "## First second third")
+    }
+
+    @Test func resolvedSlidePathsShareACumulativeBudget() throws {
+        typealias B = PowerPointConverterTests
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: "")], order: ["s.xml", "s.xml"])
+        let package = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
+        let presentation = try #require(PowerPointConverter.xml(package, path: "ppt/presentation.xml"))
+        let path = "ppt/slides/s.xml"
+        #expect(try PowerPointConverter.slidePaths(presentation, archive: package, maximumPathBytes: 2 * path.utf8.count) == [path, path])
+        #expect(throws: PicoDocsError.fileCorrupted) { try PowerPointConverter.slidePaths(presentation, archive: package, maximumPathBytes: 2 * path.utf8.count - 1) }
+    }
+
+    @Test func supportedMetadataNamespacesSelectTheirChoice() async throws {
+        typealias B = PowerPointConverterTests
+        let core = #"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:AlternateContent><mc:Choice Requires="dc cp"><dc:title>Chosen</dc:title><dc:creator>Ada</dc:creator></mc:Choice><mc:Fallback><dc:title>Wrong</dc:title></mc:Fallback></mc:AlternateContent></cp:coreProperties>"#
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Slide"))], extraParts: [("docProps/core.xml", Array(core.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "metadata.pptx")
+        #expect(result.title == "Chosen"); #expect(result.author == "Ada")
+    }
+
+    @Test func slideContextsShareOneImageCollector() throws {
+        let manifest = #"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="png" ContentType="image/png"/></Types>"#
+        let data = PagesConverterTests.makeZip([("[Content_Types].xml", Array(manifest.utf8)), ("a.png", [1,2,3]), ("b.png", [4,5,6])])
+        let package = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
+        let collector = PowerPointConverter.ImageCollector()
+        let first = PowerPointConverter.SlideContext(archive: package, partPath: "one", relationships: [:], images: collector)
+        let second = PowerPointConverter.SlideContext(archive: package, partPath: "two", relationships: [:], images: collector)
+        first.images.add(path: "a.png", filename: "a.png", archive: package)
+        second.images.add(path: "b.png", filename: "b.png", archive: package)
+        second.images.add(path: "a.png", filename: "a.png", archive: package)
+        #expect(first.images === second.images)
+        #expect(collector.sections.map(\.sourcePath) == ["a.png", "b.png"])
+        try package.check()
+    }
+
+    @Test func cancelledDescendantSearchStopsBeforeReturningAMatch() async throws {
+        let found = try await Task {
+            let document = try SwiftSoup.parse("<root><a:tbl/></root>", "", SwiftSoup.Parser.xmlParser())
+            let root = try #require(document.children().first())
+            withUnsafeCurrentTask { $0?.cancel() }
+            return PowerPointConverter.selectedDescendant(in: root, named: "a:tbl") != nil
+        }.value
+        #expect(!found)
+    }
+
+    @Test func largeCSVLiteralFieldsUseStreamingEscapes() async throws {
+        let field = String(repeating: #"a\*_[x]<y>`|"#, count: 20_000)
+        let result = try await PicoDocsEngine.convert(data: Data(CSVConverter.serializeCSV([[field]]).utf8), filename: "large.csv")
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == field)
+        #expect(try DocumentRenderer.render(result, to: .csv) == field)
+    }
+
+    @Test func codeSpanScanningNeedsNoPerCharacterOrRunIndex() {
+        let plain = String(repeating: "a", count: 1_000_000)
+        #expect(MarkdownTableCell.mapCodeSpans(plain, code: { _ in "wrong" }, plain: { $0 }) == plain)
+        let many = String(repeating: "`x` ", count: 50_000)
+        #expect(MarkdownTableCell.mapCodeSpans(many, keepDelimiters: false, code: { $0.uppercased() }, plain: { $0 }) == String(repeating: "X ", count: 50_000))
+        let unmatched = (1...1000).map { String(repeating: "`", count: $0) + "x " }.joined()
+        #expect(MarkdownTableCell.mapCodeSpans(unmatched, code: { _ in "wrong" }, plain: { $0 }) == unmatched)
+        #expect(MarkdownTableCell.mapCodeSpans(#"\``x`"#, keepDelimiters: false, code: { $0.uppercased() }, plain: { $0 }) == #"\`X"#)
+    }
+
+    @Test func fixedWidthEscapeTokensPreserveLiteralSentinels() throws {
+        let literal = "\u{E006}\u{E15B}\u{E006}\u{E006}\u{E007}"
+        let result = ConverterResult(sections: [.init(markdown: literal + " " + String(repeating: #"\*"#, count: 100_000))])
+        let expected = literal + " " + String(repeating: "*", count: 100_000)
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == expected)
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains(expected)); #expect(!html.contains("<em>"))
+        let combining = ConverterResult(sections: [.init(markdown: "\\*\u{0301}x")])
+        #expect(try DocumentRenderer.render(combining, to: .plaintext) == "*\u{0301}x")
+    }
+
+    @Test func siblingUnknownNamespacesHaveCumulativeIdentityLimits() {
+        func source(_ count: Int, length: Int = 0) -> Data {
+            let common = String(repeating: "x", count: length)
+            let children = (0..<count).map { "<e:x xmlns:e='urn:\(common)\($0)' mc:Ignorable='e'/>" }.joined()
+            return Data(("<root xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006'>" + children + "</root>").utf8)
+        }
+        #expect(PowerPointXML.normalize(source(1024)) != nil)
+        #expect(PowerPointXML.normalize(source(1025)) == nil)
+        #expect(PowerPointXML.normalize(source(20, length: 60_000)) == nil)
+    }
+
+
     @Test func repeatedSlideReferencesHaveARenderLimit() throws {
         typealias B = PowerPointConverterTests
         for count in [10_000, 10_001] {

@@ -138,7 +138,11 @@ public struct CSVConverter: DocumentConverter {
         guard columnCount > 0 else { return "" }
 
         func cell(_ value: String) -> String {
-            let literal = value.map { "\\*_[]<>`".contains($0) ? "\\" + String($0) : String($0) }.joined()
+            var literal = ""
+            for scalar in value.unicodeScalars {
+                if "\\*_[]<>`".unicodeScalars.contains(scalar) { literal.append("\\") }
+                literal.unicodeScalars.append(scalar)
+            }
             return literal.replacingOccurrences(of: "|", with: "\\|")
                 .replacingOccurrences(of: "\r\n", with: " ")
                 .replacingOccurrences(of: "\r", with: " ")

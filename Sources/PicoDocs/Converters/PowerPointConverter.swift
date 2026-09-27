@@ -56,7 +56,7 @@ public struct PowerPointConverter: DocumentConverter {
 
         let defaultTextStyle = presentation.children().first().flatMap { Self.selectedChild(of: $0, named: "p:defaulttextstyle") }
         var sections: [DocumentSection] = []
-        var images = ImageCollector()
+        let images = ImageCollector()
         var parts = PartCache(archive: archive)
         for (index, slidePath) in try Self.slidePaths(presentation, archive: archive, presentationPath: presentationPath).enumerated() {
             try Task.checkCancellation()
@@ -72,7 +72,6 @@ public struct PowerPointConverter: DocumentConverter {
                 .flatMap { Self.relatedPart(of: $0, type: "/slideMaster", relationships: Self.relationships(archive, forPart: $0), archive: archive) }
                 .flatMap { parts.document($0, root: "p:sldmaster") }
             let rendered = Self.renderSlide(slide, context: &context)
-            images = context.images
             let notes = Self.notes(forSlide: slidePath, relationships: relationships, archive: archive, parts: &parts)
 
             var blocks: [String] = []
@@ -109,7 +108,7 @@ public struct PowerPointConverter: DocumentConverter {
     /// Slide part paths in presentation order: `p:sldIdLst` entries resolved
     /// through `presentation.xml.rels` (slide file names don't encode order — a
     /// moved slide keeps its `slideN.xml`).
-    static func slidePaths(_ presentation: Document, archive: PowerPointPackage, presentationPath: String = "ppt/presentation.xml") throws -> [String] {
+    static func slidePaths(_ presentation: Document, archive: PowerPointPackage, presentationPath: String = "ppt/presentation.xml", maximumPathBytes: Int = 8 * 1024 * 1024) throws -> [String] {
         let relationships = relationships(archive, forPart: presentationPath)
         var paths: [String] = []
         guard let root = presentation.children().first(), root.tagName().lowercased() == "p:presentation" else { throw PicoDocsError.fileCorrupted }
@@ -125,9 +124,15 @@ public struct PowerPointConverter: DocumentConverter {
             pending += selectedChildren(in: element)
         }
         guard total == direct.count else { throw PicoDocsError.fileCorrupted }
+        var remainingPathBytes = maximumPathBytes
+        var resolved: [String: String] = [:]
         for slideID in direct {
             guard let id = try? slideID.attr("r:id"), let relation = relationships[id], !relation.external, relation.isType("/slide") else { throw PicoDocsError.fileCorrupted }; let target = relation.target
-            paths.append(WordConverter.resolvePartPath(target, relativeTo: directory(of: presentationPath)))
+            let path = resolved[target] ?? WordConverter.resolvePartPath(target, relativeTo: directory(of: presentationPath))
+            guard path.utf8.count <= remainingPathBytes else { throw PicoDocsError.fileCorrupted }
+            remainingPathBytes -= path.utf8.count
+            resolved[target] = path
+            paths.append(path)
         }
         return paths
     }
@@ -322,18 +327,16 @@ public struct PowerPointConverter: DocumentConverter {
                 guard let body = textBody(of: shape) else { continue }
                 context.runDefaults = inheritedRunDefaults(for: shape, context: context)
                 if type == "title" || type == "ctrTitle" {
-                    let text = renderParagraphs(body, inherited: noInheritance, context: &context)
-                        .joined(separator: " ")
-                        .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+                    let text = normalizedWhitespace(renderParagraphs(body, inherited: noInheritance, context: &context).joined(separator: " "))
                     if title == nil, !text.isEmpty {
                         title = text
-                        context.plainTitle = selectedParagraphs(in: body).map { paragraph in
+                        context.plainTitle = normalizedWhitespace(selectedParagraphs(in: body).map { paragraph in
                             selectedChildren(in: paragraph).map { node in
                                 if node.tagName().lowercased() == "a:br" { return " " }
                                 guard ["a:r", "a:fld"].contains(node.tagName().lowercased()) else { return "" }
                                 return selectedChild(of: node, named: "a:t").map(wholeText) ?? ""
                             }.joined()
-                        }.joined(separator: " ").split(whereSeparator: \.isWhitespace).joined(separator: " ")
+                        }.joined(separator: " "))
                         continue
                     }
                     if !text.isEmpty { blocks.append(text) }
@@ -364,16 +367,31 @@ public struct PowerPointConverter: DocumentConverter {
         }
     }
 
+    /// Flatten whitespace without allocating one substring per word.
+    static func normalizedWhitespace(_ text: String) -> String {
+        var output = "", pendingSpace = false
+        for (index, scalar) in text.unicodeScalars.enumerated() {
+            if index.isMultiple(of: 4096), Task.isCancelled { return "" }
+            if scalar.properties.isWhitespace { pendingSpace = !output.isEmpty }
+            else {
+                if pendingSpace { output.append(" "); pendingSpace = false }
+                output.unicodeScalars.append(scalar)
+            }
+        }
+        return output
+    }
+
     private static func selectedAlternateBranch(_ element: Element) -> Element? {
         let branches = element.children().array()
         return branches.first {
             guard $0.tagName().lowercased() == "mc:choice" else { return false }
             let requires = ((try? $0.attr("Requires")) ?? "").split(separator: " ")
-            return !requires.isEmpty && requires.allSatisfy { ["p", "a", "r"].contains(String($0)) }
+            return !requires.isEmpty && requires.allSatisfy { ["p", "a", "r", "mc", "dc", "dcterms", "dcmitype", "xsi", "cp", "xml"].contains(String($0)) }
         } ?? branches.first { $0.tagName().lowercased() == "mc:fallback" }
     }
 
-    private static func selectedDescendant(in element: Element, named name: String) -> Element? {
+    static func selectedDescendant(in element: Element, named name: String) -> Element? {
+        guard !Task.isCancelled else { return nil }
         guard !element.tagName().lowercased().hasPrefix("extension"), !element.tagName().lowercased().hasPrefix("requiredextension") else { return nil }
         if element.tagName().lowercased() == name { return element }
         if element.tagName().lowercased() == "mc:alternatecontent" {
@@ -864,7 +882,7 @@ public struct PowerPointConverter: DocumentConverter {
         let title = (try? properties?.attr("title")) ?? ""
         let name = (try? properties?.attr("name")) ?? ""
         let alt = [description, title, name].first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) ?? "image"
-        let label = escapeMarkdown(alt.split(whereSeparator: \.isWhitespace).joined(separator: " "))
+        let label = escapeMarkdown(normalizedWhitespace(alt))
         let image = "![\(label)](\(linkDestination(source)))"
         let click = properties.flatMap { selectedChild(of: $0, named: "a:hlinkclick") }
         if let target = click == nil ? context.defaultLink : hyperlink(click, context: context) { return "[\(image)](\(linkDestination(target)))" }
@@ -872,11 +890,11 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     /// Collects each embedded image once (by archive path) as an `.image` section.
-    struct ImageCollector {
+    final class ImageCollector {
         private(set) var sections: [DocumentSection] = []
         private var seen: Set<String> = []
 
-        mutating func add(path: String, filename: String, archive: PowerPointPackage) {
+        func add(path: String, filename: String, archive: PowerPointPackage) {
             guard !seen.contains(path) else { return }
             guard let bytes = archive.read(path), !bytes.isEmpty else {
                 archive.fail(PicoDocsError.fileCorrupted)

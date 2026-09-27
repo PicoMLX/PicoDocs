@@ -72,6 +72,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
     private var emitted: [Bool] = []
     private var compatibility: [(ignored: Set<String>, processed: Set<String>)] = [([], [])]
     private var unknownPrefixes: [String: String] = [:]
+    private var unknownNamespaceBytes = 0
     private var output = ""
     private var hasError = false
     private var outputBytes = 0
@@ -156,8 +157,14 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         guard !attribute || !prefix.isEmpty, let uri = scope[prefix] else { return raw }
         if let canonical = Self.prefixes[uri] { return canonical.isEmpty ? local : canonical + ":" + local }
         // URI identity survives normalization, even for ignorable extensions.
-        let synthetic = unknownPrefixes[uri] ?? "extension\(unknownPrefixes.count)"
-        unknownPrefixes[uri] = synthetic
+        if unknownPrefixes[uri] == nil {
+            guard unknownPrefixes.count < 1024, uri.utf8.count <= 1024 * 1024 - unknownNamespaceBytes else {
+                hasError = true; return "invalid:" + local
+            }
+            unknownNamespaceBytes += uri.utf8.count
+            unknownPrefixes[uri] = "extension\(unknownPrefixes.count)"
+        }
+        let synthetic = unknownPrefixes[uri]!
         return synthetic + ":" + local
     }
 
@@ -189,6 +196,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         var settings = compatibility.last!
         for (key, value) in attributes where key != "xmlns" && !key.hasPrefix("xmlns:") {
             let attribute = name(key, scope: scope, attribute: true)
+            guard !hasError else { parser.abortParsing(); return }
             if ["mc:Ignorable", "mc:ProcessContent", "mc:MustUnderstand", "Requires"].contains(attribute), compatibilityTokens(value, parser: parser) == nil { return }
             if attribute == "mc:Ignorable" {
                 for prefix in compatibilityTokens(value, parser: parser) ?? [] {
@@ -206,6 +214,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         }
         compatibility.append(settings)
         var tag = name(elementName, scope: scope)
+        guard !hasError else { parser.abortParsing(); return }
         let prefix = elementName.split(separator: ":", maxSplits: 1).dropLast().first.map(String.init) ?? ""
         if tag.hasPrefix("extension"), !settings.ignored.contains(scope[prefix] ?? "") {
             tag = "required" + tag
