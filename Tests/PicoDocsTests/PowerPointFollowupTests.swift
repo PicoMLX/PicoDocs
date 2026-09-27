@@ -5,6 +5,19 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func opaqueGraphicDataCannotExposeATable() async throws {
+        typealias B = PowerPointConverterTests
+        for uri in ["http://schemas.openxmlformats.org/drawingml/2006/table", "http://schemas.openxmlformats.org/drawingml/2006/chart", "urn:unsupported", ""] {
+            let attribute = uri.isEmpty ? "" : " uri='\(uri)'"
+            let table = "<p:graphicFrame><a:graphic><a:graphicData\(attribute)><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Cell payload</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title") + table)])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "opaque.pptx")
+            #expect(result.markdown().contains("Cell payload") == uri.hasSuffix("/table"))
+            #expect(result.markdown().contains("Title"))
+        }
+    }
+
+
     @Test func retainedImagePayloadsHaveAnEncodedByteBudget() throws {
         let manifest = #"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="png" ContentType="image/png"/></Types>"#
         let data = PagesConverterTests.makeZip([("[Content_Types].xml", Array(manifest.utf8)), ("a.png", [1,2,3]), ("b.png", [4,5,6]), ("c.png", [7])])
@@ -521,7 +534,7 @@ struct PowerPointFollowupTests {
         let word = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([("word/document.xml", Array(wordXML.utf8))]), filename: "paths.docx")
         let html = try await PicoDocsEngine.convert(data: Data("<table><tr><th>\(escaped)</th></tr></table>".utf8), filename: "paths.html")
         typealias B = PowerPointConverterTests
-        let table = "<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>\(escaped)</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"
+        let table = "<p:graphicFrame><a:graphic><a:graphicData uri='http://schemas.openxmlformats.org/drawingml/2006/table'><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>\(escaped)</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"
         let pptx = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: table)]), filename: "paths.pptx")
         for result in [word, html, pptx, ConverterResult(sections: [.init(markdown: "| " + MarkdownTableCell.escapeDelimiters(value) + " |\n| --- |")])] {
             for format in [ExportFileType.html, .plaintext, .csv] {
@@ -672,7 +685,7 @@ struct PowerPointFollowupTests {
         typealias B = PowerPointConverterTests
         let picture = #"<p:pic xmlns:e="urn:extension" mc:Ignorable="e"><p:blipFill><e:ignored><a:blip r:embed="missing"/></e:ignored><a:blip r:embed="real"/></p:blipFill></p:pic>"#
         let cell = "<a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Visible cell</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl>"
-        let table = "<p:graphicFrame xmlns:e=\"urn:extension\" mc:Ignorable=\"e\"><e:ignored>" + cell.replacingOccurrences(of: "Visible", with: "Hidden") + "</e:ignored><a:graphic><a:graphicData>" + cell + "</a:graphicData></a:graphic></p:graphicFrame>"
+        let table = "<p:graphicFrame xmlns:e=\"urn:extension\" mc:Ignorable=\"e\"><e:ignored>" + cell.replacingOccurrences(of: "Visible", with: "Hidden") + "</e:ignored><a:graphic><a:graphicData uri='http://schemas.openxmlformats.org/drawingml/2006/table'>" + cell + "</a:graphicData></a:graphic></p:graphicFrame>"
         let data = B.deck(slides: [.init(file: "s.xml", shapes: picture + table, relationships: [("real", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "../media/real.png")])], extraParts: [("ppt/media/real.png", [1,2,3])])
         let result = try await PicoDocsEngine.convert(data: data, filename: "ignored.pptx")
         #expect(result.markdown().contains("real.png")); #expect(result.markdown().contains("Visible cell")); #expect(!result.markdown().contains("Hidden"))
@@ -852,7 +865,7 @@ struct PowerPointFollowupTests {
         let body = "<p:txBody><a:p><a:r><a:t>Selected title</a:t></a:r></a:p></p:txBody>"
         let title = B.titleShape("unused").replacingOccurrences(of: "<p:txBody><a:bodyPr/><a:p><a:r><a:t>unused</a:t></a:r></a:p></p:txBody>", with: selectedWrapper(body, fallback: body.replacingOccurrences(of: "Selected", with: "Wrong")))
         let cell = "<a:tc><a:txBody><a:p><a:r><a:t>Selected cell</a:t></a:r></a:p></a:txBody></a:tc>"
-        let table = "<p:graphicFrame><a:graphic><a:graphicData><a:tbl>" + selectedWrapper("<a:tr>" + selectedWrapper(cell) + "</a:tr>") + "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"
+        let table = "<p:graphicFrame><a:graphic><a:graphicData uri='http://schemas.openxmlformats.org/drawingml/2006/table'><a:tbl>" + selectedWrapper("<a:tr>" + selectedWrapper(cell) + "</a:tr>") + "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"
         let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: title + table)]), filename: "wrapped.pptx")
         #expect(result.sections.first?.title == "Selected title")
         #expect(result.markdown().contains("| Selected cell |")); #expect(!result.markdown().contains("Wrong"))
@@ -1399,7 +1412,7 @@ struct PowerPointFollowupTests {
 
     @Test func cellsAndOtherPlaceholdersInheritTheirOwnListStyles() async throws {
         typealias B = PowerPointConverterTests
-        let table = #"<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr><a:tc><a:txBody><a:lstStyle><a:lvl1pPr><a:buAutoNum type="arabicPeriod" startAt="4"/><a:defRPr b="1" i="1"/></a:lvl1pPr></a:lstStyle><a:p><a:r><a:t>Cell</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>Plain</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#
+        let table = #"<p:graphicFrame><a:graphic><a:graphicData uri='http://schemas.openxmlformats.org/drawingml/2006/table'><a:tbl><a:tr><a:tc><a:txBody><a:lstStyle><a:lvl1pPr><a:buAutoNum type="arabicPeriod" startAt="4"/><a:defRPr b="1" i="1"/></a:lvl1pPr></a:lstStyle><a:p><a:r><a:t>Cell</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>Plain</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#
         let shape = B.shape(placeholder: #"<p:ph type="chart"/>"#, paragraphs: ["<a:p><a:r><a:t>Caption</a:t></a:r></a:p>"])
         let layout = "<p:sldLayout \(B.namespaces)><p:cSld><p:spTree/></p:cSld></p:sldLayout>"
         let master = "<p:sldMaster \(B.namespaces)><p:cSld><p:spTree/></p:cSld><p:txStyles><p:otherStyle><a:lvl1pPr><a:buAutoNum type=\"arabicPeriod\" startAt=\"7\"/></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>"
@@ -1574,7 +1587,7 @@ struct PowerPointFollowupTests {
 
     @Test func tableLiteralPunctuationUnicodeWhitespaceAndBackticks() async throws {
         typealias B = PowerPointConverterTests
-        let table = #"<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>*stars* `code` \path | &lt;br&gt;</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#
+        let table = #"<p:graphicFrame><a:graphic><a:graphicData uri='http://schemas.openxmlformats.org/drawingml/2006/table'><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>*stars* `code` \path | &lt;br&gt;</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#
         let shape = B.shape(placeholder: nil, paragraphs: ["<a:p><a:r><a:t>Hello</a:t></a:r><a:r><a:rPr b=\"1\"/><a:t>\u{00A0}world\u{2003}\u{00A0}</a:t></a:r><a:r><a:t>end</a:t></a:r></a:p>"])
         let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: shape + table)]), filename: "literal.pptx")
         #expect(result.markdown().contains("Hello\u{00A0}**world**\u{2003}\u{00A0}end"))

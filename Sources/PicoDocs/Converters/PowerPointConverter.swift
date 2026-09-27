@@ -408,6 +408,8 @@ public struct PowerPointConverter: DocumentConverter {
         guard !Task.isCancelled else { return nil }
         guard !["p:ext", "a:ext"].contains(element.tagName().lowercased()) else { return nil }
         guard !element.tagName().lowercased().hasPrefix("extension"), !element.tagName().lowercased().hasPrefix("requiredextension") else { return nil }
+        if name == "a:tbl", element.tagName().lowercased() == "a:graphicdata",
+           (try? element.attr("uri")) != "http://schemas.openxmlformats.org/drawingml/2006/table" { return nil }
         if element.tagName().lowercased() == name { return element }
         if element.tagName().lowercased() == "mc:alternatecontent" {
             return selectedAlternateBranch(element).flatMap { selectedDescendant(in: $0, named: name) }
