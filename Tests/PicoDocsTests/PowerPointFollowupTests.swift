@@ -5,6 +5,62 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func sharedDOMCacheChargesNodesAttributesAndNormalizedBytes() throws {
+        typealias B = PowerPointConverterTests
+        let source = "<p:sldLayout \(B.namespaces)><p:cSld><p:spTree/></p:cSld></p:sldLayout>"
+        let bytes = try #require(PowerPointXML.normalize(Data(source.utf8))).utf8.count
+        let observed = PowerPointXML.Budget()
+        #expect(PowerPointXML.normalize(Data(source.utf8), budget: observed) != nil)
+        let attributes = 500_000 - observed.attributes
+        let data = PagesConverterTests.makeZip([("a.xml", Array(source.utf8)), ("b.xml", Array(source.utf8)), ("c.xml", Array(source.utf8))])
+        for budget in [PowerPointXML.Budget(nodes: 6), .init(attributes: 2 * attributes), .init(bytes: 2 * bytes)] {
+            let package = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
+            var cache = PowerPointConverter.PartCache(archive: package, budget: budget)
+            let first = cache.document("a.xml", root: "p:sldlayout")
+            #expect(first != nil)
+            #expect(cache.document("b.xml", root: "p:sldlayout") != nil)
+            #expect(cache.document("a.xml", root: "p:sldlayout") === first)
+            #expect(cache.document("c.xml", root: "p:sldlayout") == nil)
+            #expect(throws: PicoDocsError.fileCorrupted) { try package.check() }
+        }
+    }
+
+    @Test func largeHTMLTextNodesUseScalarEscaping() async throws {
+        let literal = String(repeating: "*\u{0301}x*\u{0301} ", count: 30_000).trimmingCharacters(in: .whitespaces)
+        let result = try await PicoDocsEngine.convert(data: Data(("<p>" + literal + "</p>").utf8), filename: "large.html")
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == literal)
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains(literal)); #expect(!html.contains("<em>"))
+    }
+
+    @Test func newlineDenseBlockEscapingStreamsLineBoundaries() {
+        let prefix = String(repeating: "\n", count: 100_000)
+        let source = prefix + "  1. item\n  |cell\n---\n# Heading\nordinary\r\n"
+        let expected = prefix + "  1\\. item\n  \\|cell\n\\-\\-\\-\n\\# Heading\nordinary\r\n"
+        #expect(PowerPointConverter.escapeBlockMarkers(source) == expected)
+        #expect(PowerPointConverter.escapeBlockMarkers("|\u{0301}cell") == "\\|\u{0301}cell")
+    }
+
+    @Test func externalImageReferencesCannotClaimEmbeddedCarrierBytes() async throws {
+        typealias B = PowerPointConverterTests
+        func picture(_ id: String, external: Bool) -> String {
+            "<p:pic><p:blipFill><a:blip r:\(external ? "link" : "embed")='\(id)'/></p:blipFill></p:pic>"
+        }
+        let embedded = B.Slide(file: "embedded.xml", shapes: picture("image", external: false), relationships: [("image", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "../media/image.png")])
+        let external = B.Slide(file: "external.xml", shapes: picture("outside", external: true) + picture("reserved", external: true), relationships: [
+            ("outside", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "image.png\" TargetMode=\"External"),
+            ("reserved", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "picodocs-embedded/1/image.png\" TargetMode=\"External")])
+        for slides in [[embedded, external], [external, embedded]] {
+            let result = try await PicoDocsEngine.convert(data: B.deck(slides: slides, extraParts: [("ppt/media/image.png", [1,2,3])]), filename: "images.pptx")
+            let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+            let sources = try html.getElementsByTag("img").array().map { try $0.attr("src") }
+            #expect(sources.filter { $0 == "data:image/png;base64,AQID" }.count == 1)
+            #expect(sources.contains("image.png")); #expect(sources.contains("picodocs-embedded/1/image.png"))
+            #expect(result.sections.first { $0.kind == .image }?.metadata["markdownReference"] == "picodocs-embedded/2/image.png")
+        }
+    }
+
+
     @Test func titleWhitespaceNormalizationStreamsLargeInputs() async throws {
         let words = Array(repeating: "word", count: 100_000).joined(separator: " \t ")
         let expected = Array(repeating: "word", count: 100_000).joined(separator: " ")

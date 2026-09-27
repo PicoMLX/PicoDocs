@@ -59,7 +59,11 @@ enum HTMLToMarkdown {
             let whole = text.getWholeText()
             if preserveWhitespace { out += whole }
             else {
-                let escaped = collapseWhitespace(whole).map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+                var escaped = ""
+                for scalar in collapseWhitespace(whole).unicodeScalars {
+                    if #"\`*_{}[]<>"#.unicodeScalars.contains(scalar) { escaped.append("\\") }
+                    escaped.unicodeScalars.append(scalar)
+                }
                 out += MarkdownList.escapeBareMarkerText(escaped)
             }
             return

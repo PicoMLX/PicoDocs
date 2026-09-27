@@ -66,6 +66,14 @@ final class PowerPointPackage {
 /// Validate XML and normalize known namespace aliases before the existing DOM walk.
 /// SAX parsing rejects malformed parts and bounds nesting before SwiftSoup sees them.
 final class PowerPointXML: NSObject, XMLParserDelegate {
+    /// Conversion-wide allowance for DOMs retained by the shared-part cache.
+    final class Budget {
+        var nodes: Int, attributes: Int, bytes: Int
+        init(nodes: Int = 250_000, attributes: Int = 500_000, bytes: Int = 64 * 1024 * 1024) {
+            self.nodes = max(0, nodes); self.attributes = max(0, attributes); self.bytes = max(0, bytes)
+        }
+    }
+
     private var scopes: [[String: String]] = [[:]]
     private var scopeBytes: [Int] = [0]
     private var names: [String] = []
@@ -98,16 +106,21 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         "http://schemas.openxmlformats.org/package/2006/content-types": ""
     ]
 
-    static func normalize(_ data: Data, maximumOutputBytes: Int = 64 * 1024 * 1024, maximumNodes: Int = 250_000, maximumAttributes: Int = 500_000) -> String? {
+    static func normalize(_ data: Data, maximumOutputBytes: Int = 64 * 1024 * 1024, maximumNodes: Int = 250_000, maximumAttributes: Int = 500_000, budget: Budget? = nil) -> String? {
         guard !containsDoctype(data) else { return nil }
         let parser = XMLParser(data: data)
         let delegate = PowerPointXML()
-        delegate.maximumOutputBytes = maximumOutputBytes
-        delegate.maximumNodes = maximumNodes
-        delegate.maximumAttributes = maximumAttributes
+        delegate.maximumOutputBytes = min(maximumOutputBytes, budget?.bytes ?? maximumOutputBytes)
+        delegate.maximumNodes = min(maximumNodes, budget?.nodes ?? maximumNodes)
+        delegate.maximumAttributes = min(maximumAttributes, budget?.attributes ?? maximumAttributes)
         parser.delegate = delegate
         parser.shouldResolveExternalEntities = false
         guard parser.parse(), !delegate.hasError, !Task.isCancelled else { return nil }
+        if let budget {
+            budget.nodes -= delegate.nodes
+            budget.attributes -= delegate.attributesCount
+            budget.bytes -= delegate.outputBytes
+        }
         return delegate.output
     }
 

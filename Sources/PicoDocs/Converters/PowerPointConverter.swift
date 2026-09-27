@@ -56,9 +56,20 @@ public struct PowerPointConverter: DocumentConverter {
 
         let defaultTextStyle = presentation.children().first().flatMap { Self.selectedChild(of: $0, named: "p:defaulttextstyle") }
         var sections: [DocumentSection] = []
-        let images = ImageCollector()
+        let slidePaths = try Self.slidePaths(presentation, archive: archive, presentationPath: presentationPath)
+        // Reserve all external image destinations first, including later slides,
+        // so embedded references cannot claim an external occurrence's src.
+        var externalReferences: Set<String> = []
+        for path in Set(slidePaths) {
+            try Task.checkCancellation()
+            for relation in Self.relationships(archive, forPart: path).values
+                where relation.external && relation.isType("/image") {
+                externalReferences.insert(Self.linkDestination(relation.target))
+            }
+        }
+        let images = ImageCollector(reservedReferences: externalReferences)
         var parts = PartCache(archive: archive)
-        for (index, slidePath) in try Self.slidePaths(presentation, archive: archive, presentationPath: presentationPath).enumerated() {
+        for (index, slidePath) in slidePaths.enumerated() {
             try Task.checkCancellation()
             guard let slide = Self.xml(archive, path: slidePath), slide.children().first()?.tagName().lowercased() == "p:sld" else { try archive.check(); throw PicoDocsError.fileCorrupted }
             let relationships = Self.relationships(archive, forPart: slidePath)
@@ -233,14 +244,17 @@ public struct PowerPointConverter: DocumentConverter {
         let archive: PowerPointPackage
         private var documents: [String: Document?] = [:]
         let placeholders = PlaceholderCache()
+        private let budget: PowerPointXML.Budget
 
-        init(archive: PowerPointPackage) { self.archive = archive }
+        init(archive: PowerPointPackage, budget: PowerPointXML.Budget = .init()) {
+            self.archive = archive; self.budget = budget
+        }
 
         mutating func document(_ path: String, root: String, cache: Bool = true) -> Document? {
             let parsed: Document?
             if cache, let cached = documents[path] { parsed = cached }
             else {
-                parsed = PowerPointConverter.xml(archive, path: path)
+                parsed = PowerPointConverter.xml(archive, path: path, budget: cache ? budget : nil)
                 if cache { documents[path] = parsed }
             }
             guard let parsed, parsed.children().first()?.tagName().lowercased() == root else {
@@ -738,16 +752,28 @@ public struct PowerPointConverter: DocumentConverter {
         return out
     }
 
-    private static func escapeBlockMarkers(_ text: String) -> String {
-        text.components(separatedBy: "\n").map { line in
+    static func escapeBlockMarkers(_ text: String) -> String {
+        var output = ""
+        func appendLine(_ slice: Substring) {
+            guard !slice.isEmpty else { return }
+            let line = String(slice)
             let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let first = trimmed.unicodeScalars.first, "#-+|0123456789".unicodeScalars.contains(first) else { output += line; return }
             if trimmed.count >= 3, trimmed.allSatisfy({ $0 == "-" || $0 == " " }) {
-                return line.replacingOccurrences(of: "-", with: "\\-")
+                output += line.replacingOccurrences(of: "-", with: "\\-")
+                return
             }
-            return line.replacingOccurrences(of: #"^(\s*)(#{1,6}|[-+]|\|)(?=\s|$)"#, with: #"$1\\$2"#, options: .regularExpression)
+            output += line.replacingOccurrences(of: #"^(\s*)(#{1,6}|[-+]|\|)(?=\s|$)"#, with: #"$1\\$2"#, options: .regularExpression)
                 .replacingOccurrences(of: #"^(\s*)([0-9]+)([.)])(?=\s|$)"#, with: #"$1$2\\$3"#, options: .regularExpression)
                 .replacingOccurrences(of: #"^(\s*)\|"#, with: #"$1\\|"#, options: .regularExpression)
-        }.joined(separator: "\n")
+        }
+        var start = text.startIndex
+        for index in text.unicodeScalars.indices where text.unicodeScalars[index] == "\n" {
+            appendLine(text[start..<index]); output.append("\n")
+            start = text.unicodeScalars.index(after: index)
+        }
+        appendLine(text[start...])
+        return output
     }
 
     /// Latin, Roman and decimal schemes specified by DrawingML. Unknown schemes
@@ -874,8 +900,10 @@ public struct PowerPointConverter: DocumentConverter {
             source = relation.target
         } else {
             let mediaPath = WordConverter.resolvePartPath(relation.target, relativeTo: directory(of: context.partPath))
-            source = (mediaPath as NSString).lastPathComponent
-            if context.embedsImages { context.images.add(path: mediaPath, filename: source, archive: context.archive) }
+            let filename = (mediaPath as NSString).lastPathComponent
+            source = context.embedsImages
+                ? (context.images.add(path: mediaPath, filename: filename, archive: context.archive) ?? filename)
+                : filename
         }
         let properties = selectedChild(of: picture, named: "p:nvpicpr").flatMap { selectedChild(of: $0, named: "p:cnvpr") }
         let description = (try? properties?.attr("descr")) ?? ""
@@ -892,26 +920,38 @@ public struct PowerPointConverter: DocumentConverter {
     /// Collects each embedded image once (by archive path) as an `.image` section.
     final class ImageCollector {
         private(set) var sections: [DocumentSection] = []
-        private var seen: Set<String> = []
+        private var references: [String: String] = [:]
+        private var usedReferences: Set<String>
+        private var nextReference = 0
 
-        func add(path: String, filename: String, archive: PowerPointPackage) {
-            guard !seen.contains(path) else { return }
+        init(reservedReferences: Set<String> = []) { usedReferences = reservedReferences }
+
+        @discardableResult
+        func add(path: String, filename: String, archive: PowerPointPackage) -> String? {
+            if let existing = references[path] { return existing }
             guard let bytes = archive.read(path), !bytes.isEmpty else {
                 archive.fail(PicoDocsError.fileCorrupted)
-                return
+                return nil
             }
-            seen.insert(path)
+            var reference = filename
+            while usedReferences.contains(PowerPointConverter.linkDestination(reference)) {
+                nextReference += 1
+                reference = "picodocs-embedded/\(nextReference)/" + filename
+            }
+            let emitted = PowerPointConverter.linkDestination(reference)
+            usedReferences.insert(emitted); references[path] = reference
             sections.append(DocumentSection(
                 title: filename,
                 kind: .image,
-                markdown: "![\(PowerPointConverter.escapeMarkdown(filename))](\(PowerPointConverter.linkDestination(filename)))",
+                markdown: "![\(PowerPointConverter.escapeMarkdown(filename))](\(emitted))",
                 sourcePath: path,
                 metadata: [
                     "mimeType": PowerPointConverter.contentType(path, archive: archive) ?? PowerPointConverter.mimeType(forExtension: (filename as NSString).pathExtension),
                     "base64": bytes.base64EncodedString(),
-                    "markdownReference": PowerPointConverter.linkDestination(filename),
+                    "markdownReference": emitted,
                 ]
             ))
+            return reference
         }
     }
 
@@ -1030,9 +1070,9 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     /// Reads and parses an XML part, or nil when missing/unreadable.
-    static func xml(_ archive: PowerPointPackage, path: String) -> Document? {
+    static func xml(_ archive: PowerPointPackage, path: String, budget: PowerPointXML.Budget? = nil) -> Document? {
         guard let data = archive.read(path),
-              let text = PowerPointXML.normalize(data) else { return nil }
+              let text = PowerPointXML.normalize(data, budget: budget) else { return nil }
         guard let document = try? SwiftSoup.parse(text, "", SwiftSoup.Parser.xmlParser()) else { return nil }
         // MustUnderstand applies to the processed tree, excluding ignored extension
         // subtrees and unselected AlternateContent branches.
