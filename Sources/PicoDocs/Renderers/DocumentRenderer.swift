@@ -453,25 +453,14 @@ public enum DocumentRenderer {
     /// don't rewrite Markdown metacharacters inside code.
     private static func extractCodeSpans(_ text: String) -> (text: String, spans: [String]) {
         var spans: [String] = []
-        var result = ""
-        var index = text.startIndex
-        while index < text.endIndex {
-            let next = text.index(after: index)
-            // Backslash escapes outside code cannot open a code span. Inside
-            // a real span, backslashes remain literal as required by Markdown.
-            if text[index] == "\\", next < text.endIndex {
-                result.append(text[index]); result.append(text[next])
-                index = text.index(after: next)
-            } else if text[index] == "`",
-               let close = text[text.index(after: index)...].firstIndex(of: "`") {
-                spans.append(String(text[text.index(after: index)..<close]))
-                result += "\(codeOpen)\(spans.count - 1)\(codeClose)"
-                index = text.index(after: close)
-            } else {
-                result.append(text[index])
-                index = text.index(after: index)
+        let result = MarkdownTableCell.mapCodeSpans(text, keepDelimiters: false, code: { source in
+            var code = source.replacingOccurrences(of: "\n", with: " ")
+            if code.hasPrefix(" "), code.hasSuffix(" "), code.contains(where: { $0 != " " }) {
+                code = String(code.dropFirst().dropLast())
             }
-        }
+            spans.append(code)
+            return "\(codeOpen)\(spans.count - 1)\(codeClose)"
+        }, plain: { $0 })
         return (result, spans)
     }
 

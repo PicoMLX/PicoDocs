@@ -188,8 +188,8 @@ enum AttributedStringDocumentBuilder {
                 render(children, into: output, size: size, bold: bold, italic: true, link: link, escapeLiterals: escapeLiterals)
             case .link(let label, let destination):
                 render(label, into: output, size: size, bold: bold, italic: italic, link: destination, escapeLiterals: escapeLiterals)
-            case .image(let alt, _):
-                output.append(NSAttributedString(string: escaped(alt), attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
+            case .image:
+                output.append(NSAttributedString(string: escaped(node.plainText), attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
             case .footnoteReference(let id):
                 // No footnote machinery in RTF output; keep the marker as literal text
                 // (as the DOCX writer does) so references and `[^id]: note`

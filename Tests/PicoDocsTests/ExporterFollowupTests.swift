@@ -8,6 +8,35 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func sparseSyntaxUsesSparseCharacterStorage() {
+        let prefix = String(repeating: "a", count: 8 * 1024 * 1024 - 1)
+        let source = prefix + "["
+        let indexed = MarkdownInlineParser.IndexedText(source)
+        #expect(indexed.checkpointCount == 32_768)
+        #expect(indexed[0] == "a"); #expect(indexed[source.count - 1] == "[")
+        #expect(MarkdownInlineParser.parse(source) == [.text(source)])
+        let mixed = String(repeating: "café 👨‍👩‍👧‍👦 ", count: 1024)
+        #expect(MarkdownInlineParser.parse(mixed + "[label](url)") == [.text(mixed), .link(label: [.text("label")], destination: "url")])
+        #expect(MarkdownInlineParser.parse(mixed + "**bold**") == [.text(mixed), .strong([.text("bold")])])
+    }
+
+    @Test func emptyAltImagesStayVisibleInRTF() async throws {
+        let input = ConverterResult(sections: [.init(markdown: "![](folder/missing.png)")])
+        let result = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(input, to: .rtf), filename: "image.rtf")
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == "missing.png")
+    }
+    @Test func completeCodeDelimiterRunsSurviveOfficeAndTextProjection() async throws {
+        for (source, plain) in [("``a`b``", "a`b"), ("`` `x` ``", "`x`"), ("``a\nb``", "a b"), (#"`a\`"#, #"a\"#)] {
+            let result = ConverterResult(sections: [.init(markdown: source)])
+            #expect(try DocumentRenderer.render(result, to: .plaintext) == plain)
+            #expect(try DocumentRenderer.render(result, to: .html).contains("<code>" + plain + "</code>"))
+            for format in [ExportableFileType.docx, .rtf] {
+                let imported = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(result, to: format), filename: "code." + format.rawValue)
+                #expect(try DocumentRenderer.render(imported, to: .plaintext) == plain)
+            }
+        }
+    }
+
     @Test func docxRulesAndTableBreaksRoundTripWithoutLossOrPadding() async throws {
         for source in ["---", "Before\n\n---\n\nAfter", "| Header |\n| --- |\n| first<br>second |"] {
             var result = ConverterResult(sections: [.init(markdown: source)])

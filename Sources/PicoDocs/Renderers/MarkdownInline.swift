@@ -30,6 +30,43 @@ indirect enum MarkdownInline: Equatable {
 }
 
 enum MarkdownInlineParser {
+    /// Integer offsets without a Character-sized allocation for every character.
+    /// Sequential and nearby reads reuse a cursor; arbitrary jumps start from a
+    /// sparse checkpoint, at most 255 graphemes away. Both parser passes share
+    /// this representation, so sparse syntax cannot trigger dense index arrays.
+    final class IndexedText: RandomAccessCollection {
+        typealias Index = Int
+        typealias Element = Character
+        private let text: String
+        private let checkpoints: [String.Index]
+        let endIndex: Int
+        var startIndex: Int { 0 }
+        var checkpointCount: Int { checkpoints.count }
+        private var cursor: String.Index
+        private var offset = 0
+        init(_ text: String) {
+            self.text = text; cursor = text.startIndex
+            var points: [String.Index] = [], count = 0
+            for index in text.indices {
+                if count.isMultiple(of: 256) { points.append(index) }
+                count += 1
+            }
+            checkpoints = points; endIndex = count
+        }
+        func index(after i: Int) -> Int { i + 1 }
+        func index(before i: Int) -> Int { i - 1 }
+        subscript(position: Int) -> Character {
+            precondition(position >= 0 && position < endIndex)
+            if abs(position - offset) > 255 {
+                offset = position / 256 * 256
+                cursor = checkpoints[position / 256]
+            }
+            cursor = text.index(cursor, offsetBy: position - offset)
+            offset = position
+            return text[cursor]
+        }
+    }
+
     private static let structuredRegex = try! NSRegularExpression(pattern: "\u{E020}([0-9]+)\u{E021}")
     private static let punctuation = ##"!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"##
 
@@ -45,7 +82,7 @@ enum MarkdownInlineParser {
             return text.isEmpty ? [] : [.text(text)]
         }
         if let literal = escapeOnlyText(text) { return literal.isEmpty ? [] : [.text(literal)] }
-        let chars = Array(text)
+        let chars = IndexedText(text)
         // Cache the next unescaped label closer once instead of rescanning the
         // suffix for every unmatched opener in partially generated Markdown.
         var escapedPositions = Set<Int>()
@@ -54,21 +91,23 @@ enum MarkdownInlineParser {
             if chars[cursor] == "\\", cursor + 1 < chars.count { escapedPositions.insert(cursor + 1); cursor += 2 }
             else { cursor += 1 }
         }
-        var nextBracket = Array<Int?>(repeating: nil, count: chars.count + 1)
-        if !chars.isEmpty {
-            for index in stride(from: chars.count - 1, through: 0, by: -1) {
-                nextBracket[index] = chars[index] == "]" && !escapedPositions.contains(index) ? index : nextBracket[index + 1]
-            }
+        var nextBracket: [Int: Int] = [:]
+        var bracketClose: Int?
+        for index in chars.indices.reversed() where !escapedPositions.contains(index) {
+            if chars[index] == "]" { bracketClose = index }
+            else if chars[index] == "[", let close = bracketClose { nextBracket[index] = close }
         }
         // Pair destinations once; failed candidates never rescan a suffix.
         var parenCloses: [Int: Int] = [:], stack: [Int] = []
-        var nextAngle = Array<Int?>(repeating: nil, count: chars.count + 1)
+        var nextAngle: [Int: Int] = [:]
         for index in chars.indices where !escapedPositions.contains(index) {
             if chars[index] == "(" { stack.append(index) }
             else if chars[index] == ")", let open = stack.popLast() { parenCloses[open] = index }
         }
-        for index in chars.indices.reversed() {
-            nextAngle[index] = chars[index] == ">" && !escapedPositions.contains(index) ? index : nextAngle[index + 1]
+        var angleClose: Int?
+        for index in chars.indices.reversed() where !escapedPositions.contains(index) {
+            if chars[index] == ">" { angleClose = index }
+            else if chars[index] == "<", let close = angleClose { nextAngle[index] = close }
         }
         var tickRuns: [(start: Int, length: Int)] = [], scan = 0
         while scan < chars.count {
@@ -150,7 +189,7 @@ enum MarkdownInlineParser {
                 }
                 // Footnote reference: [^id]
                 if i + 1 < chars.count, chars[i + 1] == "^",
-                   let close = nextBracket[min(i + 2, chars.count)] {
+                   let close = nextBracket[i] {
                     let id = String(chars[(i + 2)..<close])
                     if !id.isEmpty {
                         append(.footnoteReference(id))
@@ -215,7 +254,7 @@ enum MarkdownInlineParser {
     /// link, the `!` for an image). Supports CommonMark angle-bracket destinations
     /// `(<url with spaces>)` that `WordConverter` emits. Returns the node and the
     /// index just past the closing `)`, or nil if the syntax doesn't match.
-    private static func parseLinkOrImage(_ chars: [Character], from: Int, isImage: Bool, labelEnd: Int?, parenCloses: [Int: Int], nextAngle: [Int?], depth: Int, tableCell: Bool) -> (node: MarkdownInline, next: Int)? {
+    private static func parseLinkOrImage(_ chars: IndexedText, from: Int, isImage: Bool, labelEnd: Int?, parenCloses: [Int: Int], nextAngle: [Int: Int], depth: Int, tableCell: Bool) -> (node: MarkdownInline, next: Int)? {
         let bracket = isImage ? from + 1 : from
         guard bracket < chars.count, chars[bracket] == "[" else { return nil }
         // Find the label's closing `]`, skipping backslash-escaped delimiters:
@@ -230,7 +269,7 @@ enum MarkdownInlineParser {
         let destStart = cursor
         var dest = ""
         if cursor < chars.count, chars[cursor] == "<" {
-            guard let gt = nextAngle[cursor + 1] else { return nil }
+            guard let gt = nextAngle[cursor] else { return nil }
             dest = unescape(String(chars[(cursor + 1)..<gt]))
             cursor = gt + 1
         } else {
@@ -348,7 +387,7 @@ enum MarkdownInlineParser {
             var nodes: [MarkdownInline]
             var text = ""
         }
-        let chars = Array(text)
+        let chars = IndexedText(text)
         // Placeholder boundaries have the source node's punctuation/whitespace
         // class, never the private-use sentinel's alphanumeric-like class.
         var boundaries: [Int: Character] = [:]
