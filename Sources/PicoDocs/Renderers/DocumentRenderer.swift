@@ -427,14 +427,19 @@ public enum DocumentRenderer {
     /// becomes a single-field row, so prose isn't silently dropped.
     private static func renderCSV(_ result: ConverterResult) -> String {
         var parts: [String] = []
+        var markdown: [String] = []
+        func flush() {
+            let rows = csvRows(fromMarkdown: markdown.joined(separator: "\n\n"))
+            if !rows.isEmpty { parts.append(rows.joined(separator: "\n")) }
+            markdown.removeAll(keepingCapacity: true)
+        }
         for section in result.sections where section.kind != .image {
             if let rawCSV = section.metadata["csv"], !rawCSV.isEmpty {
+                flush()
                 parts.append(rawCSV)
-            } else {
-                let rows = csvRows(fromMarkdown: section.markdown)
-                if !rows.isEmpty { parts.append(rows.joined(separator: "\n")) }
-            }
+            } else { markdown.append(section.markdown) }
         }
+        flush()
         return parts.joined(separator: "\n")
     }
 
@@ -471,8 +476,17 @@ public enum DocumentRenderer {
                     i += 1
                 }
             } else {
-                rows.append(csvField(stripInline(line)))
+                var paragraph = [line]
                 i += 1
+                if !literalBlockBoundary(line).ends {
+                    while i < lines.count {
+                        let candidate = lines[i].trimmingCharacters(in: .whitespaces)
+                        if candidate.isEmpty || candidate.hasPrefix("```") || literalBlockBoundary(candidate).starts { break }
+                        paragraph.append(candidate)
+                        i += 1
+                    }
+                }
+                rows += stripInline(paragraph.joined(separator: "\n")).components(separatedBy: "\n").map(csvField)
             }
         }
         return rows
@@ -688,7 +702,7 @@ public enum DocumentRenderer {
         let line = line.trimmingCharacters(in: .whitespaces)
         let single = headingMatch(line) != nil || line.hasPrefix("|") || line.hasPrefix(">")
             || ["---", "***", "___"].contains(line)
-        return (single || listMarker(line) != nil, single)
+        return (single || listMarker(line) != nil || parseFootnoteDefinition(line) != nil, single)
     }
 
     private static func stripListMarker(_ line: String) -> String {

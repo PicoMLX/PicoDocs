@@ -3,6 +3,65 @@ import Testing
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func footnoteDefinitionsEndSourceInlineCode() async throws {
+        let source = "See[^x]\n`open\n[^x]: " + #"\* `close"#
+        let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "notes.txt")
+        for format in [ExportFileType.html, .plaintext] {
+            #expect(try DocumentRenderer.render(result, to: format).contains(#"\* `close"#))
+        }
+    }
+
+    @Test func tableCodeRetainsSourceSlashesBeforePipes() async throws {
+        for count in [1, 3] {
+            let literal = "a" + String(repeating: "\\", count: count) + "|b"
+            let source = "| `" + literal + "` |\n| --- |"
+            for (name, data) in [("table.txt", Data(source.utf8)), ("table.pages", PagesConverterTests.makePagesFile(paragraphs: [source]))] {
+                let result = try await PicoDocsEngine.convert(data: data, filename: name)
+                for format in [ExportFileType.html, .plaintext, .csv] {
+                    #expect(try DocumentRenderer.render(result, to: format).contains(literal))
+                }
+            }
+        }
+    }
+
+    @Test func CSVRetainsFencesAcrossSourceSections() throws {
+        let source = [DocumentSection(markdown: "```"), .init(markdown: #"a\*b"#), .init(markdown: "```")]
+        let result = ConverterResult(sections: MarkdownLiteral.escapeSectionBackslashes(source))
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            #expect(try DocumentRenderer.render(result, to: format).contains(#"a\*b"#))
+        }
+    }
+
+    @Test func CSVProtectsMultilineInlineCodeBeforeRenderingRows() async throws {
+        let source = "prefix `open\n" + #"a\*b `close suffix"#
+        let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "inline.txt")
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            #expect(try DocumentRenderer.render(result, to: format).contains(#"a\*b"#))
+        }
+    }
+
+    @Test func PagesEscapesUseVisibleTextAfterControlRemoval() async throws {
+        for control in ["\u{0004}", "\u{007F}", "\u{009F}"] {
+            let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makePagesFile(paragraphs: ["\\" + control + "*x*"]), filename: "control.pages")
+            #expect(try DocumentRenderer.render(result, to: .plaintext) == #"\*x*"#)
+            #expect(!(try DocumentRenderer.render(result, to: .html)).contains("<em>"))
+        }
+    }
+
+    @Test func PagesHyperlinkLabelsPreserveCanonicalBracketEscapes() async throws {
+        typealias B = PagesConverterTests
+        for label in [#"\]"#, #"\["#, #"\\]"#, #"text [label]"#] {
+            let run = B.lengthField(1, B.varintField(1, 0) + B.lengthField(2, B.varintField(1, 2)))
+            let storage = B.varintField(1, 0) + B.lengthField(3, Array(label.utf8)) + B.lengthField(11, run)
+            let stream = B.makeIWAStream(objects: [(1, 2001, storage, [2]), (2, 2032, B.lengthField(2, Array("https://example.com".utf8)), [])])
+            let data = B.makeZip([(name: "Index/Document.iwa", data: B.snappyFrame(stream))])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "link.pages")
+            #expect(try DocumentRenderer.render(result, to: .plaintext) == label)
+            #expect(try DocumentRenderer.render(result, to: .html).contains("<a href=\"https://example.com\">" + label + "</a>"))
+        }
+    }
+
+
     @Test func confirmedBareListsFlushAtTheirExit() async throws {
         for marker in ["-", "1."] {
             let source = marker + "\n" + String(repeating: " ", count: marker.count + 1) + "`open\noutside " + #"\* `close"#

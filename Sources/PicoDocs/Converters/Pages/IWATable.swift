@@ -236,11 +236,29 @@ enum IWATable {
             guard remainingStyleWork > 0 else { break }
             if let marker = listMarker(of: id, in: objects, remainingWork: &remainingStyleWork) { listMarkers[id] = marker }
         }
-        return BodyStorage(units: Array(text.utf16), escapedBackslashes: MarkdownLiteral.escapeProjection(text, boundaries: Set(characterStyles.map(\.offset) + smartFields.map(\.offset)), paragraphSeparators: [0x0A, 0x0D, 0x2029]),
+        return BodyStorage(units: Array(text.utf16), escapedBackslashes: visibleEscapeProjection(text, boundaries: Set(characterStyles.map(\.offset) + smartFields.map(\.offset))),
                            paragraphStyles: indexedReferences(in: storage, field: 5),
                            characterStyles: characterStyles, smartFields: smartFields,
                            listStyles: listStyles, listRestarts: listRestarts(in: storage),
                            traits: traits, links: links, listMarkers: listMarkers)
+    }
+
+    /// Escape the rendered stream, then project insertions back to storage indices.
+    private static func visibleEscapeProjection(_ text: String, boundaries: Set<Int>) -> (after: [Int], before: Set<Int>) {
+        let units = Array(text.utf16)
+        var offsets: [Int] = [], visibleBoundaries: Set<Int> = []
+        for index in units.indices {
+            if boundaries.contains(index) { visibleBoundaries.insert(offsets.count) }
+            if units[index] != 0xFFFC && !isStrippedControl(units[index]) { offsets.append(index) }
+        }
+        let visible = String(decoding: offsets.map { units[$0] }, as: UTF16.self)
+        let projection = MarkdownLiteral.escapeProjection(visible, boundaries: visibleBoundaries, paragraphSeparators: [0x0A, 0x0D, 0x2029])
+        var after = Array(repeating: 0, count: units.count), before: Set<Int> = []
+        for (index, source) in offsets.enumerated() {
+            after[source] = projection.after[index]
+            if projection.before.contains(index) { before.insert(source) }
+        }
+        return (after, before)
     }
 
     // MARK: - Paragraph rendering
@@ -570,7 +588,13 @@ enum IWATable {
     }
 
     private static func escapeLinkLabel(_ text: String) -> String {
-        text.replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]")
+        var output = "", slashes = 0
+        for character in text {
+            if character == "\\" { output.append(character); slashes += 1; continue }
+            if "[]".contains(character), slashes.isMultiple(of: 2) { output.append("\\") }
+            output.append(character); slashes = 0
+        }
+        return output
     }
 
     /// Spaces or parentheses break a bare inline-link destination; wrap such URLs in

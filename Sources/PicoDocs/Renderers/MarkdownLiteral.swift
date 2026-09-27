@@ -46,7 +46,7 @@ enum MarkdownLiteral {
                 flushProse()
                 var cell = "", escaped = false
                 func flushCell() {
-                    output += MarkdownTableCell.mapCodeSpans(cell, code: { $0 }, plain: { escapeProseBackslashes($0) })
+                    output += MarkdownTableCell.mapCodeSpans(cell, code: { MarkdownTableCell.codePipes($0, encoding: true) }, plain: { escapeProseBackslashes($0) })
                     cell = ""
                 }
                 for character in line {
