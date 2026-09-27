@@ -359,6 +359,9 @@ final class WordListNumbering {
             else { suffix = [1: "st", 2: "nd", 3: "rd"][abs(value % 10)] ?? "th" }
             return String(value) + suffix
         }
+        if format == "decimalEnclosedCircle", (1...20).contains(value) {
+            return String(UnicodeScalar(0x245F + value)!)
+        }
         if format == "hex" { return String(value, radix: 16, uppercase: true) }
         if format == "decimalFullWidth" {
             return String(String(value).unicodeScalars.map { scalar in

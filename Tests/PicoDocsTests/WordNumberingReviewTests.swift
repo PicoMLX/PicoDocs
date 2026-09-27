@@ -295,7 +295,7 @@ struct WordNumberingReviewTests {
         #expect(disabled.markdown().contains("I.1. Item"))
         let enabled = try await convert(format: "decimal", label: "%1.%2.", override: #"<w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:isLgl/></w:lvl></w:lvlOverride>"#)
         #expect(enabled.markdown().contains("1.1. Item"))
-        for (format, start, language, expected) in [("cardinalText", 1, "en-US", "one"), ("ordinalText", 1, "en-US", "first"), ("ordinalText", 22, "en-GB", "twenty-second"), ("cardinalText", 2, "fr-FR", "deux"), ("ordinalText", 1, "fr-FR", "premier"), ("ordinalText", 5, "fr-FR", "cinquième"), ("ordinalText", 1, "de-DE", "erste"), ("ordinalText", 21, "de-DE", "einundzwanzigste"), ("hex", 10, "en-US", "A")] {
+        for (format, start, language, expected) in [("cardinalText", 1, "en-US", "one"), ("ordinalText", 1, "en-US", "first"), ("ordinalText", 22, "en-GB", "twenty-second"), ("cardinalText", 2, "fr-FR", "deux"), ("ordinalText", 1, "fr-FR", "premier"), ("ordinalText", 5, "fr-FR", "cinquième"), ("ordinalText", 1, "de-DE", "erste"), ("ordinalText", 21, "de-DE", "einundzwanzigste"), ("hex", 10, "en-US", "A"), ("decimalEnclosedCircle", 1, "en-US", "①"), ("decimalEnclosedCircle", 10, "en-US", "⑩"), ("decimalEnclosedCircle", 20, "en-US", "⑳"), ("decimalEnclosedCircle", 21, "en-US", "21")] {
             let result = try await convert(format: format, label: "%2.", start: start, language: language)
             #expect(try DocumentRenderer.render(result, to: .plaintext).contains(expected + ". Item"), "\(format) \(language): \(result.markdown()) expected \(expected)")
         }
