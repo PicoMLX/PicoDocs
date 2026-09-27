@@ -8,6 +8,12 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func emptyCSVMetadataDoesNotHideOrdinaryBodyText() throws {
+        let result = ConverterResult(sections: [.init(markdown: "Keep this body", metadata: ["csv": ""])])
+        #expect(OfficeDocumentBlocks.parse(result) == [.paragraph("Keep this body")])
+        #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains("Keep this body"))
+    }
+
     @Test func bodyCSVPayloadIsConsumedByEveryOfficeWriter() async throws {
         let source = ConverterResult(sections: [.init(kind: .body, markdown: "", metadata: ["csv": "UniqueValue,Second\nThird,Fourth"])])
         for format in [ExportableFileType.docx, .rtf, .pptx] {

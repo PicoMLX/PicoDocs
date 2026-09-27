@@ -19,7 +19,8 @@ enum OfficeDocumentBlocks {
             pending.removeAll(keepingCapacity: true)
         }
         for section in result.sections where section.kind != .image {
-            if let csv = section.metadata["csv"] ?? (section.kind == .sheet && section.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil) {
+            if let csv = section.metadata["csv"] ?? (section.kind == .sheet && section.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil),
+               !csv.isEmpty || [.sheet, .table].contains(section.kind) {
                 flush()
                 if section.kind == .sheet, let title = section.sheetName ?? section.metadata["sheetName"] ?? section.title, !title.isEmpty {
                     let escaped = title.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
