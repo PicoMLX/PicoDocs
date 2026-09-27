@@ -5,6 +5,18 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func notesIncludeFreeformTextAndExcludeFurniture() async throws {
+        typealias B = PowerPointConverterTests
+        func shape(_ text: String, type: String? = nil) -> String {
+            B.shape(placeholder: type.map { "<p:ph type='\($0)'/>" }, paragraphs: ["<a:p><a:r><a:t>\(text)</a:t></a:r></a:p>"])
+        }
+        let notes = "<p:notes \(B.namespaces)><p:cSld><p:spTree>" + shape("Main", type: "body") + "<p:grpSp>" + shape("Additional") + "</p:grpSp>" + shape("Footer", type: "ftr") + shape("Date", type: "dt") + shape("Thumbnail", type: "sldImg") + "</p:spTree></p:cSld></p:notes>"
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title"), relationships: [("notes", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide", "../notesSlides/n.xml")])], extraParts: [("ppt/notesSlides/n.xml", Array(notes.utf8))])
+        let result = try await PowerPointConverter().convert(data, info: StreamInfo(detectedFormat: .pptx))
+        #expect(result.sections.first?.metadata["notes"] == "- Main\n\nAdditional")
+        #expect(result.markdown().contains("Additional")); #expect(!result.markdown().contains("Footer"))
+    }
+
     @Test func titleAndNotesReserveAllRetainedCopies() async throws {
         typealias B = PowerPointConverterTests
         let note = "<p:notes \(B.namespaces)><p:cSld><p:spTree>" + B.shape(placeholder: nil, paragraphs: ["<a:p><a:r><a:t>Speaker notes</a:t></a:r></a:p>"]) + "</p:spTree></p:cSld></p:notes>"

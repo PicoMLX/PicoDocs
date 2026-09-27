@@ -218,7 +218,8 @@ public struct PowerPointConverter: DocumentConverter {
                 let link = click == nil ? inheritedLink : hyperlink(click, context: context)
                 if shape.tagName().lowercased() == "p:grpsp" {
                     appendNotes(in: shape, inheritedLink: link)
-                } else if shape.tagName().lowercased() == "p:sp", placeholderType(of: shape) == "body" {
+                } else if shape.tagName().lowercased() == "p:sp",
+                          placeholderType(of: shape) == nil || placeholderType(of: shape) == "body" {
                     context.defaultLink = link
                     context.runDefaults = inheritedRunDefaults(for: shape, context: context)
                     if let body = textBody(of: shape) {
