@@ -517,7 +517,9 @@ extension MarkdownInline {
         case .image(let alt, let source):
             guard alt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return alt }
             let basename = (source.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent
-            return basename.isEmpty ? source : basename
+            if !basename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return basename }
+            if !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return source }
+            return "Image"
         case .footnoteReference(let id): return "[^\(id)]"
         }
     }

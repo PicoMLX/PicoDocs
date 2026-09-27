@@ -9,6 +9,38 @@ import AppKit
 
 struct ExporterFollowupTests {
 
+    @Test func identitylessImagesHaveVisibleFallbackAcrossExporters() async throws {
+        for source in ["![]()", "![ ]()", "![](< >)"] {
+            #expect(MarkdownInlineParser.parse(source).plainText == "Image")
+            let input = ConverterResult(sections: [.init(markdown: source)])
+            #expect(try xml(PicoDocsEngine.write(input, to: .xlsx), "xl/worksheets/sheet1.xml").contains(">Image</"))
+            #expect(try xml(PicoDocsEngine.write(input, to: .pptx), "ppt/slides/slide1.xml").contains(">Image</"))
+            for format in [ExportableFileType.docx, .rtf] {
+                let imported = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(input, to: format), filename: "image." + format.rawValue)
+                #expect(try DocumentRenderer.render(imported, to: .plaintext) == "Image")
+            }
+        }
+        #expect(MarkdownInline.image(alt: "", source: "\t\u{00A0}").plainText == "Image")
+        #expect(MarkdownInline.image(alt: "caption", source: "").plainText == "caption")
+    }
+
+    @Test func DOCXListHardBreaksKeepContentColumnAcrossRoundTrips() async throws {
+        for source in [
+            "- first  \n  second",
+            "100. first  \n     second",
+            "100. Parent\n     - first  \n       second",
+            "- Parent\n\n  first  \n  second",
+            "100. Parent\n\n     first  \n     second",
+            "- first  \n  1\\. literal marker"
+        ] {
+            var result = ConverterResult(sections: [.init(markdown: source)])
+            for _ in 0..<3 {
+                result = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(result, to: .docx), filename: "list.docx")
+                #expect(result.markdown() == source)
+            }
+        }
+    }
+
     @Test func whitespaceAltImagesUseVisibleFallbackAcrossExporters() async throws {
         for alt in [" ", "\t", "\u{00A0}"] {
             let source = "![" + alt + "](folder/missing.png)"

@@ -248,7 +248,12 @@ public struct WordConverter: DocumentConverter {
         if style?.lowercased() == "quote" {
             return text.components(separatedBy: "\n").map { "> " + $0 }.joined(separator: "\n")
         }
-        if let prefix { return prefix + text }
+        if let prefix {
+            // Every hard-break line belongs at the item's content column. This
+            // also handles markerless continuation paragraphs and nested lists.
+            let continuationIndent = String(repeating: " ", count: prefix.count)
+            return prefix + text.replacingOccurrences(of: "\n", with: "\n" + continuationIndent)
+        }
         return text
     }
 
