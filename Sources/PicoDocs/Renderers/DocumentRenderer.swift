@@ -496,10 +496,22 @@ public enum DocumentRenderer {
             } else {
                 var paragraph = [line]
                 i += 1
-                if !literalBlockBoundary(line).ends {
+                if !literalBlockBoundary(lines[i - 1]).ends {
                     while i < lines.count {
                         let candidate = lines[i].trimmingCharacters(in: .whitespaces)
-                        if candidate.isEmpty || candidate.hasPrefix("```") || literalBlockBoundary(candidate).starts || confirmedBareMarker(lines, index: i) != nil { break }
+                        if inNote {
+                            if lines[i].hasPrefix("    ") || lines[i].hasPrefix("\t") {
+                                paragraph.append(candidate); i += 1; continue
+                            }
+                            if candidate.isEmpty {
+                                var next = i + 1
+                                while next < lines.count, lines[next].trimmingCharacters(in: .whitespaces).isEmpty { next += 1 }
+                                if next < lines.count, lines[next].hasPrefix("    ") || lines[next].hasPrefix("\t") {
+                                    paragraph += Array(repeating: "", count: next - i); i = next; continue
+                                }
+                            }
+                        }
+                        if candidate.isEmpty || candidate.hasPrefix("```") || literalBlockBoundary(lines[i]).starts || confirmedBareMarker(lines, index: i) != nil { break }
                         if let list = lists.last, indentWidth(lines[i]) < list.base + 2 { break }
                         if inNote, !lines[i].hasPrefix("    "), !lines[i].hasPrefix("\t") { break }
                         paragraph.append(candidate)
@@ -729,10 +741,11 @@ public enum DocumentRenderer {
     }
 
     static func literalBlockBoundary(_ line: String) -> (starts: Bool, ends: Bool) {
+        let isFootnote = literalFootnoteDefinition(line)
         let line = line.trimmingCharacters(in: .whitespaces)
         let single = headingMatch(line) != nil || line.hasPrefix("|") || line.hasPrefix(">")
             || ["---", "***", "___"].contains(line)
-        return (single || listMarker(line) != nil || parseFootnoteDefinition(line) != nil, single)
+        return (single || listMarker(line) != nil || isFootnote, single)
     }
 
     private static func stripListMarker(_ line: String) -> String {

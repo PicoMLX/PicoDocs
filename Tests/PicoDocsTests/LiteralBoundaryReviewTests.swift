@@ -4,6 +4,36 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func bareTablePipesRemainCellBoundariesWithoutShiftingEscapes() async throws {
+        let source = #"| `a|b` | later \* |"# + "\n| --- | --- |"
+        let rtf = "{\\rtf1\\ansi " + source.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\n", with: "\\line ") + "}"
+        for (name, data) in [("pipes.txt", Data(source.utf8)), ("pipes.pages", PagesConverterTests.makePagesFile(paragraphs: [source])), ("pipes.rtf", Data(rtf.utf8))] {
+            let result = try await PicoDocsEngine.convert(data: data, filename: name)
+            let html = try DocumentRenderer.render(result, to: .html)
+            let table = try #require(try SwiftSoup.parse(html).getElementsByTag("table").first())
+            #expect(try table.getElementsByTag("th").count == 3)
+            #expect(try table.getElementsByTag("code").isEmpty())
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                let rendered = try DocumentRenderer.render(result, to: format)
+                #expect(rendered.contains(#"later \*"#)); #expect(!rendered.contains(#"later \\\*"#))
+            }
+        }
+        let projection = MarkdownLiteral.escapeProjection(source, boundaries: [4])
+        #expect(!projection.before.contains(4))
+    }
+
+    @Test func indentedFootnoteLikeTextRetainsItsParagraphCodeContext() async throws {
+        for indent in ["    ", "\t"] {
+            let source = "`open\n" + indent + "[^x]: middle\noutside " + #"\* `close"#
+            let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "indented-note.txt")
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                let rendered = try DocumentRenderer.render(result, to: format)
+                #expect(rendered.contains(#"outside \*"#)); #expect(!rendered.contains(#"outside \\\*"#))
+            }
+        }
+    }
+
+
     @Test func nestedFencesUseTheSameStructuralOutdentRuleAsLists() async throws {
         for marker in ["1.", "123."] {
             for structural in ["# heading ", "> quote ", "- item ", "| cell "] {
@@ -109,7 +139,7 @@ struct LiteralBoundaryReviewTests {
             for blank in ["\n", "\n\n", "    \n"] {
                 let source = "See[^x]\n[^x]: `open\n" + blank + indent + #"a\*b `close"#
                 let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "continued-note.txt")
-                for format in [ExportFileType.html, .plaintext] {
+                for format in [ExportFileType.html, .plaintext, .csv] {
                     let rendered = try DocumentRenderer.render(result, to: format)
                     #expect(rendered.contains(#"a\*b"#))
                     #expect(!rendered.contains(#"a\\\*b"#))
