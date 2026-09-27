@@ -5,6 +5,52 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func orderedDelimiterChangesStartSeparateLists() throws {
+        for separator in ["\n", "\n\n"] {
+            let source = ConverterResult(sections: [.init(markdown: "1. A" + separator + "2) B")])
+            let html = try DocumentRenderer.render(source, to: .html)
+            #expect(html.components(separatedBy: "<ol").count - 1 == 2)
+            #expect(html.contains("<ol start=\"2\">"))
+            let nested = ConverterResult(sections: [.init(markdown: "1. A\n   2) Nested\n2. B")])
+            #expect(try DocumentRenderer.render(nested, to: .html).components(separatedBy: "<ol").count - 1 == 2)
+        }
+    }
+
+    @Test func missingNumberDefinitionsKeepStyleListMembership() async throws {
+        let styles = "<w:styles \(ns)><w:style w:styleId=\"List\"><w:pPr><w:numPr><w:numId w:val=\"8\"/></w:numPr></w:pPr></w:style></w:styles>"
+        let document = "<w:document \(ns)><w:body><w:p><w:pPr><w:pStyle w:val=\"List\"/></w:pPr><w:r><w:t>Styled</w:t></w:r></w:p></w:body></w:document>"
+        for definitions in [false, true] {
+            var parts = [(name: "word/document.xml", data: Array(document.utf8)), (name: "word/styles.xml", data: Array(styles.utf8))]
+            if definitions { parts.append(("word/numbering.xml", Array("<w:numbering \(ns)/>".utf8))) }
+            let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(parts), filename: "fallback.docx")
+            #expect(result.markdown() == "- Styled")
+        }
+    }
+
+    @Test func noteListsUseIndependentStoryCounters() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:suff w:val=\"space\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        func paragraph(_ text: String) -> String { "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>" + text + "</w:t></w:r></w:p>" }
+        let document = "<w:document \(ns)><w:body>" + paragraph("Body") + "<w:p><w:r><w:footnoteReference w:id=\"1\"/><w:endnoteReference w:id=\"1\"/></w:r></w:p></w:body></w:document>"
+        let notes = "<w:footnotes \(ns)><w:footnote w:id=\"1\">" + paragraph("First") + paragraph("Second") + "</w:footnote></w:footnotes>"
+        let endnotes = notes.replacingOccurrences(of: "footnote", with: "endnote")
+        let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8)), (name: "word/footnotes.xml", data: Array(notes.utf8)), (name: "word/endnotes.xml", data: Array(endnotes.utf8))]), filename: "notes.docx")
+        #expect(result.markdown().contains("1. Body"))
+        for kind in ["fn", "en"] { #expect(result.markdown().contains("[^" + kind + "1]: 1. First\n    \n    2. Second")) }
+        let plain = try DocumentRenderer.render(result, to: .plaintext)
+        #expect(plain.components(separatedBy: "1. First").count - 1 == 2)
+        #expect(plain.components(separatedBy: "2. Second").count - 1 == 2)
+    }
+
+    @Test func spreadsheetLiteralMarkupSurvivesCSVRendering() async throws {
+        for value in ["*value*", "[label](https://example.com)", "`code`", #"\*literal*"#] {
+            let sheet = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>" + value + "</t></is></c></row></sheetData></worksheet>"
+            let result = try await PicoDocsEngine.convert(data: ConverterTests.xlsx(sheetXML: sheet), filename: "literal.xlsx")
+            #expect(try DocumentRenderer.render(result, to: .csv).contains(value))
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(value))
+        }
+    }
+
+
     @Test func parenthesizedDecimalLabelsRemainOrdered() async throws {
         let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1)\"/><w:suff w:val=\"space\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
         let doc = "<w:document \(ns)><w:body><w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>Item</w:t></w:r></w:p></w:body></w:document>"
@@ -318,7 +364,7 @@ struct WordNumberingReviewTests {
         #expect(disabled.markdown().contains("I.1. Item"))
         let enabled = try await convert(format: "decimal", label: "%1.%2.", override: #"<w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:isLgl/></w:lvl></w:lvlOverride>"#)
         #expect(enabled.markdown().contains("1.1. Item"))
-        for (format, start, language, expected) in [("cardinalText", 1, "en-US", "one"), ("ordinalText", 1, "en-US", "first"), ("ordinalText", 22, "en-GB", "twenty-second"), ("cardinalText", 2, "fr-FR", "deux"), ("ordinalText", 1, "fr-FR", "premier"), ("ordinalText", 5, "fr-FR", "cinquième"), ("ordinalText", 1, "de-DE", "erste"), ("ordinalText", 21, "de-DE", "einundzwanzigste"), ("hex", 10, "en-US", "A"), ("decimalEnclosedFullstop", 1, "en-US", "⒈"), ("decimalEnclosedFullstop", 20, "en-US", "⒛"), ("decimalEnclosedFullstop", 21, "en-US", "21"), ("ordinal", 1, "fr-FR", "1er"), ("ordinal", 1, "de-DE", "1."), ("ordinal", 22, "en-US", "22nd"), ("decimalEnclosedCircle", 1, "en-US", "①"), ("decimalEnclosedCircle", 10, "en-US", "⑩"), ("decimalEnclosedCircle", 20, "en-US", "⑳"), ("decimalEnclosedCircle", 21, "en-US", "21")] {
+        for (format, start, language, expected) in [("decimalEnclosedParen", 1, "en-US", "⑴"), ("decimalEnclosedParen", 20, "en-US", "⒇"), ("decimalEnclosedParen", 21, "en-US", "21"), ("cardinalText", 1, "en-US", "one"), ("ordinalText", 1, "en-US", "first"), ("ordinalText", 22, "en-GB", "twenty-second"), ("cardinalText", 2, "fr-FR", "deux"), ("ordinalText", 1, "fr-FR", "premier"), ("ordinalText", 5, "fr-FR", "cinquième"), ("ordinalText", 1, "de-DE", "erste"), ("ordinalText", 21, "de-DE", "einundzwanzigste"), ("hex", 10, "en-US", "A"), ("decimalEnclosedFullstop", 1, "en-US", "⒈"), ("decimalEnclosedFullstop", 20, "en-US", "⒛"), ("decimalEnclosedFullstop", 21, "en-US", "21"), ("ordinal", 1, "fr-FR", "1er"), ("ordinal", 1, "de-DE", "1."), ("ordinal", 22, "en-US", "22nd"), ("decimalEnclosedCircle", 1, "en-US", "①"), ("decimalEnclosedCircle", 10, "en-US", "⑩"), ("decimalEnclosedCircle", 20, "en-US", "⑳"), ("decimalEnclosedCircle", 21, "en-US", "21")] {
             let result = try await convert(format: format, label: "%2.", start: start, language: language)
             #expect(try DocumentRenderer.render(result, to: .plaintext).contains(expected + ". Item"), "\(format) \(language): \(result.markdown()) expected \(expected)")
         }

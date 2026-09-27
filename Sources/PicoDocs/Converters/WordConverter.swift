@@ -45,7 +45,7 @@ public struct WordConverter: DocumentConverter {
         //
         // NOTE: these are CommonMark footnote markers in the canonical Markdown;
         // DocumentRenderer also renders them for the HTML and plaintext exports.
-        let notes = Self.parseNotes(archive)
+        let notes = try Self.parseNotes(archive)
         let definitions = Self.referencedNoteIDs(in: body).compactMap { id in
             notes[id].map { text in
                 // Indent continuation lines (from a manual w:br inside the note) so
@@ -496,7 +496,7 @@ public struct WordConverter: DocumentConverter {
     /// Parses footnote and endnote text (stored in separate parts) into a map
     /// keyed by reference id (`fn<id>` / `en<id>`), skipping the auto separator
     /// and continuation notes.
-    static func parseNotes(_ archive: Archive) -> [String: String] {
+    static func parseNotes(_ archive: Archive) throws -> [String: String] {
         var notes: [String: String] = [:]
         // Resolve each note part from its document relationship Target (falling
         // back to the standard name), then render it against that part's own
@@ -507,7 +507,7 @@ public struct WordConverter: DocumentConverter {
         ] {
             let part = relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
             let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part))
-            for (key, value) in parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships) {
+            for (key, value) in try parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships) {
                 notes[key] = value
             }
         }
@@ -542,22 +542,22 @@ public struct WordConverter: DocumentConverter {
         "separator", "continuationSeparator", "continuationNotice",
     ]
 
-    private static func parseNotePart(_ archive: Archive, path: String, tag: String, prefix: String, relationships: [String: String]) -> [String: String] {
+    private static func parseNotePart(_ archive: Archive, path: String, tag: String, prefix: String, relationships: [String: String]) throws -> [String: String] {
         guard let data = readEntry(archive, path: path),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
             return [:]
         }
+        // Each note part has independent counters from the body and other stories.
+        let numbering = WordListNumbering(archive: archive)
         var notes: [String: String] = [:]
         for note in (try? doc.getElementsByTag(tag).array()) ?? [] {
             guard let id = try? note.attr("w:id"), !id.isEmpty else { continue }
             // Skip only the auto separator/continuation notes; keep ordinary
             // referenced notes even when explicitly typed "normal".
             if let type = try? note.attr("w:type"), separatorNoteTypes.contains(type) { continue }
-            let text = ((try? note.getElementsByTag("w:p").array()) ?? [])
-                .map { renderInline($0, relationships: relationships).trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-                .joined(separator: " ")
+            let text = try renderBlocks(in: note, relationships: relationships, numbering: numbering)
+                .joined(separator: "\n\n")
             guard !text.isEmpty else { continue }
             notes["\(prefix)\(id)"] = text
         }

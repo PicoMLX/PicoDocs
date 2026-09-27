@@ -72,7 +72,7 @@ struct MarkdownList {
             if let current = marker(lines[next]) {
                 if current.indent < minimumIndent { break }
                 if current.indent < contentIndent {
-                    guard (current.number != nil) == list.ordered else { break }
+                    guard (current.number != nil) == list.ordered, !list.ordered || current.delimiter == first.delimiter else { break }
                     // An explicit restart following a blank line opens a new list.
                     if blank, let previous = list.items.last?.number, list.ordered, current.number != min(previous, Int.max - 1) + 1 { break }
                     index = next + 1

@@ -84,7 +84,7 @@ final class WordListNumbering {
         guard let numID = Self.canonicalID(numID), numID != "0" else { return nil }   // numId 0: numbering removed
 
         guard isResolvable, let number = numbers[numID] else {
-            return numPr == nil ? nil : "- "   // unknown definition: keep the old bullet
+            return "- "   // Resolved membership survives a missing definition, including styles.
         }
         if level == nil {
             var associatedStyle = style ?? defaultStyle
@@ -357,6 +357,9 @@ final class WordListNumbering {
             formatter.locale = Locale(identifier: language)
             formatter.numberStyle = .ordinal
             return formatter.string(from: NSNumber(value: value)) ?? String(value)
+        }
+        if format == "decimalEnclosedParen", (1...20).contains(value) {
+            return String(UnicodeScalar(0x2473 + value)!)
         }
         if format == "decimalEnclosedFullstop", (1...20).contains(value) {
             return String(UnicodeScalar(0x2487 + value)!)
