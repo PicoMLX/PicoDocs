@@ -37,11 +37,16 @@ public struct WordConverter: DocumentConverter {
 
         // Map heading bookmarks to their canonical fragments before rendering,
         // so forward internal links survive the DOCX round trip.
-        var headings = Self.headingParagraphs(in: body, relationships: relationships)
-        for textBox in try body.getElementsByTag("w:txbxContent") where Self.shouldRenderTextBox(textBox) {
-            headings += Self.headingParagraphs(in: textBox, relationships: relationships)
+        let previewNumbering = WordListNumbering(archive: archive)
+        if let failure = previewNumbering.failure { throw failure }
+        var headings: [Element] = [], titles: [String] = []
+        let observe: (Element, String) -> Void = { heading, text in
+            headings.append(heading); titles.append(MarkdownInlineParser.parse(text).plainText)
         }
-        let titles = headings.map { MarkdownInlineParser.parse(Self.renderInline($0, relationships: relationships)).plainText }
+        _ = try Self.renderBlocks(in: body, relationships: relationships, numbering: previewNumbering, headingObserver: observe)
+        for textBox in try body.getElementsByTag("w:txbxContent") where Self.shouldRenderTextBox(textBox) {
+            _ = try Self.renderBlocks(in: textBox, relationships: relationships, numbering: previewNumbering, headingObserver: observe)
+        }
         for (heading, slug) in zip(headings, MarkdownHeadingAnchors.slugs(titles)) {
             for bookmark in try heading.getElementsByTag("w:bookmarkStart").array() {
                 let name = try bookmark.attr("w:name")
@@ -106,31 +111,12 @@ public struct WordConverter: DocumentConverter {
         return ConverterResult(title: info.filename, sections: sections)
     }
 
-    /// Match the block traversal and its emitted order; headings in flattened
-    /// table cells and ignored revision wrappers do not allocate fragments.
-    private static func headingParagraphs(in container: Element, relationships: [String: String]) -> [Element] {
-        var headings: [Element] = []
-        var pending = Array(container.children().array().reversed())
-        while let element = pending.popLast() {
-            switch element.tagName().lowercased() {
-            case "w:p":
-                let properties = element.children().first { $0.tagName().lowercased() == "w:ppr" }
-                let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
-                if headingLevel(forStyle: style) != nil, !renderInline(element, relationships: relationships).trimmingCharacters(in: .whitespaces).isEmpty { headings.append(element) }
-            case "w:sdt":
-                if let content = element.children().first(where: { $0.tagName().lowercased() == "w:sdtcontent" }) { pending += content.children().array().reversed() }
-            default: break
-            }
-        }
-        return headings
-    }
-
     // MARK: - Blocks
 
     /// Renders the block-level children of a container (the body, or a content
     /// control's content) to Markdown blocks, recursing into `w:sdt` content
     /// controls (forms/templates wrap paragraphs and tables in them).
-    static func renderBlocks(in container: Element, relationships: [String: String], numbering: WordListNumbering? = nil) throws -> [String] {
+    static func renderBlocks(in container: Element, relationships: [String: String], numbering: WordListNumbering? = nil, headingObserver: ((Element, String) -> Void)? = nil) throws -> [String] {
         var blocks: [String] = []
         var previousList: MarkdownBlockParser.ListKind?
         var rootListInstance: String?
@@ -139,7 +125,7 @@ public struct WordConverter: DocumentConverter {
             try Task.checkCancellation()
             switch element.tagName().lowercased() {
             case "w:p":
-                if let markdown = renderParagraph(element, relationships: relationships, numbering: numbering), !markdown.isEmpty {
+                if let markdown = renderParagraph(element, relationships: relationships, numbering: numbering, headingObserver: headingObserver), !markdown.isEmpty {
                     let marker = MarkdownBlockParser.listMarker(markdown.trimmingCharacters(in: .whitespaces))
                     let continuation = numbering?.lastParagraphIsContinuation == true
                     let identity = marker == nil && !continuation ? nil : numbering?.lastParagraphList
@@ -236,7 +222,7 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Paragraphs
 
-    static func renderParagraph(_ paragraph: Element, relationships: [String: String], numbering: WordListNumbering? = nil) -> String? {
+    static func renderParagraph(_ paragraph: Element, relationships: [String: String], numbering: WordListNumbering? = nil, headingObserver: ((Element, String) -> Void)? = nil) -> String? {
         let properties = paragraph.children().first { $0.tagName().lowercased() == "w:ppr" }
         let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
         if style == "PicoCodeBlock" {
@@ -250,7 +236,9 @@ public struct WordConverter: DocumentConverter {
         guard !text.isEmpty else { return prefix }
 
         if let level = headingLevel(forStyle: style) {
-            return String(repeating: "#", count: level) + " " + (prefix ?? "") + text
+            let title = (prefix ?? "") + text
+            headingObserver?(paragraph, title)
+            return String(repeating: "#", count: level) + " " + title
         }
         if style?.lowercased() == "quote" {
             return text.components(separatedBy: "\n").map { "> " + $0 }.joined(separator: "\n")

@@ -21,8 +21,9 @@ public struct AttributedStringRTFExporter: DocumentExporter {
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .rtf else { throw ExporterError.notAccepted }
-        try OfficeDocumentBlocks.rejectUnsupportedCoverOnlyInput(result)
+        try OfficeDocumentBlocks.validateInput(result)
         let attributed = AttributedStringDocumentBuilder.attributedString(from: result, preserveBlockMarkers: true)
+        guard attributed.length > 0 else { throw PicoDocsError.emptyDocument }
         var properties: [NSAttributedString.DocumentAttributeKey: Any] = [.documentType: NSAttributedString.DocumentType.rtf]
         if let title = result.title { properties[.title] = title }
         if let author = result.author { properties[.author] = author }

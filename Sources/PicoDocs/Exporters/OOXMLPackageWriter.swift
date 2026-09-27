@@ -35,6 +35,10 @@ struct OOXMLPackageWriter {
 
     /// Adds a UTF-8 XML part at `path` (e.g. "word/document.xml").
     mutating func addXML(_ path: String, _ xml: String) throws {
+        let limit = path == "word/numbering.xml" ? 8 * 1024 * 1024 : 32 * 1024 * 1024
+        if path.hasPrefix("word/"), xml.utf8.count > limit {
+            throw ExporterError.serializationFailed("OOXML part \(path) exceeds the reader-compatible \(limit)-byte limit")
+        }
         try addData(path, Data(xml.utf8))
     }
 
@@ -87,6 +91,23 @@ struct OOXMLPackageWriter {
 
     /// XML standalone declaration used at the top of every part.
     static let xmlDeclaration = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+
+    /// Document XML drops forbidden scalars; check the same visible input before export.
+    static func sanitizedDocument(_ result: ConverterResult) -> ConverterResult {
+        func clean(_ text: String) -> String {
+            var output = ""
+            for scalar in text.unicodeScalars where isValidXMLScalar(scalar) { output.unicodeScalars.append(scalar) }
+            return output
+        }
+        var result = result
+        result.title = result.title.map(clean); result.author = result.author.map(clean)
+        for index in result.sections.indices where result.sections[index].kind != .image {
+            result.sections[index].markdown = clean(result.sections[index].markdown)
+            result.sections[index].title = result.sections[index].title.map(clean)
+            if let csv = result.sections[index].metadata["csv"] { result.sections[index].metadata["csv"] = clean(csv) }
+        }
+        return result
+    }
 
     /// Escapes text content for an XML element body.
     ///

@@ -24,8 +24,10 @@ public struct PPTXExporter: DocumentExporter {
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .pptx else { throw ExporterError.notAccepted }
-        try OfficeDocumentBlocks.rejectUnsupportedCoverOnlyInput(result)
-        let result = PicoDocsEngine.withSynthesizedImageReferences(result)
+        let sanitized = OOXMLPackageWriter.sanitizedDocument(result)
+        guard !PicoDocsEngine.isEmptyForExport(sanitized) else { throw PicoDocsError.emptyDocument }
+        try OfficeDocumentBlocks.validateInput(sanitized)
+        let result = PicoDocsEngine.withSynthesizedImageReferences(sanitized)
 
         let slides = try Self.slides(from: result)
         let count = max(slides.count, 1)
@@ -268,6 +270,10 @@ public struct PPTXExporter: DocumentExporter {
             case .emphasis(let children):
                 output += runs(children, bold: bold, italic: true, link: link, fragmentSlides: fragmentSlides, relationships: &relationships)
             case .link(let label, let destination):
+                guard !destination.isEmpty else {
+                    output += runs(label, bold: bold, italic: italic, fragmentSlides: fragmentSlides, relationships: &relationships)
+                    continue
+                }
                 let id = "hyperlink\(relationships.count + 1)"
                 let jump: Bool
                 if destination.hasPrefix("#") {

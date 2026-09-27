@@ -92,7 +92,7 @@ enum AttributedStringDocumentBuilder {
         case .blockquote(let lines):
             for line in lines {
                 if preserveBlockMarkers { output.append(NSAttributedString(string: "> ", attributes: [.font: bodyFont()])) }
-                output.append(inline(line, italic: true, escapeLiterals: preserveBlockMarkers))
+                output.append(inline(line, italic: !preserveBlockMarkers, escapeLiterals: preserveBlockMarkers))
                 output.append(NSAttributedString(string: "\n"))
             }
 

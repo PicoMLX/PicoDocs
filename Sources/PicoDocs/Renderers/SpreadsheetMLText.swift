@@ -2,21 +2,44 @@ import Foundation
 
 /// SpreadsheetML uses UTF-16 escape tokens in addition to XML escaping.
 enum SpreadsheetMLText {
-    private static let encodePattern = try! NSRegularExpression(pattern: "_(?=x[0-9A-Fa-f]{4}_)")
     private static func forbidden(_ scalar: Unicode.Scalar) -> Bool {
         (scalar.value < 0x20 && ![9, 10, 13].contains(scalar.value)) || scalar.value == 0xFFFE || scalar.value == 0xFFFF
     }
 
+    private static func startsEscape(_ scalars: String.UnicodeScalarView, at start: String.Index) -> Bool {
+        var index = scalars.index(after: start)
+        guard index < scalars.endIndex, scalars[index] == "x" else { return false }
+        for _ in 0..<4 {
+            index = scalars.index(after: index)
+            guard index < scalars.endIndex, "0123456789abcdefABCDEF".unicodeScalars.contains(scalars[index]) else { return false }
+        }
+        index = scalars.index(after: index)
+        return index < scalars.endIndex && scalars[index] == "_"
+    }
+
     static func encode(_ text: String) -> String {
-        let hasEscapes = text.contains("_x")
-        guard hasEscapes || text.unicodeScalars.contains(where: forbidden) else { return text }
-        let protected = hasEscapes ? encodePattern.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "_x005F_") : text
-        return protected.unicodeScalars.map { scalar in
-            if forbidden(scalar) {
-                return String(format: "_x%04X_", scalar.value)
-            }
-            return String(scalar)
-        }.joined()
+        var output = ""
+        let scalars = text.unicodeScalars
+        for index in scalars.indices {
+            let scalar = scalars[index]
+            if scalar == "_", startsEscape(scalars, at: index) { output += "_x005F_" }
+            else if forbidden(scalar) { output += String(format: "_x%04X_", scalar.value) }
+            else { output.unicodeScalars.append(scalar) }
+        }
+        return output
+    }
+
+    static func xmlEncodedByteCount(_ text: String) -> Int {
+        var bytes = 0
+        let scalars = text.unicodeScalars
+        for index in scalars.indices {
+            let scalar = scalars[index], value = scalar.value
+            if forbidden(scalar) || (scalar == "_" && startsEscape(scalars, at: index)) { bytes += 7 }
+            else if scalar == "&" { bytes += 5 }
+            else if scalar == "<" || scalar == ">" { bytes += 4 }
+            else { bytes += value <= 0x7F ? 1 : value <= 0x7FF ? 2 : value <= 0xFFFF ? 3 : 4 }
+        }
+        return bytes
     }
 
     private static let pattern = try! NSRegularExpression(pattern: "_x([0-9A-Fa-f]{4})_")

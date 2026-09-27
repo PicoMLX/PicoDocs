@@ -24,10 +24,13 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .docx else { throw ExporterError.notAccepted }
-        try OfficeDocumentBlocks.rejectUnsupportedCoverOnlyInput(result)
-        let result = PicoDocsEngine.withSynthesizedImageReferences(result)
+        let sanitized = OOXMLPackageWriter.sanitizedDocument(result)
+        guard !PicoDocsEngine.isEmptyForExport(sanitized) else { throw PicoDocsError.emptyDocument }
+        try OfficeDocumentBlocks.validateInput(sanitized)
+        let result = PicoDocsEngine.withSynthesizedImageReferences(sanitized)
 
         let blocks = OfficeDocumentBlocks.parse(result)
+        guard !blocks.isEmpty else { throw PicoDocsError.emptyDocument }
         let builder = Builder(images: Self.imageIndex(result.sections), blocks: blocks)
         for block in blocks {
             builder.append(block)
@@ -87,12 +90,21 @@ public struct WordprocessingMLExporter: DocumentExporter {
         let budget: OfficeMediaDecodeBudget
         private var attemptedDecode = false
         private var cachedData: Data?
+        var emitted = false
         init(base64: String, mediaFilename: String, metadata: [String: String], budget: OfficeMediaDecodeBudget) {
             self.base64 = base64; self.mediaFilename = mediaFilename; self.metadata = metadata; self.budget = budget
         }
         func decodedData() throws -> Data? {
-            if !attemptedDecode { cachedData = try budget.decode(base64); attemptedDecode = true }
+            if !attemptedDecode { cachedData = try budget.decodeCandidate(base64); attemptedDecode = true }
             return cachedData
+        }
+        func commitDecode() throws {
+            guard !emitted, let data = cachedData else { return }
+            try budget.reserve(data); emitted = true
+        }
+        func releaseUnusedDecode() {
+            guard !emitted, cachedData != nil else { return }
+            cachedData = nil; attemptedDecode = false
         }
     }
 
@@ -108,7 +120,10 @@ public struct WordprocessingMLExporter: DocumentExporter {
             func unique(_ candidates: [IndexedImage]) throws -> (image: IndexedImage?, ambiguous: Bool) {
                 var match: IndexedImage?
                 for candidate in candidates where try candidate.decodedData() != nil {
-                    if match != nil { return (nil, true) }
+                    if let match {
+                        match.releaseUnusedDecode(); candidate.releaseUnusedDecode()
+                        return (nil, true)
+                    }
                     match = candidate
                 }
                 return (match, false)
@@ -194,6 +209,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         private var relCounter = 0
         private var numberingRelAdded = false
         private var drawingCounter = 0
+        private var externalLinkRelationships: [String: String] = [:]
         private var emittedMediaRel: [String: String] = [:]   // media filename -> relID
         private var nextOrderedNumId = 2                       // 1 is reserved for bullets
 
@@ -338,13 +354,18 @@ public struct WordprocessingMLExporter: DocumentExporter {
                         }
                         continue
                     }
-                    let id = nextRelID()
-                    relationships.append(Relationship(
-                        id: id,
-                        type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
-                        target: destination,
-                        external: true
-                    ))
+                    let id: String
+                    if let existing = externalLinkRelationships[destination] { id = existing }
+                    else {
+                        id = nextRelID()
+                        relationships.append(Relationship(
+                            id: id,
+                            type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+                            target: destination,
+                            external: true
+                        ))
+                        externalLinkRelationships[destination] = id
+                    }
                     out += "<w:hyperlink r:id=\"\(id)\">\(renderRuns(label, bold: bold, italic: italic))</w:hyperlink>"
                 case .image(let alt, let source):
                     out += imageRun(alt: alt, source: source) ?? textRun(alt, bold: bold, italic: italic, monospace: false)
@@ -385,6 +406,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             if let existing = emittedMediaRel[filename] {
                 relID = existing
             } else {
+                try image.commitDecode()
                 mediaExtensions.insert(ext)
                 media.append((filename, data))
                 relID = nextRelID()

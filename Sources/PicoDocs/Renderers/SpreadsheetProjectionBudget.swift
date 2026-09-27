@@ -31,6 +31,8 @@ struct SpreadsheetProjectionBudget {
     mutating func reserveValue(_ value: String) throws {
         let bytes = value.utf8.count
         guard bytes <= remaining / 5 else { throw PicoDocsError.parsingError }
-        remaining -= bytes * 5
+        let encodedBytes = SpreadsheetMLText.xmlEncodedByteCount(value)
+        guard encodedBytes <= remaining else { throw PicoDocsError.parsingError }
+        remaining -= max(bytes * 5, encodedBytes)
     }
 }

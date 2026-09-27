@@ -8,6 +8,107 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func generatedWordPartsEnforceReaderCompatibleLimits() throws {
+        var package = try OOXMLPackageWriter()
+        for (path, limit) in [("word/document.xml", 32 * 1024 * 1024), ("word/numbering.xml", 8 * 1024 * 1024), ("word/_rels/document.xml.rels", 32 * 1024 * 1024)] {
+            #expect(throws: ExporterError.self) { try package.addXML(path, String(repeating: "x", count: limit + 1)) }
+        }
+        // Escaping must be measured after expansion, before the Data/ZIP copy.
+        let expanded = OOXMLPackageWriter.escape(String(repeating: "&", count: 7 * 1024 * 1024))
+        #expect(throws: ExporterError.self) { try package.addXML("word/document.xml", expanded) }
+    }
+
+    @Test func sparseMarkdownAndCSVAreRejectedBeforeOfficeProjection() throws {
+        let table = ConverterResult(sections: [.init(markdown: String(repeating: "|\n", count: 1_000_000))])
+        #expect(throws: ExporterError.self) { try PicoDocsEngine.write(table, to: .xlsx) }
+        let csv = ConverterResult(sections: [.init(markdown: "", metadata: ["csv": String(repeating: "\n", count: 1_000_000)])])
+        for format in [ExportableFileType.docx, .rtf, .pptx] {
+            #expect(throws: ExporterError.self) { try PicoDocsEngine.write(csv, to: format) }
+        }
+    }
+
+    @Test func ambiguousLargeCandidatesDoNotChargeEmittedMediaBudget() throws {
+        let payload = Data(repeating: 1, count: 32 * 1024 * 1024).base64EncodedString()
+        func image(_ path: String, bytes: String) -> DocumentSection { .init(kind: .image, markdown: "", sourcePath: path, metadata: ["base64": bytes, "mimeType": "image/png"]) }
+        let result = ConverterResult(sections: [.init(markdown: "![Before](before.png) ![Ambiguous](logo.png) ![After](after.png)"), image("before.png", bytes: "AQID"), image("a/logo.png", bytes: payload), image("b/logo.png", bytes: payload), image("after.png", bytes: "BAUG")])
+        let data = try PicoDocsEngine.write(result, to: .docx)
+        let archive = try #require(Archive(data: data, accessMode: .read))
+        #expect(archive.filter { $0.path.hasPrefix("word/media/") }.count == 2)
+        #expect(try xml(data, "word/document.xml").contains("Ambiguous"))
+    }
+
+    @Test func emptyStructuresOnlyExportWhereTheyHaveARepresentation() throws {
+        for kind in [SectionKind.slide, .sheet] {
+            let result = ConverterResult(sections: [.init(kind: kind, markdown: "")])
+            for format in [ExportableFileType.docx, .rtf] {
+                #expect(throws: PicoDocsError.emptyDocument) { try PicoDocsEngine.write(result, to: format) }
+            }
+            #if canImport(AppKit)
+            #expect(throws: PicoDocsError.emptyDocument) { try AttributedStringDOCXExporter().write(result, format: .docx) }
+            #endif
+        }
+        let slide = try PicoDocsEngine.write(ConverterResult(sections: [.init(kind: .slide, markdown: "")]), to: .pptx)
+        #expect(try xml(slide, "ppt/slides/slide1.xml").contains("p:sld"))
+        let sheet = try PicoDocsEngine.write(ConverterResult(sections: [.init(kind: .sheet, markdown: "")]), to: .xlsx)
+        #expect(try xml(sheet, "xl/worksheets/sheet1.xml").contains("worksheet"))
+    }
+
+    @Test func emptyPPTXLinksKeepFormattedLabelsWithoutRelationships() throws {
+        let data = try PicoDocsEngine.write(markdown: "[**label**]()", to: .pptx)
+        let slide = try xml(data, "ppt/slides/slide1.xml")
+        #expect(slide.contains("label")); #expect(slide.contains(#"b="1""#)); #expect(!slide.contains("a:hlinkClick"))
+        #expect(!(try xml(data, "ppt/slides/_rels/slide1.xml.rels")).contains("/hyperlink"))
+    }
+
+    @Test func spreadsheetBudgetCountsEncodedXMLExpansion() throws {
+        for value in ["\0", "_x0000_", "\u{FFFE}", "&<>😀"] {
+            #expect(SpreadsheetMLText.xmlEncodedByteCount(value) == OOXMLPackageWriter.escape(SpreadsheetMLText.encode(value)).utf8.count)
+        }
+        var exact = SpreadsheetProjectionBudget(maximumBytes: 7)
+        try exact.reserveValue("\0")
+        #expect(throws: PicoDocsError.parsingError) { try exact.reserveValue("\0") }
+        var tooSmall = SpreadsheetProjectionBudget(maximumBytes: 6)
+        #expect(throws: PicoDocsError.parsingError) { try tooSmall.reserveValue("\0") }
+        let row = String(repeating: "\0", count: 32_767)
+        let result = ConverterResult(sections: [.init(kind: .sheet, markdown: "", metadata: ["csv": Array(repeating: row, count: 390).joined(separator: "\n")])])
+        #expect(throws: ExporterError.self) { try PicoDocsEngine.write(result, to: .xlsx) }
+    }
+
+    @Test func markerPreservedRTFQuotesDoNotGainSemanticEmphasis() async throws {
+        for source in ["> Quote", "> *Explicit*"] {
+            let result = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(markdown: source, to: .rtf), filename: "quote.rtf")
+            #expect(result.markdown() == source)
+        }
+    }
+
+    @Test func numberedHeadingBookmarksUseVisibleHeadingSlugs() async throws {
+        let ns = #"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#
+        let number = #"<w:numPr><w:numId w:val="1"/></w:numPr>"#
+        let document = "<w:document \(ns)><w:body><w:p><w:hyperlink w:anchor='Intro'><w:r><w:t>Forward</w:t></w:r></w:hyperlink></w:p><w:p><w:pPr><w:pStyle w:val='Heading1'/>\(number)</w:pPr><w:bookmarkStart w:id='1' w:name='Intro'/><w:r><w:t>Intro</w:t></w:r></w:p><w:p><w:pPr>\(number)</w:pPr><w:r><w:t>Item</w:t></w:r></w:p></w:body></w:document>"
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId='1'><w:lvl w:ilvl='0'><w:numFmt w:val='decimal'/></w:lvl></w:abstractNum><w:num w:numId='1'><w:abstractNumId w:val='1'/></w:num></w:numbering>"
+        let input = PagesConverterTests.makeZip([("word/document.xml", Array(document.utf8)), ("word/numbering.xml", Array(numbering.utf8))])
+        let result = try await PicoDocsEngine.convert(data: input, filename: "bookmarks.docx")
+        #expect(result.markdown().contains("[Forward](#1-intro)")); #expect(result.markdown().contains("# 1. Intro")); #expect(result.markdown().contains("2. Item"))
+        #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains("<w:hyperlink w:anchor="))
+    }
+
+    @Test func forbiddenOnlyXMLContentDoesNotExportAsAnEmptyDocument() throws {
+        for format in [ExportableFileType.docx, .pptx] {
+            #expect(throws: PicoDocsError.emptyDocument) { try PicoDocsEngine.write(markdown: "\0", to: format) }
+            #expect(throws: PicoDocsError.emptyDocument) { try PicoDocsEngine.write(ConverterResult(sections: [.init(markdown: "", metadata: ["csv": "\0"])]), to: format) }
+        }
+        let sheet = try PicoDocsEngine.write(ConverterResult(sections: [.init(kind: .sheet, markdown: "", metadata: ["csv": "\0"])]), to: .xlsx)
+        #expect(try xml(sheet, "xl/worksheets/sheet1.xml").contains("_x0000_"))
+    }
+
+    @Test func repeatedDOCXLinkTargetsReuseOneRelationship() throws {
+        let data = try PicoDocsEngine.write(markdown: String(repeating: "[x](https://example.com) ", count: 10_000), to: .docx)
+        let relationships = try xml(data, "word/_rels/document.xml.rels")
+        #expect(relationships.components(separatedBy: "/hyperlink").count - 1 == 1)
+        #expect(try xml(data, "word/document.xml").components(separatedBy: "<w:hyperlink ").count - 1 == 10_000)
+    }
+
+
     @Test func emptyCSVMetadataDoesNotHideOrdinaryBodyText() throws {
         let result = ConverterResult(sections: [.init(markdown: "Keep this body", metadata: ["csv": ""])])
         #expect(OfficeDocumentBlocks.parse(result) == [.paragraph("Keep this body")])

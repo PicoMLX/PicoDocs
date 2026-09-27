@@ -21,7 +21,7 @@ public struct XLSXExporter: DocumentExporter {
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .xlsx else { throw ExporterError.notAccepted }
-        try OfficeDocumentBlocks.rejectUnsupportedCoverOnlyInput(result)
+        try OfficeDocumentBlocks.validateInput(result)
         let result = PicoDocsEngine.withSynthesizedImageReferences(result)
 
         var sheets: [(name: String, rows: [[String]])] = []

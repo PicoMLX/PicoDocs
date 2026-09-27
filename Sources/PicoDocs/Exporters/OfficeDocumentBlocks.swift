@@ -5,9 +5,43 @@ import Foundation
 enum OfficeDocumentBlocks {
     /// These writers do not serialize result.cover; do not silently discard it
     /// when it is the only payload. Custom exporters remain free to support it.
-    static func rejectUnsupportedCoverOnlyInput(_ result: ConverterResult) throws {
+    static func validateInput(_ result: ConverterResult) throws {
         if !(result.cover?.isEmpty ?? true), PicoDocsEngine.isEmptyForExport(result, includingCover: false) {
             throw PicoDocsError.emptyDocument
+        }
+        var remaining = 64 * 1024 * 1024
+        func charge(_ bytes: Int) throws {
+            guard bytes <= remaining else { throw ExporterError.serializationFailed("Office projection exceeds the supported 64 MiB budget") }
+            remaining -= bytes
+        }
+        for section in result.sections where section.kind != .image {
+            if let title = section.title { try charge(title.utf8.count * 7) }
+            if let csv = section.metadata["csv"], !csv.isEmpty {
+                // Bound a single field before the streaming parser decodes it.
+                guard csv.utf8.count <= remaining / 7 else { throw ExporterError.serializationFailed("Office CSV projection exceeds the supported byte budget") }
+                var rows = 0, columns = 0, cells = 0
+                try CSVConverter.forEachField(csv) { field, endsRow in
+                    columns += 1; cells += 1
+                    guard columns <= 16_384, cells <= 1_000_000, rows < 1_048_576 else {
+                        throw ExporterError.serializationFailed("Office CSV projection exceeds supported dimensions")
+                    }
+                    try charge(field.utf8.count * 7 + 64)
+                    if endsRow { try charge(32); rows += 1; columns = 0 }
+                }
+            } else {
+                var hasContent = false, tableLine = false
+                for scalar in section.markdown.unicodeScalars {
+                    let value = scalar.value
+                    let bytes = value <= 0x7F ? 1 : value <= 0x7FF ? 2 : value <= 0xFFFF ? 3 : 4
+                    try charge(bytes * 7)
+                    if scalar == "\n" || scalar == "\r" { hasContent = false; tableLine = false; continue }
+                    if !hasContent, !CharacterSet.whitespaces.contains(scalar) {
+                        hasContent = true; tableLine = scalar == "|"
+                        try charge(128) // line/block/row storage before Markdown parsing
+                    }
+                    if tableLine, scalar == "|" { try charge(64) } // conservative cell storage
+                }
+            }
         }
     }
 
