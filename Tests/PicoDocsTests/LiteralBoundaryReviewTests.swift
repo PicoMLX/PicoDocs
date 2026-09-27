@@ -1,8 +1,49 @@
 import Foundation
 import Testing
+import SwiftSoup
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func nestedFencesUseTheSameStructuralOutdentRuleAsLists() async throws {
+        for marker in ["1.", "123."] {
+            for structural in ["# heading ", "> quote ", "- item ", "| cell "] {
+                let source = marker + " item\n" + String(repeating: " ", count: marker.count + 1) + "```\n  " + structural + #"\*"#
+                let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "structural-outdent.txt")
+                for format in [ExportFileType.html, .plaintext, .csv] {
+                    let rendered = try DocumentRenderer.render(result, to: format)
+                    #expect(rendered.contains(#"\*"#)); #expect(!rendered.contains(#"\\\*"#))
+                }
+            }
+        }
+    }
+
+    @Test func PagesFallbackRetainsValidLooseListParagraphs() async throws {
+        typealias B = PagesConverterTests
+        let source = "- item\n\n  continuation\n\noutside"
+        #expect(PagesConverter.normalize(source) == source)
+        let data = B.makeZip([(name: "Index/Other.iwa", data: B.snappyFrame(B.makeIWAStream(runs: [source])))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "loose-fallback.pages")
+        let html = try DocumentRenderer.render(result, to: .html)
+        let document = try SwiftSoup.parse(html)
+        let item = try #require(document.getElementsByTag("li").first())
+        #expect(try item.text().contains("continuation"))
+        #expect(try !item.text().contains("outside"))
+    }
+
+    @Test func PagesTableAttachmentsSplitCodeContextButImagePlaceholdersDoNot() async throws {
+        typealias B = PagesConverterTests
+        let source = "`open\u{FFFC}after " + #"\* `close"#
+        let data = B.makeListPagesFile(text: source, style: .bullet, restarts: [], tableCell: "Cell")
+        let result = try await PicoDocsEngine.convert(data: data, filename: "code-table.pages")
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            let rendered = try DocumentRenderer.render(result, to: format)
+            #expect(rendered.contains(#"after \* `close"#)); #expect(!rendered.contains(#"after \\\*"#))
+        }
+        let image = try await PicoDocsEngine.convert(data: B.makePagesFile(paragraphs: [source]), filename: "code-image.pages")
+        let text = try DocumentRenderer.render(image, to: .plaintext)
+        #expect(text.contains(#"after \*"#)); #expect(!text.contains(#"after \\\*"#))
+    }
+
     @Test func removedFootnotesRetainBodyParagraphBoundaries() async throws {
         let source = "`open\n[^x]: note\nclose " + #"\* `end"#
         let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "body-around-note.txt")

@@ -142,7 +142,7 @@ enum IWATable {
         // Body storages in document (stream) order; each carries its own text and
         // run tables (paragraph/character styles, smart fields) and attachments.
         for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
-            guard let body = bodyStorage(storage, objects: objects) else { continue }   // kind 0 only
+            guard let body = bodyStorage(storage, objects: objects, inlineTableTiles: tiles) else { continue }   // kind 0 only
             let attachments = attachmentRuns(in: storage)
             let markers = body.units.indices.filter { body.units[$0] == 0xFFFC }
             guard markers.count == attachments.count else { return nil }    // can't map 1:1
@@ -219,7 +219,7 @@ enum IWATable {
     /// Builds a `BodyStorage` for a kind-0 text storage, or nil for a header/footer
     /// (non-body) storage.
     private static func bodyStorage(_ storage: IWAArchive.Object,
-                                    objects: [UInt64: IWAArchive.Object]) -> BodyStorage? {
+                                    objects: [UInt64: IWAArchive.Object], inlineTableTiles: Set<UInt64> = []) -> BodyStorage? {
         guard let text = bodyStorageText(storage) else { return nil }       // kind 0 only
         let characterStyles = indexedReferences(in: storage, field: 8)
         let smartFields = indexedReferences(in: storage, field: 11)
@@ -236,7 +236,18 @@ enum IWATable {
             guard remainingStyleWork > 0 else { break }
             if let marker = listMarker(of: id, in: objects, remainingWork: &remainingStyleWork) { listMarkers[id] = marker }
         }
-        return BodyStorage(units: Array(text.utf16), escapedBackslashes: visibleEscapeProjection(text, boundaries: Set(characterStyles.map(\.offset) + smartFields.map(\.offset))),
+        let units = Array(text.utf16)
+        var tableOffsets: Set<Int> = []
+        if !inlineTableTiles.isEmpty {
+            let markers = units.indices.filter { units[$0] == 0xFFFC }
+            let attachments = attachmentRuns(in: storage)
+            if markers.count == attachments.count {
+                for (marker, attachment) in zip(markers, attachments) {
+                    if reachableTile(from: attachment.objectID, objects: objects, tiles: inlineTableTiles) != nil { tableOffsets.insert(marker) }
+                }
+            }
+        }
+        return BodyStorage(units: units, escapedBackslashes: visibleEscapeProjection(text, boundaries: Set(characterStyles.map(\.offset) + smartFields.map(\.offset)), hardBoundaries: tableOffsets),
                            paragraphStyles: indexedReferences(in: storage, field: 5),
                            characterStyles: characterStyles, smartFields: smartFields,
                            listStyles: listStyles, listRestarts: listRestarts(in: storage),
@@ -244,14 +255,14 @@ enum IWATable {
     }
 
     /// Escape the rendered stream, then project insertions back to storage indices.
-    private static func visibleEscapeProjection(_ text: String, boundaries: Set<Int>) -> (after: [Int], before: Set<Int>) {
+    private static func visibleEscapeProjection(_ text: String, boundaries: Set<Int>, hardBoundaries: Set<Int> = []) -> (after: [Int], before: Set<Int>) {
         let units = Array(text.utf16)
         var offsets: [Int] = [], visibleBoundaries: Set<Int> = []
         for index in units.indices {
             if boundaries.contains(index) { visibleBoundaries.insert(offsets.count) }
-            if units[index] != 0xFFFC && !isStrippedControl(units[index]) { offsets.append(index) }
+            if hardBoundaries.contains(index) || (units[index] != 0xFFFC && !isStrippedControl(units[index])) { offsets.append(index) }
         }
-        let visible = String(decoding: offsets.map { units[$0] }, as: UTF16.self)
+        let visible = String(decoding: offsets.map { hardBoundaries.contains($0) ? 0x0A : units[$0] }, as: UTF16.self)
         let projection = MarkdownLiteral.escapeProjection(visible, boundaries: visibleBoundaries, paragraphSeparators: [0x0A, 0x0D, 0x2029], softSeparators: [0x2028, 0x0B, 0x0C])
         var after = Array(repeating: 0, count: units.count), before: Set<Int> = []
         for (index, source) in offsets.enumerated() {

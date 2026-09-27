@@ -6,7 +6,7 @@ enum MarkdownLiteral {
     /// literal backslashes before the renderer decodes generated escapes.
     static func escapeBackslashes(_ text: String, paragraphEndLines: Set<Int> = []) -> String {
         var inFence = false
-        var fenceListBase: Int?
+        var fenceList: (base: Int, content: Int)?
         var inNote = false
         var lists: [(base: Int, content: Int)] = []
         var followsBlank = false
@@ -29,8 +29,9 @@ enum MarkdownLiteral {
         }
         for (index, line) in lines.enumerated() {
             let blank = line.trimmingCharacters(in: .whitespaces).isEmpty
-            if inFence, let base = fenceListBase, !blank, line.prefix(while: { $0 == " " }).count < base + 2 {
-                inFence = false; fenceListBase = nil
+            if inFence, let container = fenceList, !blank,
+               !DocumentRenderer.literalListContains(line, base: container.base, content: container.content) {
+                inFence = false; fenceList = nil
             }
             // Footnote extraction joins continued paragraphs into one inline value.
             if !inFence, inNote, line.hasPrefix("    ") || line.hasPrefix("\t") || (blank && followedByNoteContinuation[index]) {
@@ -43,9 +44,8 @@ enum MarkdownLiteral {
                     flushProse(); inNote = false
                 }
                 if DocumentRenderer.literalFootnoteDefinition(line) { inNote = true }
-                let indent = line.prefix { $0 == " " }.count
                 var exitedList = false
-                while let last = lists.last, indent < (followsBlank ? last.content : last.base + 2) {
+                while let last = lists.last, !DocumentRenderer.literalListContains(line, base: last.base, content: last.content, afterBlank: followsBlank) {
                     lists.removeLast(); exitedList = true
                 }
                 if exitedList { flushProse() }
@@ -55,7 +55,7 @@ enum MarkdownLiteral {
             if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
                 flushProse()
                 inFence.toggle()
-                fenceListBase = inFence ? lists.last?.base : nil
+                fenceList = inFence ? lists.last : nil
                 output += line
                 if index < lines.count - 1 { output += "\n" }
             } else if inFence {

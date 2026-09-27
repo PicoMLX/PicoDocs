@@ -450,26 +450,26 @@ public enum DocumentRenderer {
         let lines = markdown.components(separatedBy: "\n")
         var i = 0
         var inCodeFence = false
-        var fenceListBase: Int?
+        var fenceList: (base: Int, content: Int)?
         var lists: [(base: Int, content: Int)] = []
         var followsBlank = false
         var inNote = false
         while i < lines.count {
             let line = lines[i].trimmingCharacters(in: .whitespaces)
-            if inCodeFence, let base = fenceListBase, !line.isEmpty, indentWidth(lines[i]) < base + 2 {
-                inCodeFence = false; fenceListBase = nil
+            if inCodeFence, let container = fenceList, !line.isEmpty,
+               !literalListContains(lines[i], base: container.base, content: container.content) {
+                inCodeFence = false; fenceList = nil
             }
             if !inCodeFence, !line.isEmpty {
                 if inNote, !lines[i].hasPrefix("    "), !lines[i].hasPrefix("\t") { inNote = false }
                 if literalFootnoteDefinition(lines[i]) { inNote = true }
-                let indent = indentWidth(lines[i])
-                while let last = lists.last, indent < (followsBlank ? last.content : last.base + 2) { lists.removeLast() }
+                while let last = lists.last, !literalListContains(lines[i], base: last.base, content: last.content, afterBlank: followsBlank) { lists.removeLast() }
                 if let item = literalListIndent(lines, index: i) { lists.append(item) }
             }
             followsBlank = line.isEmpty
             if line.hasPrefix("```") {
                 inCodeFence.toggle()
-                fenceListBase = inCodeFence ? lists.last?.base : nil
+                fenceList = inCodeFence ? lists.last : nil
                 i += 1
                 continue
             }
@@ -612,7 +612,7 @@ public enum DocumentRenderer {
                         guard next < lines.count, indentWidth(lines[next]) >= contentColumn else { break }
                         items[items.count - 1] += "\n"
                         i = next
-                    } else if !isBlank(raw), !items.isEmpty, (indent >= contentColumn || (indent >= base + 2 && !isStructuralContinuation(itemLine))) {
+                    } else if !isBlank(raw), !items.isEmpty, literalListContains(raw, base: base, content: contentColumn) {
                         items[items.count - 1] += "\n" + String(raw.dropFirst(min(indent, contentColumn)))
                         i += 1
                     } else {
@@ -671,6 +671,12 @@ public enum DocumentRenderer {
             if after < line.endIndex, line[after] == " " { return .ordered }
         }
         return nil
+    }
+
+    /// Match the list parser's continuation grammar for both literal escaping and CSV.
+    static func literalListContains(_ line: String, base: Int, content: Int, afterBlank: Bool = false) -> Bool {
+        let indent = indentWidth(line)
+        return indent >= content || (!afterBlank && indent >= base + 2 && !isStructuralContinuation(line.trimmingCharacters(in: .whitespaces)))
     }
 
     private static func indentWidth(_ line: String) -> Int {

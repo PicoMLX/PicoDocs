@@ -173,9 +173,10 @@ public struct PagesConverter: DocumentConverter {
 
     /// Folds iWork's line/paragraph separators to `\n`, trims each line, and
     /// collapses runs of blank lines so the body reads as clean paragraphs. The one
-    /// exception to trimming: a line directly under a list item (no blank line
-    /// between) keeps its leading spaces, which `IWATable` emits as the continuation
-    /// indent of a multi-line item — trimming them would split the item.
+    /// exception to trimming: an indented continuation under a list item keeps
+    /// its leading spaces, including blank-separated paragraphs in loose items.
+    /// `IWATable` also emits this indentation for multi-line list content; trimming
+    /// it would split the item. The renderer validates the actual content column.
     static func normalize(_ text: String, preservingLeadingIndent: Bool = false) -> String {
         var unified = text
         for separator in ["\r\n", "\r", "\u{2028}", "\u{2029}", "\u{000B}", "\u{000C}"] {
