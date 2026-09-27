@@ -225,9 +225,8 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
             case .blockquote(let lines):
                 let pPr = "<w:pPr><w:pStyle w:val=\"Quote\"/></w:pPr>"
-                for line in lines {
-                    body += paragraph(pPr: pPr, content: inlineRuns(line))
-                }
+                let content = lines.map(inlineRuns).joined(separator: "<w:r><w:br/></w:r>")
+                body += paragraph(pPr: pPr, content: content)
 
             case .list(let list):
                 appendList(list)

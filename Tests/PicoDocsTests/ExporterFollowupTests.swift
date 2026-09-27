@@ -8,6 +8,54 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    #if canImport(AppKit)
+    @Test func separateRTFQuoteBlocksStaySeparate() async throws {
+        let data = try PicoDocsEngine.write(markdown: "> First\n\n> Second", to: .rtf)
+        let result = try await PicoDocsEngine.convert(data: data, filename: "quotes.rtf")
+        let quotes = MarkdownBlockParser.parse(result.markdown()).compactMap { block -> [String]? in
+            if case .blockquote(let lines) = block { return lines }; return nil
+        }
+        #expect(quotes.count == 2); #expect(quotes.allSatisfy { $0.count == 1 })
+    }
+
+    @Test func RTFTablesRetainRowsCellsEscapesAndInlineFormatting() async throws {
+        let source = #"| Header | Other |"# + "\n| --- | --- |\n" + #"| **Bold** | `a\|b` |"# + "\n" + #"| slash\\value | first<br>second |"#
+        let original = ConverterResult(sections: [.init(markdown: source)])
+        let data = try PicoDocsEngine.write(original, to: .rtf)
+        let result = try await PicoDocsEngine.convert(data: data, filename: "table.rtf")
+        func rows(_ value: ConverterResult) -> [[[MarkdownInline]]] {
+            OfficeDocumentBlocks.parse(value).flatMap { block -> [[[MarkdownInline]]] in
+                if case .table(let rows) = block { return rows.map { $0.map { MarkdownInlineParser.parse($0, tableCell: true) } } }
+                return []
+            }
+        }
+        #expect(rows(result) == rows(original))
+        #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains("<w:tbl>"))
+        #expect(try xml(PicoDocsEngine.write(result, to: .xlsx), "xl/worksheets/sheet1.xml").contains("r=\"B3\""))
+    }
+    #endif
+
+    @Test func customExporterReceivesCoverOnlyStructuredResult() throws {
+        struct CoverExporter: DocumentExporter {
+            func accepts(_ format: ExportableFileType) -> Bool { format == .pages }
+            func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data { try #require(result.cover) }
+        }
+        let registry = DocumentExporterRegistry().registering(CoverExporter())
+        #expect(try PicoDocsEngine.write(ConverterResult(cover: Data([1,2,3]), sections: []), to: .pages, registry: registry) == Data([1,2,3]))
+        #expect(throws: PicoDocsError.emptyDocument) { try PicoDocsEngine.write(ConverterResult(cover: Data(), sections: []), to: .pages, registry: registry) }
+    }
+
+    @Test func DOCXMultilineAndSeparateQuotesRetainTheirBoundaries() async throws {
+        for (source, sizes) in [("> First\n> Second", [2]), ("> First\n\n> Second", [1,1])] {
+            let data = try PicoDocsEngine.write(markdown: source, to: .docx)
+            let result = try await PicoDocsEngine.convert(data: data, filename: "quotes.docx")
+            let quotes = MarkdownBlockParser.parse(result.markdown()).compactMap { block -> Int? in
+                if case .blockquote(let lines) = block { return lines.count }; return nil
+            }
+            #expect(quotes == sizes)
+        }
+    }
+
     @Test func explicitSlideTitlesAppearOnlyInTheTitlePlaceholder() throws {
         for markdown in ["Details", "## Agenda\n\nDetails"] {
             let result = ConverterResult(sections: [.init(title: "Agenda", kind: .slide, markdown: markdown, slideNumber: 1)])

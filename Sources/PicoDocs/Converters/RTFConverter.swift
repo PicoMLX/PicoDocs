@@ -82,6 +82,7 @@ public struct RTFConverter: DocumentConverter {
         var runs: [Run] = []
         var paragraphs: [String] = []
         var markdownFence: (character: Character, length: Int)?
+        var previousBlankParagraph = true
 
         func appendText(_ s: String) {
             if instruction, let field { field.instruction += s; return }
@@ -109,6 +110,7 @@ public struct RTFConverter: DocumentConverter {
                 paragraphs[paragraphs.count - 1] += "\n" + raw
                 if MarkdownBlockParser.closesFence(raw, opening: opening) { markdownFence = nil }
                 runs.removeAll(keepingCapacity: true)
+                previousBlankParagraph = false
                 return
             }
             var rendered = "", index = 0
@@ -123,6 +125,7 @@ public struct RTFConverter: DocumentConverter {
                 } else { rendered += text }
             }
             runs.removeAll(keepingCapacity: true)
+            if rendered.hasPrefix("|") { rendered = rendered.replacingOccurrences(of: "\u{2028}", with: "<br>") }
             let trimmed = rendered.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 // Leading indentation carries nested list content columns.
@@ -131,10 +134,13 @@ public struct RTFConverter: DocumentConverter {
                 if let opening = MarkdownBlockParser.fence(raw.trimmingCharacters(in: .whitespaces)) {
                     markdownFence = opening
                     paragraphs.append(raw)
-                } else if paragraph.hasPrefix(">"), paragraphs.last?.hasPrefix(">") == true {
+                } else if !previousBlankParagraph,
+                          (paragraph.hasPrefix(">") && paragraphs.last?.hasPrefix(">") == true)
+                            || (paragraph.hasPrefix("|") && paragraphs.last?.hasPrefix("|") == true) {
                     paragraphs[paragraphs.count - 1] += "\n" + paragraph
                 } else { paragraphs.append(paragraph) }
-            }
+                previousBlankParagraph = false
+            } else { previousBlankParagraph = true }
         }
 
         while i < n {

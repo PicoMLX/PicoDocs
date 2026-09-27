@@ -109,10 +109,11 @@ public enum PicoDocsEngine {
         // *unless* it carries image sections (an image-only doc is valid output).
         let isEmpty = result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasImages = result.sections.contains { $0.kind == .image }
+        let hasCover = !(result.cover?.isEmpty ?? true)
         let hasCSV = result.sections.contains { !($0.metadata["csv"] ?? "").isEmpty }
         let hasSheets = result.sections.contains { $0.kind == .sheet }
         let hasSlides = result.sections.contains { $0.kind == .slide || $0.slideNumber != nil }
-        if isEmpty, !hasImages, !hasCSV, !hasSheets, !hasSlides {
+        if isEmpty, !hasImages, !hasCover, !hasCSV, !hasSheets, !hasSlides {
             throw PicoDocsError.emptyDocument
         }
         return try registry.write(result, format: format)

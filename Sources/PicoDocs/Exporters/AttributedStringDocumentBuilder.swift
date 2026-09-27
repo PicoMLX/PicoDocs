@@ -109,6 +109,16 @@ enum AttributedStringDocumentBuilder {
             }
 
         case .table(let rows):
+            if preserveBlockMarkers {
+                for (index, row) in rows.enumerated() {
+                    let cells = row.map { MarkdownTableCell.escapeDelimiters(tableMarkup(MarkdownInlineParser.parse($0, tableCell: true))) }
+                    output.append(NSAttributedString(string: "| " + cells.joined(separator: " | ") + " |\n", attributes: [.font: bodyFont()]))
+                    if index == 0 {
+                        output.append(NSAttributedString(string: "| " + Array(repeating: "---", count: row.count).joined(separator: " | ") + " |\n", attributes: [.font: bodyFont()]))
+                    }
+                }
+                break
+            }
             for row in rows {
                 for (index, cell) in row.enumerated() {
                     if index > 0 { output.append(NSAttributedString(string: "\t")) }
@@ -123,6 +133,33 @@ enum AttributedStringDocumentBuilder {
     }
 
     // MARK: - Inline
+
+    /// Canonical table markup keeps cell structure while using native RTF line
+    /// separators for hard breaks. Literal code and escaped punctuation stay literal.
+    private static func tableMarkup(_ nodes: [MarkdownInline]) -> String {
+        func escaped(_ text: String) -> String {
+            text.map { #"\`*_[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+        }
+        func destination(_ text: String) -> String {
+            "<" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E") + ">"
+        }
+        return nodes.map { node in
+            switch node {
+            case .text(let text): return escaped(text)
+            case .lineBreak(let hard): return hard ? "\u{2028}" : " "
+            case .code(let text):
+                let fence = String(repeating: "`", count: max(1, (text.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0) + 1))
+                let padding = text.contains(where: { $0 != " " }) ? " " : ""
+                return fence + padding + text + padding + fence
+            case .strong(let children): return "**" + tableMarkup(children) + "**"
+            case .emphasis(let children): return "*" + tableMarkup(children) + "*"
+            case .link(let label, let target): return "[" + tableMarkup(label) + "](" + destination(target) + ")"
+            case .image(let alt, let target): return "![" + escaped(alt) + "](" + destination(target) + ")"
+            case .footnoteReference(let id): return "[^" + escaped(id) + "]"
+            }
+        }.joined()
+    }
+
 
     private static func inline(_ markdown: String, size: CGFloat = baseSize, bold: Bool = false, italic: Bool = false) -> NSAttributedString {
         let result = NSMutableAttributedString()
