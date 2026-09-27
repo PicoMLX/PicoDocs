@@ -101,7 +101,15 @@ public struct PPTXExporter: DocumentExporter {
             }
             return groups.map { sections in
                 Slide(title: sections.first(where: { $0.kind == .slide })?.title ?? "",
-                      body: sections.flatMap { bodyLines(OfficeDocumentBlocks.parse(ConverterResult(sections: [$0]))) })
+                      body: sections.flatMap { section in
+                          var blocks = OfficeDocumentBlocks.parse(ConverterResult(sections: [section]), includeSlideTitles: false)
+                          if section.kind == .slide, let title = section.title,
+                             case .heading(_, let text)? = blocks.first,
+                             MarkdownInlineParser.parse(text).plainText == title {
+                              blocks.removeFirst()
+                          }
+                          return bodyLines(blocks)
+                      })
             }
         }
 

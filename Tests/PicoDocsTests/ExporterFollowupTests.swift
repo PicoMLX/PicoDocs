@@ -8,6 +8,37 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func explicitSlideTitlesAppearOnlyInTheTitlePlaceholder() throws {
+        for markdown in ["Details", "## Agenda\n\nDetails"] {
+            let result = ConverterResult(sections: [.init(title: "Agenda", kind: .slide, markdown: markdown, slideNumber: 1)])
+            let slide = try xml(PicoDocsEngine.write(result, to: .pptx), "ppt/slides/slide1.xml")
+            #expect(slide.components(separatedBy: ">Agenda</a:t>").count - 1 == 1)
+            #expect(slide.contains(">Details</a:t>"))
+            #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains("Agenda"))
+        }
+    }
+
+    #if canImport(AppKit)
+    @Test func RTFCodeBlocksRoundTripLiteralContentAndFenceLikeLines() async throws {
+        let code = "# literal\n- literal\n\n  indented \\*\n```\ntrailing  "
+        let source = "````\n" + code + "\n````"
+        let data = try PicoDocsEngine.write(markdown: source, to: .rtf)
+        let result = try await PicoDocsEngine.convert(data: data, filename: "code.rtf")
+        let blocks = MarkdownBlockParser.parse(result.markdown())
+        #expect(blocks.count == 1)
+        #expect(blocks.contains { if case .code(let text) = $0 { return text == code }; return false })
+        #expect(try DocumentRenderer.render(result, to: .html).contains("<pre><code>"))
+    }
+
+    @Test func RTFBlockquotesRetainTheirBlockIdentity() async throws {
+        let data = try PicoDocsEngine.write(markdown: "> Warning\n> Second line", to: .rtf)
+        let result = try await PicoDocsEngine.convert(data: data, filename: "quote.rtf")
+        #expect(MarkdownBlockParser.parse(result.markdown()).contains { if case .blockquote(let lines) = $0 { return lines.count == 2 }; return false })
+        #expect(try DocumentRenderer.render(result, to: .html).contains("<blockquote>"))
+        #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains("w:val=\"Quote\""))
+    }
+    #endif
+
     @Test func exportedLooseListsKeepContinuationIdentityAndCounters() async throws {
         for source in ["- Parent\n\n  Continuation\n- Next", "10. Parent\n\n    Continuation\n11. Next", "- Parent\n  - Child\n\n    Child continuation\n\n  Parent continuation\n- Next"] {
             let data = try PicoDocsEngine.write(markdown: source, to: .docx)

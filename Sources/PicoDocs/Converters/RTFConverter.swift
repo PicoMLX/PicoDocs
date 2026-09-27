@@ -81,6 +81,7 @@ public struct RTFConverter: DocumentConverter {
 
         var runs: [Run] = []
         var paragraphs: [String] = []
+        var markdownFence: (character: Character, length: Int)?
 
         func appendText(_ s: String) {
             if instruction, let field { field.instruction += s; return }
@@ -103,6 +104,13 @@ public struct RTFConverter: DocumentConverter {
         }
 
         func flushParagraph() {
+            let raw = runs.map(\.text).joined()
+            if let opening = markdownFence, !paragraphs.isEmpty {
+                paragraphs[paragraphs.count - 1] += "\n" + raw
+                if MarkdownBlockParser.closesFence(raw, opening: opening) { markdownFence = nil }
+                runs.removeAll(keepingCapacity: true)
+                return
+            }
             var rendered = "", index = 0
             while index < runs.count {
                 let start = index, link = runs[index].link
@@ -119,7 +127,13 @@ public struct RTFConverter: DocumentConverter {
             if !trimmed.isEmpty {
                 // Leading indentation carries nested list content columns.
                 let trailing = rendered.reversed().prefix { $0.isWhitespace }.count
-                paragraphs.append(String(rendered.dropLast(trailing)))
+                let paragraph = String(rendered.dropLast(trailing))
+                if let opening = MarkdownBlockParser.fence(raw.trimmingCharacters(in: .whitespaces)) {
+                    markdownFence = opening
+                    paragraphs.append(raw)
+                } else if paragraph.hasPrefix(">"), paragraphs.last?.hasPrefix(">") == true {
+                    paragraphs[paragraphs.count - 1] += "\n" + paragraph
+                } else { paragraphs.append(paragraph) }
             }
         }
 

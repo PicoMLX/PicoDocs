@@ -21,7 +21,7 @@ public struct AttributedStringRTFExporter: DocumentExporter {
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .rtf else { throw ExporterError.notAccepted }
-        let attributed = AttributedStringDocumentBuilder.attributedString(from: result, preserveHeadingMarkers: true)
+        let attributed = AttributedStringDocumentBuilder.attributedString(from: result, preserveBlockMarkers: true)
         var properties: [NSAttributedString.DocumentAttributeKey: Any] = [.documentType: NSAttributedString.DocumentType.rtf]
         if let title = result.title { properties[.title] = title }
         if let author = result.author { properties[.author] = author }

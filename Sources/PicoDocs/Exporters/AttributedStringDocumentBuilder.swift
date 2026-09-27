@@ -47,12 +47,12 @@ enum AttributedStringDocumentBuilder {
         }
     }
 
-    static func attributedString(from result: ConverterResult, preserveHeadingMarkers: Bool = false) -> NSAttributedString {
+    static func attributedString(from result: ConverterResult, preserveBlockMarkers: Bool = false) -> NSAttributedString {
         let result = PicoDocsEngine.withSynthesizedImageReferences(result)
         let output = NSMutableAttributedString()
         let blocks = OfficeDocumentBlocks.parse(result)
         for (index, block) in blocks.enumerated() {
-            append(block, to: output, preserveHeadingMarkers: preserveHeadingMarkers)
+            append(block, to: output, preserveBlockMarkers: preserveBlockMarkers)
             if index < blocks.count - 1 {
                 output.append(NSAttributedString(string: "\n"))
             }
@@ -62,12 +62,12 @@ enum AttributedStringDocumentBuilder {
 
     // MARK: - Blocks
 
-    private static func append(_ block: MarkdownBlock, to output: NSMutableAttributedString, preserveHeadingMarkers: Bool) {
+    private static func append(_ block: MarkdownBlock, to output: NSMutableAttributedString, preserveBlockMarkers: Bool) {
         switch block {
         case .heading(let level, let text):
             // A visible Markdown marker preserves heading semantics through RTF,
             // whose reader intentionally does not infer headings from font size.
-            if preserveHeadingMarkers {
+            if preserveBlockMarkers {
                 output.append(NSAttributedString(string: String(repeating: "#", count: max(1, min(level, 6))) + " ", attributes: [.font: bodyFont()]))
             }
             output.append(inline(text, size: headingSize(level), bold: true))
@@ -79,10 +79,19 @@ enum AttributedStringDocumentBuilder {
 
         case .code(let code):
             let attrs: [NSAttributedString.Key: Any] = [.font: monospacedFont(size: baseSize)]
-            output.append(NSAttributedString(string: code + "\n", attributes: attrs))
+            if preserveBlockMarkers {
+                var longest = 0, run = 0
+                for character in code {
+                    run = character == "`" ? run + 1 : 0
+                    longest = max(longest, run)
+                }
+                let fence = String(repeating: "`", count: max(3, longest + 1))
+                output.append(NSAttributedString(string: fence + "\n" + code + "\n" + fence + "\n", attributes: attrs))
+            } else { output.append(NSAttributedString(string: code + "\n", attributes: attrs)) }
 
         case .blockquote(let lines):
             for line in lines {
+                if preserveBlockMarkers { output.append(NSAttributedString(string: "> ", attributes: [.font: bodyFont()])) }
                 output.append(inline(line, italic: true))
                 output.append(NSAttributedString(string: "\n"))
             }

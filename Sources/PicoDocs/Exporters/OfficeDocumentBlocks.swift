@@ -3,7 +3,7 @@ import Foundation
 /// Office writers share a lossless projection of structured worksheet cells.
 /// Markdown remains the fallback for sections without a raw CSV carrier.
 enum OfficeDocumentBlocks {
-    static func parse(_ result: ConverterResult) -> [MarkdownBlock] {
+    static func parse(_ result: ConverterResult, includeSlideTitles: Bool = true) -> [MarkdownBlock] {
         var blocks: [MarkdownBlock] = []
         var pending: [String] = []
         func flush() {
@@ -31,7 +31,7 @@ enum OfficeDocumentBlocks {
                         if case .table = block { blocks.append(block) }
                     }
                 }
-            } else if section.kind == .slide, let title = section.title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            } else if includeSlideTitles, section.kind == .slide, let title = section.title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 flush()
                 let parsed = MarkdownBlockParser.parse(section.markdown)
                 let normalized = MarkdownBlockParser.normalizedLineEndings(title).replacingOccurrences(of: "\n", with: " ")
