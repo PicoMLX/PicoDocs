@@ -5,6 +5,86 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func retainedImagePayloadsHaveAnEncodedByteBudget() throws {
+        let manifest = #"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="png" ContentType="image/png"/></Types>"#
+        let data = PagesConverterTests.makeZip([("[Content_Types].xml", Array(manifest.utf8)), ("a.png", [1,2,3]), ("b.png", [4,5,6]), ("c.png", [7])])
+        let package = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
+        let collector = PowerPointConverter.ImageCollector(maximumEncodedBytes: 8)
+        #expect(collector.add(path: "a.png", filename: "a.png", archive: package) == "a.png")
+        #expect(collector.add(path: "b.png", filename: "b.png", archive: package) == "b.png")
+        #expect(collector.add(path: "a.png", filename: "a.png", archive: package) == "a.png")
+        try package.check()
+        #expect(collector.sections.compactMap { $0.metadata["base64"] }.reduce(0) { $0 + $1.utf8.count } == 8)
+        #expect(collector.add(path: "c.png", filename: "c.png", archive: package) == nil)
+        #expect(throws: PicoDocsError.fileCorrupted) { try package.check() }
+        #expect(collector.sections.count == 2)
+    }
+
+    @Test func selectedSearchDoesNotEnterStandardExtensionMetadata() throws {
+        for extensionTag in ["p:ext", "a:ext"] {
+            for name in ["a:tbl", "p:oleobj", "a:blip"] {
+                let source = "<root><\(extensionTag)><\(name) id='hidden'/></\(extensionTag)><\(name) id='visible'/></root>"
+                let root = try #require(SwiftSoup.parse(source, "", Parser.xmlParser()).children().first())
+                #expect(try PowerPointConverter.selectedDescendant(in: root, named: name)?.attr("id") == "visible")
+            }
+        }
+    }
+
+    @Test func canonicalAttributeAliasesCannotCollide() {
+        let source = "<root xmlns:r1='http://schemas.openxmlformats.org/officeDocument/2006/relationships' xmlns:r2='http://purl.oclc.org/ooxml/officeDocument/relationships' r1:embed='first' r2:embed='second'/>"
+        #expect(PowerPointXML.normalize(Data(source.utf8)) == nil)
+        #expect(PowerPointXML.normalize(Data(source.replacingOccurrences(of: "r2:embed=", with: "r2:link=").utf8)) != nil)
+    }
+
+    @Test func XMLAttributesHavePerElementAndCumulativeByteLimits() {
+        func attrs(_ count: Int) -> Data { Data(("<root " + (0..<count).map { "a\($0)='x'" }.joined(separator: " ") + "/>").utf8) }
+        #expect(PowerPointXML.normalize(attrs(256)) != nil)
+        #expect(PowerPointXML.normalize(attrs(257)) == nil)
+        let source = Data("<root a='12'><child b='34'/></root>".utf8)
+        #expect(PowerPointXML.normalize(source, maximumAttributeBytes: 6) != nil)
+        #expect(PowerPointXML.normalize(source, maximumAttributeBytes: 5) == nil)
+        #expect(PowerPointXML.normalize(Data(("<root a='" + String(repeating: "x", count: 64 * 1024) + "'/>").utf8)) == nil)
+        let budget = PowerPointXML.Budget(attributeBytes: 6)
+        let small = Data("<root a='12'/>".utf8)
+        #expect(PowerPointXML.normalize(small, budget: budget) != nil)
+        #expect(PowerPointXML.normalize(small, budget: budget) != nil)
+        #expect(PowerPointXML.normalize(small, budget: budget) == nil)
+    }
+
+    @Test func craftedBreakSentinelsRemainLiteralWithoutCollisionSearch() throws {
+        var source = ""
+        for count in 0..<1000 { source += "\u{E042}" + String(repeating: "\u{E043}", count: count) }
+        source += "\u{E042}\u{E044}\u{E040}\u{E041}"
+        #expect(MarkdownTableCell.inlineText(source + "<br>tail", inline: { $0 }) == source + "\ntail")
+        let list = ConverterResult(sections: [.init(markdown: "- " + source + "  \n  tail")])
+        let plain = try DocumentRenderer.render(list, to: .plaintext)
+        #expect(plain.contains(source)); #expect(plain.contains("\n  tail"))
+        let html = try DocumentRenderer.render(list, to: .html)
+        #expect(html.contains(source)); #expect(html.contains("<br>tail"))
+    }
+
+    @Test func tableCellsInheritPresentationTextStyleAndLocalOverrides() async throws {
+        typealias B = PowerPointConverterTests
+        for local in [false, true] {
+            let style = local ? #"<a:lstStyle><a:lvl1pPr><a:buNone/><a:defRPr b="0"/></a:lvl1pPr></a:lstStyle>"# : ""
+            let table = "<p:graphicFrame><a:tbl><a:tr><a:tc><a:txBody>\(style)<a:p><a:r><a:t>Cell</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></p:graphicFrame>"
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: table)])
+            let archive = try #require(Archive(data: data, accessMode: .read))
+            var entries: [(String, [UInt8])] = []
+            for entry in archive {
+                var bytes = Data(); _ = try archive.extract(entry) { bytes.append($0) }
+                if entry.path == "ppt/presentation.xml" {
+                    let defaults = #"<p:defaultTextStyle><a:lvl1pPr><a:buAutoNum type="arabicPeriod" startAt="4"/><a:defRPr b="1" i="1"/></a:lvl1pPr></p:defaultTextStyle>"#
+                    bytes = Data(String(decoding: bytes, as: UTF8.self).replacingOccurrences(of: "</p:presentation>", with: defaults + "</p:presentation>").utf8)
+                }
+                entries.append((entry.path, Array(bytes)))
+            }
+            let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(entries), filename: "defaults.pptx")
+            #expect(result.markdown().contains(local ? "| *Cell* |" : "| 4. ***Cell*** |"))
+        }
+    }
+
+
     @Test func largeWordAndSpreadsheetLiteralsUseScalarEscapes() async throws {
         let source = String(repeating: "*\u{0301}x*\u{0301} ", count: 30_000).trimmingCharacters(in: .whitespaces)
         let document = "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:body><w:p><w:r><w:t>\(source)</w:t></w:r></w:p></w:body></w:document>"

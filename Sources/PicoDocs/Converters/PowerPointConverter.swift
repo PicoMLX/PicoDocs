@@ -406,6 +406,7 @@ public struct PowerPointConverter: DocumentConverter {
 
     static func selectedDescendant(in element: Element, named name: String) -> Element? {
         guard !Task.isCancelled else { return nil }
+        guard !["p:ext", "a:ext"].contains(element.tagName().lowercased()) else { return nil }
         guard !element.tagName().lowercased().hasPrefix("extension"), !element.tagName().lowercased().hasPrefix("requiredextension") else { return nil }
         if element.tagName().lowercased() == name { return element }
         if element.tagName().lowercased() == "mc:alternatecontent" {
@@ -851,14 +852,18 @@ public struct PowerPointConverter: DocumentConverter {
                 var text = ""
                 if !merged, let body = textBody(ofCell: cell) {
                     let style = selectedChild(of: body, named: "a:lststyle")
+                    let styles = [style, context.defaultTextStyle].compactMap { $0 }
                     let inherited = (0..<9).map { level -> Bullet? in
-                        guard let style else { return nil }
-                        return bullet(in: selectedChild(of: style, named: "a:lvl\(level + 1)ppr")) ?? bullet(in: selectedChild(of: style, named: "a:defppr"))
+                        for style in styles {
+                            if let value = bullet(in: selectedChild(of: style, named: "a:lvl\(level + 1)ppr")) ?? bullet(in: selectedChild(of: style, named: "a:defppr")) { return value }
+                        }
+                        return nil
                     }
                     context.runDefaults = (0..<9).map { level in
-                        guard let style else { return [] }
-                        return [selectedChild(of: style, named: "a:lvl\(level + 1)ppr"), selectedChild(of: style, named: "a:defppr")]
-                            .compactMap { $0.flatMap { selectedChild(of: $0, named: "a:defrpr") } }
+                        styles.flatMap { style in
+                            [selectedChild(of: style, named: "a:lvl\(level + 1)ppr"), selectedChild(of: style, named: "a:defppr")]
+                                .compactMap { $0.flatMap { selectedChild(of: $0, named: "a:defrpr") } }
+                        }
                     }
                     text = renderParagraphs(body, inherited: inherited, context: &context).joined(separator: "\n")
                 }
@@ -924,15 +929,28 @@ public struct PowerPointConverter: DocumentConverter {
         private var usedReferences: Set<String>
         private var nextReference = 0
 
-        init(reservedReferences: Set<String> = []) { usedReferences = reservedReferences }
+        private var remainingEncodedBytes: Int
+
+        init(reservedReferences: Set<String> = [], maximumEncodedBytes: Int = 32 * 1024 * 1024) {
+            usedReferences = reservedReferences
+            remainingEncodedBytes = max(0, maximumEncodedBytes)
+        }
 
         @discardableResult
         func add(path: String, filename: String, archive: PowerPointPackage) -> String? {
             if let existing = references[path] { return existing }
+            // Base64 consumes four bytes for every three source bytes. Check the
+            // declared size before inflating, then charge the verified byte count.
+            guard let entry = archive.archive[path], entry.uncompressedSize <= UInt64(remainingEncodedBytes / 4 * 3) else {
+                archive.fail(PicoDocsError.fileCorrupted); return nil
+            }
             guard let bytes = archive.read(path), !bytes.isEmpty else {
                 archive.fail(PicoDocsError.fileCorrupted)
                 return nil
             }
+            let encodedBytes = ((bytes.count + 2) / 3) * 4
+            guard encodedBytes <= remainingEncodedBytes else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+            remainingEncodedBytes -= encodedBytes
             var reference = filename
             while usedReferences.contains(PowerPointConverter.linkDestination(reference)) {
                 nextReference += 1

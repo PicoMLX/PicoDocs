@@ -146,9 +146,39 @@ enum MarkdownTableCell {
     /// Keep breaks opaque while emphasis/link parsing runs so a formatted run
     /// can span a native cell break without leaking Markdown delimiters.
     static func inlineText(_ text: String, breakText: String = "\n", inline: (String) -> String) -> String {
-        var token = "\u{E042}"
-        while text.contains(token) { token += "\u{E043}" }
-        return inline(decodeBreaks(text, breakText: token)).replacingOccurrences(of: token, with: breakText)
+        let protected = protectBreakSentinels(text)
+        return restoreBreakSentinels(inline(decodeBreaks(protected, breakText: breakToken)), breakText: breakText)
+    }
+
+    static let breakToken = "\u{E042}\u{E044}"
+
+    static func protectBreakSentinels(_ text: String) -> String {
+        var output = ""
+        for scalar in text.unicodeScalars {
+            output.unicodeScalars.append(scalar)
+            if scalar == "\u{E042}" { output.unicodeScalars.append(scalar) }
+        }
+        return output
+    }
+
+    static func restoreBreakSentinels(_ text: String, breakText: String) -> String {
+        let scalars = text.unicodeScalars
+        var output = "", index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            index = scalars.index(after: index)
+            if scalar == "\u{E042}", index < scalars.endIndex {
+                let next = scalars[index]
+                if next == "\u{E042}" || next == "\u{E044}" {
+                    if next == "\u{E042}" { output.unicodeScalars.append(scalar) }
+                    else { output += breakText }
+                    index = scalars.index(after: index)
+                    continue
+                }
+            }
+            output.unicodeScalars.append(scalar)
+        }
+        return output
     }
 
     /// Inverse of `escapeDelimiters`: turns `\\` back into `\` and `\|` into `|`,

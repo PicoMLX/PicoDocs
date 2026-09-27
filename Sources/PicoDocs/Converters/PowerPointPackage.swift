@@ -90,9 +90,10 @@ final class PowerPointPackage {
 final class PowerPointXML: NSObject, XMLParserDelegate {
     /// Conversion-wide allowance for DOMs retained by the shared-part cache.
     final class Budget {
-        var nodes: Int, attributes: Int, bytes: Int
-        init(nodes: Int = 250_000, attributes: Int = 500_000, bytes: Int = 64 * 1024 * 1024) {
+        var nodes: Int, attributes: Int, bytes: Int, attributeBytes: Int
+        init(nodes: Int = 250_000, attributes: Int = 500_000, bytes: Int = 64 * 1024 * 1024, attributeBytes: Int = 8 * 1024 * 1024) {
             self.nodes = max(0, nodes); self.attributes = max(0, attributes); self.bytes = max(0, bytes)
+            self.attributeBytes = max(0, attributeBytes)
         }
     }
 
@@ -108,6 +109,9 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
     private var outputBytes = 0
     private var nodes = 0
     private var attributesCount = 0
+    private var attributeBytes = 0
+    private var maximumAttributeBytes = 8 * 1024 * 1024
+    private var maximumAttributesPerElement = 256
     private var maximumNodes = 250_000
     private var maximumAttributes = 500_000
     private var maximumOutputBytes = 64 * 1024 * 1024
@@ -128,19 +132,22 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         "http://schemas.openxmlformats.org/package/2006/content-types": ""
     ]
 
-    static func normalize(_ data: Data, maximumOutputBytes: Int = 64 * 1024 * 1024, maximumNodes: Int = 250_000, maximumAttributes: Int = 500_000, budget: Budget? = nil) -> String? {
+    static func normalize(_ data: Data, maximumOutputBytes: Int = 64 * 1024 * 1024, maximumNodes: Int = 250_000, maximumAttributes: Int = 500_000, maximumAttributesPerElement: Int = 256, maximumAttributeBytes: Int = 8 * 1024 * 1024, budget: Budget? = nil) -> String? {
         guard !containsDoctype(data) else { return nil }
         let parser = XMLParser(data: data)
         let delegate = PowerPointXML()
         delegate.maximumOutputBytes = min(maximumOutputBytes, budget?.bytes ?? maximumOutputBytes)
         delegate.maximumNodes = min(maximumNodes, budget?.nodes ?? maximumNodes)
         delegate.maximumAttributes = min(maximumAttributes, budget?.attributes ?? maximumAttributes)
+        delegate.maximumAttributesPerElement = maximumAttributesPerElement
+        delegate.maximumAttributeBytes = min(maximumAttributeBytes, budget?.attributeBytes ?? maximumAttributeBytes)
         parser.delegate = delegate
         parser.shouldResolveExternalEntities = false
         guard parser.parse(), !delegate.hasError, !Task.isCancelled else { return nil }
         if let budget {
             budget.nodes -= delegate.nodes
             budget.attributes -= delegate.attributesCount
+            budget.attributeBytes -= delegate.attributeBytes
             budget.bytes -= delegate.outputBytes
         }
         return delegate.output
@@ -208,8 +215,17 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes: [String: String]) {
         guard names.count < 128, nodes < maximumNodes,
+              attributes.count <= maximumAttributesPerElement,
               attributes.count <= maximumAttributes - attributesCount, !Task.isCancelled else {
             hasError = true; parser.abortParsing(); return
+        }
+        var elementAttributeBytes = 0
+        for (key, value) in attributes {
+            let bytes = key.utf8.count + value.utf8.count
+            guard bytes <= 64 * 1024 - elementAttributeBytes, bytes <= maximumAttributeBytes - attributeBytes else {
+                hasError = true; parser.abortParsing(); return
+            }
+            elementAttributeBytes += bytes; attributeBytes += bytes
         }
         nodes += 1; attributesCount += attributes.count
         var scope = scopes.last!
@@ -229,9 +245,10 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         }
         scopes.append(scope); scopeBytes.append(bytes)
         var settings = compatibility.last!
+        var canonicalAttributes: Set<String> = []
         for (key, value) in attributes where key != "xmlns" && !key.hasPrefix("xmlns:") {
             let attribute = name(key, scope: scope, attribute: true)
-            guard !hasError else { parser.abortParsing(); return }
+            guard !hasError, canonicalAttributes.insert(attribute).inserted else { hasError = true; parser.abortParsing(); return }
             if ["mc:Ignorable", "mc:ProcessContent", "mc:MustUnderstand", "Requires"].contains(attribute), compatibilityTokens(value, parser: parser) == nil { return }
             if attribute == "mc:Ignorable" {
                 for prefix in compatibilityTokens(value, parser: parser) ?? [] {

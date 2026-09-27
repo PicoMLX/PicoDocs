@@ -122,12 +122,11 @@ struct MarkdownList {
     }
 
     private static func inlineText(_ text: String, breakText: String, inline: (String) -> String) -> String {
-        var hardBreak = "\u{E040}"
-        while text.contains(hardBreak) { hardBreak += "\u{E041}" }
-        let protected = MarkdownTableCell.mapCodeSpans(text, code: { $0 }, plain: {
+        let hardBreak = MarkdownTableCell.breakToken
+        let protected = MarkdownTableCell.mapCodeSpans(MarkdownTableCell.protectBreakSentinels(text), code: { $0 }, plain: {
             $0.replacingOccurrences(of: " {2,}\n", with: hardBreak, options: .regularExpression)
         })
-        return inline(protected).replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: hardBreak, with: breakText)
+        return MarkdownTableCell.restoreBreakSentinels(inline(protected).replacingOccurrences(of: "\n", with: " "), breakText: breakText)
     }
 
     var texts: [String] { items.flatMap { [$0.text] + $0.children.flatMap(\.texts) } }
