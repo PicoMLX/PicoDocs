@@ -147,9 +147,9 @@ public struct PPTXExporter: DocumentExporter {
                     var nodes: [MarkdownInline] = []
                     for (index, cell) in row.enumerated() {
                         if index > 0 { nodes.append(.text("\t")) }
-                        nodes += MarkdownInlineParser.parse(cell.replacingOccurrences(of: "<br>", with: "\n"))
+                        nodes += MarkdownInlineParser.parse(cell, tableCell: true)
                     }
-                    lines.append(Paragraph(text: nodes.plainText, inlines: nodes))
+                    lines.append(Paragraph(text: nodes.plainText, inlines: normalizedBreaks(nodes)))
                 }
             case .rule:
                 continue
@@ -159,29 +159,21 @@ public struct PPTXExporter: DocumentExporter {
     }
 
     private static func normalizedBreaks(_ nodes: [MarkdownInline]) -> [MarkdownInline] {
-        nodes.map { node in
+        var result: [MarkdownInline] = []
+        for node in nodes {
+            let normalized: MarkdownInline
             switch node {
-            case .text(let text): return .text(normalizedBreaks(text))
-            case .strong(let children): return .strong(normalizedBreaks(children))
-            case .emphasis(let children): return .emphasis(normalizedBreaks(children))
-            case .link(let label, let destination): return .link(label: normalizedBreaks(label), destination: destination)
-            default: return node
+            case .lineBreak(let hard): normalized = .text(hard ? "\n" : " ")
+            case .strong(let children): normalized = .strong(normalizedBreaks(children))
+            case .emphasis(let children): normalized = .emphasis(normalizedBreaks(children))
+            case .link(let label, let destination): normalized = .link(label: normalizedBreaks(label), destination: destination)
+            default: normalized = node
             }
+            if case .text(let text) = normalized, case .text(let previous)? = result.last {
+                result[result.count - 1] = .text(previous + text)
+            } else { result.append(normalized) }
         }
-    }
-
-    private static func normalizedBreaks(_ text: String) -> String {
-        let lines = text.components(separatedBy: "\n")
-        return lines.enumerated().map { index, line in
-            guard index + 1 < lines.count else { return line }
-            if line.hasSuffix("\\") { return String(line.dropLast()) + "\n" }
-            if line.hasSuffix("  ") { return line.trimmingCharacters(in: .whitespaces) + "\n" }
-            return line.replacingOccurrences(of: "[ \t]+$", with: "", options: .regularExpression) + " "
-        }.joined()
-    }
-
-    private static func plain(_ markdown: String) -> String {
-        MarkdownInlineParser.parse(markdown).plainText
+        return result
     }
 
     // MARK: - Slide part

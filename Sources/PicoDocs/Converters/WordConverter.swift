@@ -49,6 +49,7 @@ public struct WordConverter: DocumentConverter {
             }
         }
         let numbering = WordListNumbering(archive: archive)
+        if let failure = numbering.failure { throw failure }
         var blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering)
         // Text boxes (shapes with text) store their content in `w:txbxContent`
         // outside the normal block flow; extract it and append as body blocks.
@@ -744,12 +745,19 @@ public struct WordConverter: DocumentConverter {
     // MARK: - Archive helpers
     // (mirror EPUBConverter's; candidates for a shared ZIP utility later.)
 
-    static func readEntry(_ archive: Archive, path: String) -> Data? {
+    static func readEntry(_ archive: Archive, path: String, maxBytes: Int = 32 * 1024 * 1024) -> Data? {
         let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
         guard let entry = archive[cleanPath] else { return nil }
-        var data = Data(capacity: Int(entry.uncompressedSize))
+        let archiveSize = UInt64(archive.data?.count ?? Int.max)
+        guard maxBytes >= 0, entry.uncompressedSize <= UInt64(maxBytes), entry.compressedSize <= archiveSize,
+              entry.isCompressed || entry.uncompressedSize <= archiveSize else { return nil }
+        var data = Data(capacity: Int(min(entry.uncompressedSize, 1024 * 1024)))
         do {
-            _ = try archive.extract(entry) { data.append($0) }
+            let checksum = try archive.extract(entry) { chunk in
+                guard chunk.count <= maxBytes - data.count, !chunk.isEmpty || entry.uncompressedSize == 0 else { throw PicoDocsError.fileCorrupted }
+                data.append(chunk)
+            }
+            guard checksum == entry.checksum, UInt64(data.count) == entry.uncompressedSize else { return nil }
         } catch {
             return nil
         }

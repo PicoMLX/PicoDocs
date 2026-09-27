@@ -85,7 +85,7 @@ public struct XLSXExporter: DocumentExporter {
             case .table(let tableRows):
                 // Cells carry inline Markdown (`**Total**`, `[label](url)`); write the
                 // visible value, as every other block does, not the syntax.
-                rows += tableRows.map { $0.map { plain($0.replacingOccurrences(of: "<br>", with: "\n")) } }
+                rows += tableRows.map { $0.map { MarkdownInlineParser.parse($0, tableCell: true).plainText } }
             case .heading(_, let text):
                 rows.append([plain(text)])
             case .paragraph(let text):

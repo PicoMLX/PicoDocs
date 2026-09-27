@@ -94,10 +94,7 @@ enum AttributedStringDocumentBuilder {
             for row in rows {
                 for (index, cell) in row.enumerated() {
                     if index > 0 { output.append(NSAttributedString(string: "\t")) }
-                    for (lineIndex, line) in cell.components(separatedBy: "<br>").enumerated() {
-                        if lineIndex > 0 { output.append(NSAttributedString(string: "\n")) }
-                        output.append(inline(line))
-                    }
+                    render(MarkdownInlineParser.parse(cell, tableCell: true), into: output, size: baseSize, bold: false, italic: false, link: nil)
                 }
                 output.append(NSAttributedString(string: "\n"))
             }
@@ -115,21 +112,13 @@ enum AttributedStringDocumentBuilder {
         return result
     }
 
-    private static func normalizedBreaks(_ text: String) -> String {
-        let lines = text.components(separatedBy: "\n")
-        return lines.enumerated().map { index, line in
-            guard index + 1 < lines.count else { return line }
-            if line.hasSuffix("\\") { return String(line.dropLast()) + "\n" }
-            if line.hasSuffix("  ") { return line.trimmingCharacters(in: .whitespaces) + "\n" }
-            return line.replacingOccurrences(of: "[ \t]+$", with: "", options: .regularExpression) + " "
-        }.joined()
-    }
-
     private static func render(_ nodes: [MarkdownInline], into output: NSMutableAttributedString, size: CGFloat, bold: Bool, italic: Bool, link: String?) {
         for node in nodes {
             switch node {
             case .text(let s):
-                output.append(NSAttributedString(string: normalizedBreaks(s), attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
+                output.append(NSAttributedString(string: s, attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
+            case .lineBreak(let hard):
+                output.append(NSAttributedString(string: hard ? "\n" : " ", attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
             case .code(let s):
                 output.append(NSAttributedString(string: s, attributes: attributes(size: size, bold: bold, italic: italic, monospace: true, link: link)))
             case .strong(let children):

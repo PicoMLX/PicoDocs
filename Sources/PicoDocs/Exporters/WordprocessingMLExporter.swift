@@ -289,18 +289,9 @@ public struct WordprocessingMLExporter: DocumentExporter {
             for node in nodes {
                 switch node {
                 case .text(let s):
-                    let lines = s.components(separatedBy: "\n")
-                    for (index, line) in lines.enumerated() {
-                        let hasNext = index + 1 < lines.count
-                        let hardBreak = hasNext && (line.hasSuffix("  ") || line.hasSuffix("\\"))
-                        let content = hardBreak
-                            ? (line.hasSuffix("\\") ? String(line.dropLast()) : line.trimmingCharacters(in: .whitespaces))
-                            : (hasNext ? line.replacingOccurrences(of: "[ \t]+$", with: "", options: .regularExpression) : line)
-                        out += textRun(content, bold: bold, italic: italic, monospace: false)
-                        if hasNext {
-                            out += hardBreak ? "<w:r><w:br/></w:r>" : textRun(" ", bold: bold, italic: italic, monospace: false)
-                        }
-                    }
+                    out += textRun(s, bold: bold, italic: italic, monospace: false)
+                case .lineBreak(let hard):
+                    out += hard ? "<w:r><w:br/></w:r>" : textRun(" ", bold: bold, italic: italic, monospace: false)
                 case .code(let s):
                     out += textRun(s, bold: bold, italic: italic, monospace: true)
                 case .strong(let children):
@@ -423,12 +414,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         /// A table cell paragraph. `<br>` separators become hard line breaks; each
         /// segment is parsed for inline emphasis/links so `**x**` etc. round-trip.
         private func cellParagraph(_ cell: String) -> String {
-            let segments = cell.components(separatedBy: "<br>")
-            var content = ""
-            for (i, segment) in segments.enumerated() {
-                if i > 0 { content += "<w:r><w:br/></w:r>" }
-                content += inlineRuns(segment)
-            }
+            let content = renderRuns(MarkdownInlineParser.parse(cell, tableCell: true), bold: false, italic: false)
             return "<w:p>\(content)</w:p>"
         }
 

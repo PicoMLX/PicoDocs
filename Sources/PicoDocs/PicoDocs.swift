@@ -109,9 +109,11 @@ public enum PicoDocsEngine {
         // *unless* it carries image sections (an image-only doc is valid output).
         let isEmpty = result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasImages = result.sections.contains { $0.kind == .image }
-        let hasCSV = format == .xlsx && result.sections.contains { !($0.metadata["csv"] ?? "").isEmpty }
+        let hasCSV = result.sections.contains {
+            (format == .xlsx || ([ExportableFileType.docx, .pptx, .rtf].contains(format) && [.sheet, .table].contains($0.kind))) && !($0.metadata["csv"] ?? "").isEmpty
+        }
         let hasSheets = result.sections.contains {
-            $0.kind == .sheet && (format == .xlsx || ([ExportableFileType.docx, .pptx, .rtf].contains(format) && !($0.metadata["sheetName"] ?? $0.title ?? "").isEmpty))
+            $0.kind == .sheet && (format == .xlsx || ([ExportableFileType.docx, .pptx, .rtf].contains(format) && !($0.sheetName ?? $0.metadata["sheetName"] ?? $0.title ?? "").isEmpty))
         }
         let hasSlides = format == .pptx && result.sections.contains { $0.kind == .slide }
         if isEmpty, !hasImages, !hasCSV, !hasSheets, !hasSlides {

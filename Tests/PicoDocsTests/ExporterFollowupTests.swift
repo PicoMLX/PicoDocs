@@ -8,6 +8,92 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func publicWorksheetNamesProjectIntoOfficeDocuments() throws {
+        for csv: String? in [nil, "value"] {
+            let result = ConverterResult(sections: [.init(kind: .sheet, markdown: "", sheetName: "Template", metadata: csv.map { ["csv": $0] } ?? [:])])
+            #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains("Template"))
+            #expect(try xml(PicoDocsEngine.write(result, to: .pptx), "ppt/slides/slide1.xml").contains("Template"))
+            #if canImport(AppKit)
+            #expect(AttributedStringDocumentBuilder.attributedString(from: result).string.contains("Template"))
+            #endif
+        }
+    }
+
+    @Test func portableJPEGDimensionsWalkMetadataAndProgressiveFrames() throws {
+        for marker: UInt8 in [0xC0, 0xC2] {
+            let metadata = [UInt8](repeating: 0, count: 1024)
+            let bytes: [UInt8] = [0xFF, 0xD8, 0xFF, 0xE1, 0x04, 0x02] + metadata + [0xFF, marker, 0, 11, 8, 0, 60, 0, 20, 1, 1, 0x11, 0]
+            let size = try #require(OfficeImageDimensions.read(Data(bytes)))
+            #expect(size.0 == 20 && size.1 == 60)
+            #expect(OfficeImageDimensions.read(Data(bytes.dropLast(5))) == nil)
+        }
+        #expect(OfficeImageDimensions.read(Data([0xFF, 0xD8, 0xFF, 0xE1, 0xFF, 0xFF])) == nil)
+        #if canImport(AppKit)
+        for (width, height) in [(20, 20), (10, 30), (40, 10)] {
+            let bitmap = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+            let jpeg = try #require(bitmap.representation(using: .jpeg, properties: [:]))
+            let size = try #require(OfficeImageDimensions.read(jpeg))
+            #expect(size.0 == Double(width) && size.1 == Double(height))
+        }
+        #endif
+    }
+
+    @Test func officeBreaksRetainBackslashParity() throws {
+        for count in 1...4 {
+            let source = "foo" + String(repeating: "\\", count: count) + "\nbar"
+            let nodes = MarkdownInlineParser.parse(source)
+            #expect(nodes.contains(.lineBreak(hard: !count.isMultiple(of: 2))))
+            #expect(nodes.plainText == "foo" + String(repeating: "\\", count: count / 2) + "\nbar")
+            let result = ConverterResult(sections: [.init(markdown: source)])
+            let docx = try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml")
+            #expect(docx.contains("<w:br/>") == !count.isMultiple(of: 2))
+            #expect(docx.contains("foo" + String(repeating: "\\", count: count / 2)))
+            let pptx = try xml(PicoDocsEngine.write(result, to: .pptx), "ppt/slides/slide1.xml")
+            #expect(pptx.contains("<a:br/>") == !count.isMultiple(of: 2))
+            #if canImport(AppKit)
+            let expected = "foo" + String(repeating: "\\", count: count / 2) + (count.isMultiple(of: 2) ? " " : "\n") + "bar"
+            #expect(AttributedStringDocumentBuilder.attributedString(from: result).string.contains(expected))
+            #endif
+        }
+    }
+
+    @Test func tableBreaksRespectCodeAndEscapesInEveryOfficeWriter() throws {
+        for cell in ["`<br>`", #"\<br>"#] {
+            let result = ConverterResult(sections: [.init(markdown: "| " + cell + " |\n| --- |")])
+            let docx = try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml")
+            #expect(docx.contains("&lt;br&gt;")); #expect(!docx.contains("<w:br/>"))
+            let pptx = try xml(PicoDocsEngine.write(result, to: .pptx), "ppt/slides/slide1.xml")
+            #expect(pptx.contains("&lt;br&gt;")); #expect(!pptx.contains("<a:br/>"))
+            #expect(try xml(PicoDocsEngine.write(result, to: .xlsx), "xl/worksheets/sheet1.xml").contains("&lt;br&gt;"))
+            #if canImport(AppKit)
+            #expect(AttributedStringDocumentBuilder.attributedString(from: result).string.contains("<br>"))
+            #endif
+        }
+    }
+
+    @Test func rawCSVTableCarrierPreservesCellWhitespaceAndNewlines() async throws {
+        let csv = "\" leading \ntrailing \""
+        let converted = try await PicoDocsEngine.convert(data: Data(csv.utf8), filename: "cells.csv")
+        for result in [converted, ConverterResult(sections: [.init(kind: .table, markdown: "", metadata: ["csv": csv])])] {
+            let docx = try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml")
+            #expect(docx.contains("> leading </w:t>")); #expect(docx.contains(">trailing </w:t>")); #expect(docx.contains("<w:br/>"))
+            let pptx = try xml(PicoDocsEngine.write(result, to: .pptx), "ppt/slides/slide1.xml")
+            #expect(pptx.contains("> leading </a:t>")); #expect(pptx.contains(">trailing </a:t>")); #expect(pptx.contains("<a:br/>"))
+            #if canImport(AppKit)
+            #expect(AttributedStringDocumentBuilder.attributedString(from: result).string.contains(" leading \ntrailing "))
+            #endif
+        }
+    }
+
+    @Test func optionalWordPartsHaveEnforcedExtractionLimits() throws {
+        let data = PagesConverterTests.makeZip([(name: "word/numbering.xml", data: [UInt8](repeating: 32, count: 8 * 1024 * 1024 + 1))])
+        let archive = try #require(Archive(data: data, accessMode: .read))
+        #expect(WordListNumbering(archive: archive).failure != nil)
+        let small = try #require(Archive(data: PagesConverterTests.makeZip([(name: "part", data: [1, 2, 3])]), accessMode: .read))
+        #expect(WordConverter.readEntry(small, path: "part", maxBytes: 2) == nil)
+        #expect(WordConverter.readEntry(small, path: "part", maxBytes: 3) == Data([1, 2, 3]))
+    }
+
     @Test func backslashPairsKeepInlineDelimitersActive() throws {
         for count in 1...4 {
             let prefix = String(repeating: "\\", count: count)

@@ -26,6 +26,7 @@ indirect enum MarkdownInline: Equatable {
     case link(label: [MarkdownInline], destination: String)
     case image(alt: String, source: String)
     case footnoteReference(String)
+    case lineBreak(hard: Bool)
 }
 
 enum MarkdownInlineParser {
@@ -36,7 +37,7 @@ enum MarkdownInlineParser {
     /// images, and footnote references are pulled out by a single scan (so their
     /// contents aren't reinterpreted), and the remaining plain-text runs are parsed
     /// for `*`/`**`/`***` emphasis.
-    static func parse(_ text: String, depth: Int = 0) -> [MarkdownInline] {
+    static func parse(_ text: String, depth: Int = 0, tableCell: Bool = false) -> [MarkdownInline] {
         guard depth < 64 else { return [.text(text)] }
         let chars = Array(text)
         // Cache the next unescaped label closer once instead of rescanning the
@@ -99,6 +100,18 @@ enum MarkdownInlineParser {
 
             if c == "\\", i + 1 < chars.count, punctuation.contains(chars[i + 1]) {
                 run.append(c); run.append(chars[i + 1]); i += 2; continue
+            }
+
+            if c == "\n" {
+                let slashes = chars[..<i].reversed().prefix { $0 == "\\" }.count
+                let spaces = chars[..<i].reversed().prefix { $0 == " " }.count
+                let hard = !slashes.isMultiple(of: 2) || spaces >= 2
+                if !slashes.isMultiple(of: 2) { run.removeLast() }
+                else { while run.last == " " || run.last == "\t" { run.removeLast() } }
+                append(.lineBreak(hard: hard)); i += 1; continue
+            }
+            if tableCell, c == "<", chars[i...].starts(with: Array("<br>")) {
+                append(.lineBreak(hard: true)); i += 4; continue
             }
 
             // Code delimiters match the complete run; content is literal.
@@ -400,6 +413,7 @@ extension MarkdownInline {
     /// for exporters that need a bare string, e.g. spreadsheet cells.
     var plainText: String {
         switch self {
+        case .lineBreak: return "\n"
         case .text(let s): return s
         case .code(let s): return s
         case .strong(let children), .emphasis(let children): return children.plainText

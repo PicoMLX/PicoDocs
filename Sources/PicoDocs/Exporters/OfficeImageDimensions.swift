@@ -35,6 +35,31 @@ enum OfficeImageDimensions {
         // aspect assumptions. Placeable WMF supplies logical bounding coordinates.
         if unsigned(0, 4) == 1, unsigned(40, 4) == 0x464D4520 { return rect(24, 4) ?? rect(8, 4) }
         if unsigned(0, 4) == 0x9AC6CDD7 { return rect(6, 2) }
+        if bytes.starts(with: [0xFF, 0xD8]) {
+            // JPEG metadata segments can precede SOF by many kilobytes. Walk
+            // their declared lengths without copying the compressed image.
+            func byte(_ offset: Int) -> UInt8 { data[data.startIndex + offset] }
+            var offset = 2
+            while offset < data.count {
+                guard byte(offset) == 0xFF else { return nil }
+                while offset < data.count, byte(offset) == 0xFF { offset += 1 }
+                guard offset < data.count else { return nil }
+                let marker = byte(offset); offset += 1
+                if marker == 0xD9 || marker == 0xDA { return nil }
+                if marker == 0x01 || (0xD0...0xD8).contains(marker) { continue }
+                guard offset + 2 <= data.count else { return nil }
+                let length = Int(byte(offset)) * 256 + Int(byte(offset + 1))
+                guard length >= 2, length <= data.count - offset else { return nil }
+                if (0xC0...0xCF).contains(marker), ![0xC4, 0xC8, 0xCC].contains(marker) {
+                    guard length >= 8 else { return nil }
+                    let height = Int(byte(offset + 3)) * 256 + Int(byte(offset + 4))
+                    let width = Int(byte(offset + 5)) * 256 + Int(byte(offset + 6))
+                    return valid(Double(width), Double(height))
+                }
+                offset += length
+            }
+            return nil
+        }
         let reader = SVGSizeReader()
         let parser = XMLParser(data: data.prefix(65_536))
         parser.shouldResolveExternalEntities = false

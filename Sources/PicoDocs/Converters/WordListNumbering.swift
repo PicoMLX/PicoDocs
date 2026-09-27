@@ -43,19 +43,21 @@ final class WordListNumbering {
     /// to plain bullets.
     private(set) var isResolvable = false
 
+    private(set) var failure: Error?
+
     init(archive: Archive) {
-        if let app = Self.xml(archive, path: "docProps/app.xml") {
+        if let app = xml(archive, path: "docProps/app.xml") {
             isLibreOffice = ((try? app.getElementsByTag("Application").text()) ?? "").hasPrefix("LibreOffice")
         }
         let numberingPath = WordConverter.relationshipTarget(archive, typeSuffix: "/numbering")
             .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/numbering.xml"
         let stylesPath = WordConverter.relationshipTarget(archive, typeSuffix: "/styles")
             .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/styles.xml"
-        if let numbering = Self.xml(archive, path: numberingPath) {
+        if let numbering = xml(archive, path: numberingPath) {
             isResolvable = true
             parseNumbering(numbering)
         }
-        if let styles = Self.xml(archive, path: stylesPath) {
+        if let styles = xml(archive, path: stylesPath) {
             parseStyles(styles)
         }
     }
@@ -213,9 +215,12 @@ final class WordListNumbering {
         return trimmed.isEmpty ? "0" : String(trimmed)
     }
 
-    private static func xml(_ archive: Archive, path: String) -> Document? {
-        guard let data = WordConverter.readEntry(archive, path: path),
-              let text = WordConverter.decodeText(data) else { return nil }
+    private func xml(_ archive: Archive, path: String) -> Document? {
+        guard archive[path] != nil else { return nil }
+        // Three optional parts at most: this caps their aggregate decoded input
+        // at 24 MiB, independent of compression ratio or declared ZIP sizes.
+        guard let data = WordConverter.readEntry(archive, path: path, maxBytes: 8 * 1024 * 1024),
+              let text = WordConverter.decodeText(data) else { failure = PicoDocsError.fileCorrupted; return nil }
         return try? SwiftSoup.parse(text, "", SwiftSoup.Parser.xmlParser())
     }
 
