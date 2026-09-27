@@ -26,6 +26,12 @@ enum MarkdownTableCell {
         var closers: [Int: (Int, Int)] = [:], next: [Int: Int] = [:]
         for (start, length) in runs.reversed() {
             if let close = next[length] { closers[start] = (close, length) }
+            // Outside code, an escaped first tick is literal; the remaining
+            // ticks can open their own span. Inside code, the full run remains
+            // a possible closer because backslashes have no escape semantics.
+            if length > 1, let close = next[length - 1] {
+                closers[start + 1] = (close, length - 1)
+            }
             next[length] = start
         }
         index = 0

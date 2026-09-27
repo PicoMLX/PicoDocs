@@ -938,19 +938,20 @@ public enum DocumentRenderer {
 
     private static func protectEscapes(_ text: String) -> (String, [String]) {
         var out = "", escaped: [String] = []
-        var index = text.startIndex
-        while index < text.endIndex {
-            let next = text.index(after: index)
-            if text[index] == "\u{E006}" || text[index] == "\u{E007}" {
-                escaped.append(String(text[index]))
+        let scalars = text.unicodeScalars
+        var index = scalars.startIndex
+        while index < scalars.endIndex {
+            let next = scalars.index(after: index)
+            if scalars[index] == "\u{E006}" || scalars[index] == "\u{E007}" {
+                escaped.append(String(scalars[index]))
                 out += "\u{E006}\(escaped.count - 1)\u{E007}"
                 index = next
-            } else if text[index] == "\\", next < text.endIndex,
-               #"\`*_{}[]<>()#+-.!|"#.contains(text[next]) {
-                escaped.append(String(text[next]))
+            } else if scalars[index] == "\\", next < scalars.endIndex,
+               #"\`*_{}[]<>()#+-.!|"#.unicodeScalars.contains(scalars[next]) {
+                escaped.append(String(scalars[next]))
                 out += "\u{E006}\(escaped.count - 1)\u{E007}"
-                index = text.index(after: next)
-            } else { out.append(text[index]); index = next }
+                index = scalars.index(after: next)
+            } else { out.unicodeScalars.append(scalars[index]); index = next }
         }
         return (out, escaped)
     }

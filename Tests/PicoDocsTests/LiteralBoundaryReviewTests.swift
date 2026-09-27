@@ -4,6 +4,36 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func escapedTicksCanPrecedeIndependentCodeDelimiters() async throws {
+        let html = "<p>`<code>x</code></p>"
+        let result = try await PicoDocsEngine.convert(data: Data(html.utf8), filename: "ticks.html")
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == "`x")
+        #expect(try DocumentRenderer.render(result, to: .csv) == "`x")
+        #expect(try DocumentRenderer.render(result, to: .html).contains("`<code>x</code>"))
+        for length in [1, 2, 3] {
+            let delimiter = String(repeating: "`", count: length)
+            let markdown = "\\`" + delimiter + "x" + delimiter
+            let value = ConverterResult(sections: [.init(markdown: markdown)])
+            #expect(try DocumentRenderer.render(value, to: .plaintext) == "`x")
+            #expect(try DocumentRenderer.render(value, to: .html).contains("`<code>x</code>"))
+        }
+        let trailingSlash = ConverterResult(sections: [.init(markdown: "`a\\`")])
+        #expect(try DocumentRenderer.render(trailingSlash, to: .plaintext) == "a\\")
+    }
+
+    @Test func CSVMarkdownEscapesPreserveCombiningMarksAndVariationSelectors() async throws {
+        for mark in ["\u{0301}", "\u{FE0F}"] {
+            for punctuation in ["*", "_", "`", "[", "]", "<", ">", "|", "\\"] {
+                let value = punctuation + mark + "x" + punctuation + mark
+                let result = try await PicoDocsEngine.convert(data: Data(("Header\n" + value).utf8), filename: "unicode.csv")
+                let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+                #expect(try html.getElementsByTag("td").first()?.text() == value)
+                #expect(try DocumentRenderer.render(result, to: .plaintext).contains(value))
+                #expect(try DocumentRenderer.render(result, to: .csv).contains(value))
+            }
+        }
+    }
+
     @Test func bareTablePipesRemainCellBoundariesWithoutShiftingEscapes() async throws {
         let source = #"| `a|b` | later \* |"# + "\n| --- | --- |"
         let rtf = "{\\rtf1\\ansi " + source.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\n", with: "\\line ") + "}"
