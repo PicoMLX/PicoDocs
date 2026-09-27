@@ -139,8 +139,8 @@ public struct PowerPointConverter: DocumentConverter {
         let target = relation.target
         let notesPath = WordConverter.resolvePartPath(target, relativeTo: directory(of: slidePath))
         guard let notes = parts.document(notesPath, root: "p:notes") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
-        guard let root = notes.children().first(), let common = child(of: root, named: "p:csld"),
-              let tree = child(of: common, named: "p:sptree") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+        guard let root = notes.children().first(), let common = selectedChild(of: root, named: "p:csld"),
+              let tree = selectedChild(of: common, named: "p:sptree") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         var context = SlideContext(archive: archive, partPath: notesPath,
                                    relationships: Self.relationships(archive, forPart: notesPath),
                                    images: ImageCollector(), embedsImages: false)
@@ -230,8 +230,8 @@ public struct PowerPointConverter: DocumentConverter {
             }
             if ["p:sldlayout", "p:sldmaster", "p:notesmaster", "p:handoutmaster"].contains(root) {
                 guard let element = parsed.children().first(),
-                      let common = PowerPointConverter.child(of: element, named: "p:csld"),
-                      PowerPointConverter.child(of: common, named: "p:sptree") != nil else {
+                      let common = PowerPointConverter.selectedChild(of: element, named: "p:csld"),
+                      PowerPointConverter.selectedChild(of: common, named: "p:sptree") != nil else {
                     archive.fail(PicoDocsError.fileCorrupted); return nil
                 }
             }
@@ -251,7 +251,7 @@ public struct PowerPointConverter: DocumentConverter {
     /// A slide's title (from its title placeholder) and its other content blocks.
     static func renderSlide(_ slide: Document, context: inout SlideContext) -> (title: String?, blocks: [String]) {
         guard let root = slide.children().first(), root.tagName().lowercased() == "p:sld",
-              let common = child(of: root, named: "p:csld"), let tree = child(of: common, named: "p:sptree") else {
+              let common = selectedChild(of: root, named: "p:csld"), let tree = selectedChild(of: common, named: "p:sptree") else {
             context.archive.fail(PicoDocsError.fileCorrupted)
             return (nil, [])
         }
@@ -490,8 +490,8 @@ public struct PowerPointConverter: DocumentConverter {
                         }
                     }
                 }
-                if let root = part.children().first(), let common = PowerPointConverter.child(of: root, named: "p:csld"),
-                   let tree = PowerPointConverter.child(of: common, named: "p:sptree") { collect(tree) }
+                if let root = part.children().first(), let common = PowerPointConverter.selectedChild(of: root, named: "p:csld"),
+                   let tree = PowerPointConverter.selectedChild(of: common, named: "p:sptree") { collect(tree) }
                 indexes[key] = result; buildCount += 1
             }
             let equivalent = ["title", "ctrTitle"].contains(type) ? "title" : (["body", "obj"].contains(type) ? "body" : type)
@@ -528,6 +528,10 @@ public struct PowerPointConverter: DocumentConverter {
             else { children.append(element) }
         }
         return children
+    }
+
+    private static func selectedChild(of container: Element, named name: String) -> Element? {
+        selectedChildren(in: container).first { $0.tagName().lowercased() == name }
     }
 
     private static func selectedParagraphs(in body: Element) -> [Element] {

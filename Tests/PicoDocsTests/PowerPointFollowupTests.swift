@@ -5,6 +5,41 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func structuralCompatibilityWrappersPreserveSlidesAndNotes() async throws {
+        typealias B = PowerPointConverterTests
+        let noteShape = B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: ["<a:p><a:r><a:t>Notes text</a:t></a:r></a:p>"])
+        let notes = "<p:notes \(B.namespaces)><p:cSld><p:spTree>" + noteShape + "</p:spTree></p:cSld></p:notes>"
+        let base = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Visible"), relationships: [("notes", "rel/notesSlide", "../notesSlides/n.xml")])], extraParts: [("ppt/notesSlides/n.xml", Array(notes.utf8))])
+        for node in ["p:cSld", "p:spTree"] {
+            for fallback in [false, true] {
+                let parts = try entries(base).map { entry -> (name: String, data: [UInt8]) in
+                    guard entry.name == "ppt/slides/s.xml" || entry.name == "ppt/notesSlides/n.xml" else { return entry }
+                    let open = fallback ? "<mc:AlternateContent><mc:Choice Requires=\"p14\"/><mc:Fallback>" : "<mc:AlternateContent><mc:Choice Requires=\"a\">"
+                    let close = fallback ? "</mc:Fallback></mc:AlternateContent>" : "</mc:Choice><mc:Fallback/></mc:AlternateContent>"
+                    let xml = String(decoding: entry.data, as: UTF8.self).replacingOccurrences(of: "<" + node + ">", with: open + "<" + node + ">").replacingOccurrences(of: "</" + node + ">", with: "</" + node + ">" + close)
+                    return (entry.name, Array(xml.utf8))
+                }
+                let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(parts), filename: "structure.pptx")
+                #expect(result.sections.first?.title == "Visible")
+                #expect(result.sections.first?.metadata["notes"] == "- Notes text")
+            }
+        }
+    }
+
+    @Test func wrappedLayoutAndMasterStructureRetainsPlaceholderInheritance() async throws {
+        typealias B = PowerPointConverterTests
+        let ph = #"<p:ph type="body" idx="1"/>"#
+        let shape = B.shape(placeholder: ph, paragraphs: ["<a:p><a:r><a:t>Inherited</a:t></a:r></a:p>"])
+        let layoutShape = B.shape(placeholder: ph, paragraphs: []).replacingOccurrences(of: "<a:bodyPr/>", with: #"<a:bodyPr/><a:lstStyle><a:lvl1pPr><a:buNone/><a:defRPr b="1"/></a:lvl1pPr></a:lstStyle>"#)
+        let layout = "<p:sldLayout \(B.namespaces)>" + selectedWrapper("<p:cSld>" + selectedWrapper("<p:spTree>" + layoutShape + "</p:spTree>") + "</p:cSld>") + "</p:sldLayout>"
+        let master = "<p:sldMaster \(B.namespaces)>" + selectedWrapper("<p:cSld>" + selectedWrapper("<p:spTree/>") + "</p:cSld>") + "</p:sldMaster>"
+        let rels = B.relationshipsXML([("master", "rel/slideMaster", "../slideMasters/m.xml")])
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: shape, relationships: [("layout", "rel/slideLayout", "../slideLayouts/l.xml")])], extraParts: [("ppt/slideLayouts/l.xml", Array(layout.utf8)), ("ppt/slideLayouts/_rels/l.xml.rels", Array(rels.utf8)), ("ppt/slideMasters/m.xml", Array(master.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "inherit.pptx")
+        #expect(result.markdown() == "**Inherited**")
+    }
+
+
     private func selectedWrapper(_ selected: String, fallback: String = "") -> String {
         "<mc:AlternateContent><mc:Choice Requires=\"a\">" + selected + "</mc:Choice><mc:Fallback>" + fallback + "</mc:Fallback></mc:AlternateContent>"
     }
