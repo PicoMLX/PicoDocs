@@ -43,8 +43,7 @@ public struct PowerPointConverter: DocumentConverter {
         _ = Self.contentType("", archive: archive)
         try archive.check()
         let packageRelationships = Self.relationships(archive, forPart: "")
-        let officeTypes: Set<String> = ["http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument", "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument"]
-        let officeDocuments = packageRelationships.values.filter { officeTypes.contains($0.type) }
+        let officeDocuments = packageRelationships.values.filter { $0.isType("/officeDocument") }
         guard officeDocuments.count == 1, let officeDocument = officeDocuments.first, !officeDocument.external else {
             try archive.check()
             throw PicoDocsError.fileCorrupted
@@ -125,7 +124,7 @@ public struct PowerPointConverter: DocumentConverter {
         }
         guard total == direct.count else { throw PicoDocsError.fileCorrupted }
         for slideID in direct {
-            guard let id = try? slideID.attr("r:id"), let relation = relationships[id], !relation.external, relation.type.hasSuffix("/slide") else { throw PicoDocsError.fileCorrupted }; let target = relation.target
+            guard let id = try? slideID.attr("r:id"), let relation = relationships[id], !relation.external, relation.isType("/slide") else { throw PicoDocsError.fileCorrupted }; let target = relation.target
             paths.append(WordConverter.resolvePartPath(target, relativeTo: directory(of: presentationPath)))
         }
         return paths
@@ -133,7 +132,7 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// Speaker notes for a slide, from its notes-slide part's body placeholder.
     static func notes(forSlide slidePath: String, relationships: [String: Relationship], archive: PowerPointPackage, parts: inout PartCache) -> String? {
-        let noteRelations = relationships.values.filter { $0.type.hasSuffix("/notesSlide") }
+        let noteRelations = relationships.values.filter { $0.isType("/notesSlide") }
         guard noteRelations.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         guard let relation = noteRelations.first else { return nil }
         guard !relation.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
@@ -146,12 +145,12 @@ public struct PowerPointConverter: DocumentConverter {
                                    relationships: Self.relationships(archive, forPart: notesPath),
                                    images: ImageCollector(), embedsImages: false)
         let notesRels = Self.relationships(archive, forPart: notesPath)
-        let backlinks = notesRels.values.filter { $0.type.hasSuffix("/slide") }
+        let backlinks = notesRels.values.filter { $0.isType("/slide") }
         guard backlinks.count == 1, let backlink = backlinks.first, !backlink.external,
               WordConverter.resolvePartPath(backlink.target, relativeTo: directory(of: notesPath)) == slidePath else {
             archive.fail(PicoDocsError.fileCorrupted); return nil
         }
-        let masters = notesRels.values.filter { $0.type.hasSuffix("/notesMaster") }
+        let masters = notesRels.values.filter { $0.isType("/notesMaster") }
         guard masters.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         if let master = masters.first {
             guard !master.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
@@ -173,7 +172,7 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// Optional core-properties metadata is located by the package relationship.
     static func coreProperties(_ archive: PowerPointPackage) -> (title: String?, author: String?) {
-        let properties = relationships(archive, forPart: "").values.filter { $0.type.hasSuffix("/metadata/core-properties") }
+        let properties = relationships(archive, forPart: "").values.filter { $0.isType("/metadata/core-properties") }
         guard properties.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return (nil, nil) }
         guard let relation = properties.first else { return (nil, nil) }
         let path = WordConverter.resolvePartPath(relation.target, relativeTo: "")
@@ -242,7 +241,7 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// The part a relationship of `type` (e.g. "/slideLayout") points to.
     static func relatedPart(of part: String, type: String, relationships: [String: Relationship], archive: PowerPointPackage) -> String? {
-        let matches = relationships.values.filter { $0.type.hasSuffix(type) }
+        let matches = relationships.values.filter { $0.isType(type) }
         guard matches.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         guard let relation = matches.first else { return nil }
         guard !relation.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
@@ -283,7 +282,7 @@ public struct PowerPointConverter: DocumentConverter {
         guard let id = try? click?.attr("r:id"), !id.isEmpty else { return nil }
         guard let relation = context.relationships[id] else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
         guard relation.external else { return nil }
-        guard relation.type.hasSuffix("/hyperlink") else {
+        guard relation.isType("/hyperlink") else {
             context.archive.fail(PicoDocsError.fileCorrupted)
             return nil
         }
@@ -517,7 +516,7 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     private static func placeholder(of shape: Element) -> Element? {
-        child(of: shape, named: "p:nvsppr").flatMap { child(of: $0, named: "p:nvpr") }.flatMap { child(of: $0, named: "p:ph") }
+        selectedChild(of: shape, named: "p:nvsppr").flatMap { selectedChild(of: $0, named: "p:nvpr") }.flatMap { selectedChild(of: $0, named: "p:ph") }
     }
 
     private static func textBody(of shape: Element) -> Element? {
@@ -637,7 +636,7 @@ public struct PowerPointConverter: DocumentConverter {
                 let properties = child(of: node, named: "a:rpr")
                 let text = escapeMarkdown(child(of: node, named: "a:t").map(wholeText) ?? "")
                 guard !text.isEmpty else { continue }
-                let click = properties.flatMap { child(of: $0, named: "a:hlinkclick") }
+                let click = properties.flatMap { selectedChild(of: $0, named: "a:hlinkclick") }
                 let link = hyperlink(click, context: context)
                 runs.append(Run(text: text, bold: isOn(properties, "b", defaults: defaults), italic: isOn(properties, "i", defaults: defaults), link: click == nil ? context.defaultLink : link))
             case "a:br":
@@ -810,7 +809,7 @@ public struct PowerPointConverter: DocumentConverter {
         let linked = (try? blip.attr("r:link")) ?? ""
         let id = embedded.isEmpty ? linked : embedded
         guard !id.isEmpty else { return nil }
-        guard let relation = context.relationships[id], relation.type.hasSuffix("/image"),
+        guard let relation = context.relationships[id], relation.isType("/image"),
               relation.external == embedded.isEmpty else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
         let source: String
         if embedded.isEmpty {
@@ -821,13 +820,13 @@ public struct PowerPointConverter: DocumentConverter {
             source = (mediaPath as NSString).lastPathComponent
             if context.embedsImages { context.images.add(path: mediaPath, filename: source, archive: context.archive) }
         }
-        let properties = child(of: picture, named: "p:nvpicpr").flatMap { child(of: $0, named: "p:cnvpr") }
+        let properties = selectedChild(of: picture, named: "p:nvpicpr").flatMap { selectedChild(of: $0, named: "p:cnvpr") }
         let description = (try? properties?.attr("descr")) ?? ""
         let name = (try? properties?.attr("name")) ?? ""
         let alt = !description.isEmpty ? description : (!name.isEmpty ? name : "image")
-        let label = escapeMarkdown(alt)
+        let label = escapeMarkdown(alt.split(whereSeparator: \.isWhitespace).joined(separator: " "))
         let image = "![\(label)](\(linkDestination(source)))"
-        let click = properties.flatMap { child(of: $0, named: "a:hlinkclick") }
+        let click = properties.flatMap { selectedChild(of: $0, named: "a:hlinkclick") }
         if let target = click == nil ? context.defaultLink : hyperlink(click, context: context) { return "[\(image)](\(linkDestination(target)))" }
         return image
     }
@@ -915,6 +914,14 @@ public struct PowerPointConverter: DocumentConverter {
         let type: String
         let target: String
         var external = false
+
+        func isType(_ suffix: String) -> Bool {
+            if suffix == "/metadata/core-properties" {
+                return type == "http://schemas.openxmlformats.org/package/2006/relationships" + suffix
+            }
+            return type == "http://schemas.openxmlformats.org/officeDocument/2006/relationships" + suffix
+                || type == "http://purl.oclc.org/ooxml/officeDocument/relationships" + suffix
+        }
     }
 
     /// A part's relationships (`<dir>/_rels/<file>.rels`), keyed by id.

@@ -5,13 +5,70 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func relatedPartsUseExactTransitionalAndStrictRelationshipTypes() throws {
+        let archive = try #require(Archive(data: PagesConverterTests.makeZip([("placeholder", [0])]), accessMode: .read))
+        for suffix in ["/slideLayout", "/slideMaster", "/notesMaster", "/notesSlide", "/slide", "/image", "/hyperlink"] {
+            let vendor = PowerPointConverter.Relationship(type: "https://vendor.example" + suffix, target: "missing.xml")
+            for base in ["http://schemas.openxmlformats.org/officeDocument/2006/relationships", "http://purl.oclc.org/ooxml/officeDocument/relationships"] {
+                let standard = PowerPointConverter.Relationship(type: base + suffix, target: "real.xml")
+                let package = PowerPointPackage(archive: archive)
+                #expect(PowerPointConverter.relatedPart(of: "ppt/slides/s.xml", type: suffix, relationships: ["vendor": vendor, "standard": standard], archive: package) == "ppt/slides/real.xml")
+                try package.check()
+                #expect(!vendor.isType(suffix)); #expect(standard.isType(suffix))
+            }
+            let package = PowerPointPackage(archive: archive)
+            #expect(PowerPointConverter.relatedPart(of: "ppt/slides/s.xml", type: suffix, relationships: ["vendor": vendor], archive: package) == nil)
+            try package.check()
+        }
+    }
+
+    @Test func selectedPlaceholderWrappersRetainClassificationAndInheritance() async throws {
+        typealias B = PowerPointConverterTests
+        func wrap(_ shape: String, level: String) -> String {
+            if level == "p:ph" {
+                return shape.replacingOccurrences(of: #"<p:ph type="title"/>"#, with: selectedWrapper(#"<p:ph type="title"/>"#, fallback: #"<p:ph type="ftr"/>"#))
+                    .replacingOccurrences(of: #"<p:ph type="ftr"/>"#, with: selectedWrapper(#"<p:ph type="ftr"/>"#))
+            }
+            return shape.replacingOccurrences(of: "<" + level + ">", with: "<mc:AlternateContent><mc:Choice Requires=\"a\"><" + level + ">")
+                .replacingOccurrences(of: "</" + level + ">", with: "</" + level + "></mc:Choice><mc:Fallback/></mc:AlternateContent>")
+        }
+        for level in ["p:nvSpPr", "p:nvPr", "p:ph"] {
+            let title = wrap(B.titleShape("Title"), level: level)
+            let footer = wrap(B.shape(placeholder: #"<p:ph type="ftr"/>"#, paragraphs: ["<a:p><a:r><a:t>Hidden footer</a:t></a:r></a:p>"]), level: level)
+            let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: title + footer)]), filename: "placeholders.pptx")
+            #expect(result.sections.first?.title == "Title"); #expect(!result.markdown().contains("footer"))
+        }
+        let ph = selectedWrapper(#"<p:ph type="body" idx="1"/>"#)
+        let shape = B.shape(placeholder: ph, paragraphs: ["<a:p><a:r><a:t>Inherited</a:t></a:r></a:p>"])
+        let layoutShape = B.shape(placeholder: ph, paragraphs: []).replacingOccurrences(of: "<a:bodyPr/>", with: #"<a:bodyPr/><a:lstStyle><a:lvl1pPr><a:buNone/><a:defRPr b="1"/></a:lvl1pPr></a:lstStyle>"#)
+        let layout = "<p:sldLayout \(B.namespaces)><p:cSld><p:spTree>" + layoutShape + "</p:spTree></p:cSld></p:sldLayout>"
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: shape, relationships: [("layout", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout", "../slideLayouts/l.xml")])], extraParts: [("ppt/slideLayouts/l.xml", Array(layout.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "inherited-placeholder.pptx")
+        #expect(result.markdown() == "**Inherited**")
+    }
+
+    @Test func pictureAlternativeTextCannotIntroduceMarkdownBlocks() async throws {
+        typealias B = PowerPointConverterTests
+        for attribute in ["descr", "name"] {
+            for newline in ["&#10;", "&#13;", "&#13;&#10;"] {
+                let properties = "<p:nvPicPr>" + selectedWrapper("<p:cNvPr \(attribute)=\"Line\(newline)# Heading\"/>") + "</p:nvPicPr>"
+                let picture = "<p:pic>" + selectedWrapper(properties) + "<p:blipFill><a:blip r:embed=\"image\"/></p:blipFill></p:pic>"
+                let data = B.deck(slides: [.init(file: "s.xml", shapes: picture, relationships: [("image", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "../media/p.png")])], extraParts: [("ppt/media/p.png", [1,2,3])])
+                let result = try await PicoDocsEngine.convert(data: data, filename: "alt.pptx")
+                #expect(result.markdown() == "![Line # Heading](p.png)")
+                #expect(try DocumentRenderer.render(result, to: .html).contains("<img "))
+                #expect(try DocumentRenderer.render(result, to: .plaintext).contains("Line # Heading"))
+            }
+        }
+    }
+
     @Test func hiddenNotePlaceholdersAndGroupsAreExcluded() async throws {
         typealias B = PowerPointConverterTests
         func note(_ text: String) -> String { B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: ["<a:p><a:r><a:t>\(text)</a:t></a:r></a:p>"]) }
         let hidden = note("Hidden shape").replacingOccurrences(of: "<p:cNvPr ", with: "<p:cNvPr hidden=\"1\" ")
         let group = "<p:grpSp><p:nvGrpSpPr><p:cNvPr hidden=\"true\"/></p:nvGrpSpPr>" + selectedWrapper(note("Hidden group")) + "</p:grpSp>"
         let notes = "<p:notes \(B.namespaces)><p:cSld><p:spTree>" + hidden + group + note("Visible") + "</p:spTree></p:cSld></p:notes>"
-        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Slide"), relationships: [("notes", "rel/notesSlide", "../notesSlides/n.xml")])], extraParts: [("ppt/notesSlides/n.xml", Array(notes.utf8))])
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Slide"), relationships: [("notes", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide", "../notesSlides/n.xml")])], extraParts: [("ppt/notesSlides/n.xml", Array(notes.utf8))])
         let result = try await PicoDocsEngine.convert(data: data, filename: "hidden-notes.pptx")
         #expect(result.sections.first?.metadata["notes"] == "- Visible")
         #expect(!result.markdown().contains("Hidden"))
@@ -22,7 +79,7 @@ struct PowerPointFollowupTests {
         let picture = #"<p:pic xmlns:e="urn:extension" mc:Ignorable="e"><p:blipFill><e:ignored><a:blip r:embed="missing"/></e:ignored><a:blip r:embed="real"/></p:blipFill></p:pic>"#
         let cell = "<a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Visible cell</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl>"
         let table = "<p:graphicFrame xmlns:e=\"urn:extension\" mc:Ignorable=\"e\"><e:ignored>" + cell.replacingOccurrences(of: "Visible", with: "Hidden") + "</e:ignored><a:graphic><a:graphicData>" + cell + "</a:graphicData></a:graphic></p:graphicFrame>"
-        let data = B.deck(slides: [.init(file: "s.xml", shapes: picture + table, relationships: [("real", "rel/image", "../media/real.png")])], extraParts: [("ppt/media/real.png", [1,2,3])])
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: picture + table, relationships: [("real", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "../media/real.png")])], extraParts: [("ppt/media/real.png", [1,2,3])])
         let result = try await PicoDocsEngine.convert(data: data, filename: "ignored.pptx")
         #expect(result.markdown().contains("real.png")); #expect(result.markdown().contains("Visible cell")); #expect(!result.markdown().contains("Hidden"))
     }
@@ -84,7 +141,7 @@ struct PowerPointFollowupTests {
     @Test func relationshipTargetModesUseExactEnumeration() throws {
         for mode: String? in [nil, "Internal", "External", "Bogus", "", "external"] {
             let attribute = mode.map { " TargetMode=\"\($0)\"" } ?? ""
-            let xml = "<Relationships><Relationship Id=\"link\" Type=\"rel/hyperlink\" Target=\"https://example.com\"\(attribute)/></Relationships>"
+            let xml = "<Relationships><Relationship Id=\"link\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com\"\(attribute)/></Relationships>"
             let data = PagesConverterTests.makeZip([("ppt/slides/_rels/s.xml.rels", Array(xml.utf8))])
             let package = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
             let relationships = PowerPointConverter.relationships(package, forPart: "ppt/slides/s.xml")
@@ -122,7 +179,7 @@ struct PowerPointFollowupTests {
         let picture = #"<p:pic><p:nvPicPr><p:cNvPr name="Preview"/></p:nvPicPr><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic>"#
         let frame = "<p:graphicFrame><a:graphic><a:graphicData><p:oleObj r:id=\"ole\">" + picture + "</p:oleObj></a:graphicData></a:graphic></p:graphicFrame>"
         let bytes: [UInt8] = [0x89, 0x50, 0x4e, 0x47]
-        let data = B.deck(slides: [.init(file: "s.xml", shapes: frame, relationships: [("image", "rel/image", "../media/preview.png")])], extraParts: [("ppt/media/preview.png", bytes)])
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: frame, relationships: [("image", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "../media/preview.png")])], extraParts: [("ppt/media/preview.png", bytes)])
         let result = try await PicoDocsEngine.convert(data: data, filename: "ole.pptx")
         #expect(result.markdown() == "![Preview](preview.png)")
         #expect(result.sections.first { $0.kind == .image }?.metadata["base64"] == Data(bytes).base64EncodedString())
@@ -146,7 +203,7 @@ struct PowerPointFollowupTests {
         }
         let picture = #"<p:pic><p:nvPicPr><p:cNvPr name="Picture"/></p:nvPicPr><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic>"#
         let group = "<p:grpSp><p:nvGrpSpPr><p:cNvPr><a:hlinkClick r:id=\"group\"/></p:cNvPr></p:nvGrpSpPr>" + text("Inherited") + text("Override", click: "child") + text("Unsafe", click: "unsafe") + "<p:grpSp>" + text("Nested") + picture + "</p:grpSp></p:grpSp>" + text("Outside")
-        let rels = #"<Relationships><Relationship Id="group" Type="rel/hyperlink" Target="https://example.com/group" TargetMode="External"/><Relationship Id="child" Type="rel/hyperlink" Target="https://example.com/child" TargetMode="External"/><Relationship Id="unsafe" Type="rel/hyperlink" Target="javascript:alert(1)" TargetMode="External"/><Relationship Id="image" Type="rel/image" Target="../media/image.png"/></Relationships>"#
+        let rels = #"<Relationships><Relationship Id="group" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/group" TargetMode="External"/><Relationship Id="child" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/child" TargetMode="External"/><Relationship Id="unsafe" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="javascript:alert(1)" TargetMode="External"/><Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image.png"/></Relationships>"#
         let data = B.deck(slides: [.init(file: "s.xml", shapes: group)], extraParts: [("ppt/slides/_rels/s.xml.rels", Array(rels.utf8)), ("ppt/media/image.png", [1,2,3])])
         let result = try await PicoDocsEngine.convert(data: data, filename: "group.pptx")
         let markdown = result.markdown()
@@ -161,7 +218,7 @@ struct PowerPointFollowupTests {
         typealias B = PowerPointConverterTests
         let noteShape = B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: ["<a:p><a:r><a:t>Notes text</a:t></a:r></a:p>"])
         let notes = "<p:notes \(B.namespaces)><p:cSld><p:spTree>" + noteShape + "</p:spTree></p:cSld></p:notes>"
-        let base = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Visible"), relationships: [("notes", "rel/notesSlide", "../notesSlides/n.xml")])], extraParts: [("ppt/notesSlides/n.xml", Array(notes.utf8))])
+        let base = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Visible"), relationships: [("notes", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide", "../notesSlides/n.xml")])], extraParts: [("ppt/notesSlides/n.xml", Array(notes.utf8))])
         for node in ["p:cSld", "p:spTree"] {
             for fallback in [false, true] {
                 let parts = try entries(base).map { entry -> (name: String, data: [UInt8]) in
@@ -185,8 +242,8 @@ struct PowerPointFollowupTests {
         let layoutShape = B.shape(placeholder: ph, paragraphs: []).replacingOccurrences(of: "<a:bodyPr/>", with: #"<a:bodyPr/><a:lstStyle><a:lvl1pPr><a:buNone/><a:defRPr b="1"/></a:lvl1pPr></a:lstStyle>"#)
         let layout = "<p:sldLayout \(B.namespaces)>" + selectedWrapper("<p:cSld>" + selectedWrapper("<p:spTree>" + layoutShape + "</p:spTree>") + "</p:cSld>") + "</p:sldLayout>"
         let master = "<p:sldMaster \(B.namespaces)>" + selectedWrapper("<p:cSld>" + selectedWrapper("<p:spTree/>") + "</p:cSld>") + "</p:sldMaster>"
-        let rels = B.relationshipsXML([("master", "rel/slideMaster", "../slideMasters/m.xml")])
-        let data = B.deck(slides: [.init(file: "s.xml", shapes: shape, relationships: [("layout", "rel/slideLayout", "../slideLayouts/l.xml")])], extraParts: [("ppt/slideLayouts/l.xml", Array(layout.utf8)), ("ppt/slideLayouts/_rels/l.xml.rels", Array(rels.utf8)), ("ppt/slideMasters/m.xml", Array(master.utf8))])
+        let rels = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster", "../slideMasters/m.xml")])
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: shape, relationships: [("layout", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout", "../slideLayouts/l.xml")])], extraParts: [("ppt/slideLayouts/l.xml", Array(layout.utf8)), ("ppt/slideLayouts/_rels/l.xml.rels", Array(rels.utf8)), ("ppt/slideMasters/m.xml", Array(master.utf8))])
         let result = try await PicoDocsEngine.convert(data: data, filename: "inherit.pptx")
         #expect(result.markdown() == "**Inherited**")
     }
@@ -223,7 +280,7 @@ struct PowerPointFollowupTests {
     @Test func misplacedOptionalRelationshipsFailInsteadOfDroppingContent() async throws {
         typealias B = PowerPointConverterTests
         let base = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Visible"))])
-        for declaration in ["<wrapper><Relationship Id=\"n\" Type=\"rel/notesSlide\" Target=\"n.xml\"/></wrapper>", "<Relationship Id=\"n\" Type=\"rel/notesSlide\" Target=\"n.xml\"><Relationship Id=\"nested\" Type=\"rel/slideLayout\" Target=\"l.xml\"/></Relationship>"] {
+        for declaration in ["<wrapper><Relationship Id=\"n\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide\" Target=\"n.xml\"/></wrapper>", "<Relationship Id=\"n\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide\" Target=\"n.xml\"><Relationship Id=\"nested\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout\" Target=\"l.xml\"/></Relationship>"] {
             let parts = try entries(base) + [("ppt/slides/_rels/s.xml.rels", Array(("<Relationships>" + declaration + "</Relationships>").utf8))]
             await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(parts), filename: "rels.pptx") }
         }
@@ -243,13 +300,13 @@ struct PowerPointFollowupTests {
         typealias B = PowerPointConverterTests
         let picture = #"<p:pic><p:nvPicPr><p:cNvPr name="Linked"/></p:nvPicPr><p:blipFill><a:blip r:link="remote"/></p:blipFill></p:pic>"#
         for target in ["https://example.com/image.png", "javascript:alert(1)"] {
-            let rels = "<Relationships><Relationship Id=\"remote\" Type=\"rel/image\" TargetMode=\"External\" Target=\"\(target)\"/></Relationships>"
+            let rels = "<Relationships><Relationship Id=\"remote\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" TargetMode=\"External\" Target=\"\(target)\"/></Relationships>"
             let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Slide") + picture)], extraParts: [("ppt/slides/_rels/s.xml.rels", Array(rels.utf8))])
             let result = try await PicoDocsEngine.convert(data: data, filename: "linked.pptx")
             #expect(result.markdown().contains("![Linked](https://example.com/image.png)") == target.hasPrefix("https:"))
             #expect(!result.markdown().contains("javascript:")); #expect(!result.sections.contains { $0.kind == .image })
         }
-        let rels = #"<Relationships><Relationship Id="embedded" Type="rel/image" Target="../media/p.png"/><Relationship Id="remote" Type="rel/image" TargetMode="External" Target="https://example.com/remote.png"/></Relationships>"#
+        let rels = #"<Relationships><Relationship Id="embedded" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/p.png"/><Relationship Id="remote" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" TargetMode="External" Target="https://example.com/remote.png"/></Relationships>"#
         let data = B.deck(slides: [.init(file: "s.xml", shapes: picture.replacingOccurrences(of: "r:link=", with: "r:embed=\"embedded\" r:link="))], extraParts: [("ppt/slides/_rels/s.xml.rels", Array(rels.utf8)), ("ppt/media/p.png", [1, 2, 3])])
         let result = try await PicoDocsEngine.convert(data: data, filename: "both.pptx")
         #expect(result.markdown().contains("![Linked](p.png)")); #expect(!result.markdown().contains("remote.png"))
