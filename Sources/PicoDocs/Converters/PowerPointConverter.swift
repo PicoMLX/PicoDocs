@@ -116,6 +116,8 @@ public struct PowerPointConverter: DocumentConverter {
         let lists = selectedChildren(in: root).filter { $0.tagName().lowercased() == "p:sldidlst" }
         guard lists.count <= 1 else { throw PicoDocsError.fileCorrupted }
         let direct = lists.first.map { selectedChildren(in: $0).filter { $0.tagName().lowercased() == "p:sldid" } } ?? []
+        // Repeated references still cost a full render, even when ZIP bytes are small.
+        guard direct.count <= 10_000 else { throw PicoDocsError.fileCorrupted }
         var pending = selectedChildren(in: root), total = 0
         while let element = pending.popLast() {
             try Task.checkCancellation()
@@ -138,7 +140,7 @@ public struct PowerPointConverter: DocumentConverter {
         guard !relation.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         let target = relation.target
         let notesPath = WordConverter.resolvePartPath(target, relativeTo: directory(of: slidePath))
-        guard let notes = parts.document(notesPath, root: "p:notes") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+        guard let notes = parts.document(notesPath, root: "p:notes", cache: false) else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         guard let root = notes.children().first(), let common = selectedChild(of: root, named: "p:csld"),
               let tree = selectedChild(of: common, named: "p:sptree") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         var context = SlideContext(archive: archive, partPath: notesPath,
@@ -194,7 +196,7 @@ public struct PowerPointConverter: DocumentConverter {
             return (nil, nil)
         }
         func value(_ tag: String) -> String? {
-            let text = (try? core.getElementsByTag(tag).first()?.text())?
+            let text = core.children().first().flatMap { selectedChild(of: $0, named: tag) }.map(wholeText)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return (text?.isEmpty ?? true) ? nil : text
         }
@@ -229,12 +231,12 @@ public struct PowerPointConverter: DocumentConverter {
 
         init(archive: PowerPointPackage) { self.archive = archive }
 
-        mutating func document(_ path: String, root: String) -> Document? {
+        mutating func document(_ path: String, root: String, cache: Bool = true) -> Document? {
             let parsed: Document?
-            if let cached = documents[path] { parsed = cached }
+            if cache, let cached = documents[path] { parsed = cached }
             else {
                 parsed = PowerPointConverter.xml(archive, path: path)
-                documents[path] = parsed
+                if cache { documents[path] = parsed }
             }
             guard let parsed, parsed.children().first()?.tagName().lowercased() == root else {
                 archive.fail(PicoDocsError.fileCorrupted)
@@ -443,7 +445,7 @@ public struct PowerPointConverter: DocumentConverter {
             if let master = context.master {
                 sources.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap(listStyle))
                 let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
-                sources.append(try? master.getElementsByTag(style).first())
+                sources.append(masterTextStyle(master, named: style))
             }
         }
         sources.append(context.defaultTextStyle)
@@ -469,7 +471,7 @@ public struct PowerPointConverter: DocumentConverter {
             if let master = context.master {
                 styles.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap(listStyle))
                 let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
-                styles.append(try? master.getElementsByTag(style).first())
+                styles.append(masterTextStyle(master, named: style))
             }
         }
         styles.append(context.defaultTextStyle)
@@ -482,6 +484,12 @@ public struct PowerPointConverter: DocumentConverter {
         }
     }
 
+    private static func masterTextStyle(_ master: Document, named name: String) -> Element? {
+        guard let root = master.children().first() else { return nil }
+        let container = root.tagName().lowercased() == "p:notesmaster" ? root : selectedChild(of: root, named: "p:txstyles")
+        return container.flatMap { selectedChild(of: $0, named: name.lowercased()) }
+    }
+
     /// The placeholder shape in a layout/master matching a slide placeholder: by
     /// `idx` when both have one, else by type (a typeless placeholder is "obj",
     /// which a master provides as "body").
@@ -491,11 +499,14 @@ public struct PowerPointConverter: DocumentConverter {
         private(set) var buildCount = 0
 
         func match(in part: Document, type: String, index: String) -> Element? {
+            guard !Task.isCancelled else { return nil }
             let key = ObjectIdentifier(part)
             if indexes[key] == nil {
                 var result = Index()
                 func collect(_ container: Element) {
+                    guard !Task.isCancelled else { return }
                     for element in container.children().array() {
+                        if Task.isCancelled { return }
                         switch element.tagName().lowercased() {
                         case "p:sp":
                             guard let ph = PowerPointConverter.placeholder(of: element) else { continue }
@@ -513,6 +524,7 @@ public struct PowerPointConverter: DocumentConverter {
                 }
                 if let root = part.children().first(), let common = PowerPointConverter.selectedChild(of: root, named: "p:csld"),
                    let tree = PowerPointConverter.selectedChild(of: common, named: "p:sptree") { collect(tree) }
+                guard !Task.isCancelled else { return nil }
                 indexes[key] = result; buildCount += 1
             }
             let equivalent = ["title", "ctrTitle"].contains(type) ? "title" : (["body", "obj"].contains(type) ? "body" : type)
@@ -977,6 +989,8 @@ public struct PowerPointConverter: DocumentConverter {
             guard map[id] == nil else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
             let mode = (try? element.attr("TargetMode")) ?? ""
             guard !element.hasAttr("TargetMode") || ["Internal", "External"].contains(mode) else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
+            // Bound allocation in this validation and subsequent path resolution.
+            guard target.utf8.count <= 32 * 1024 else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
             let external = mode == "External"
             if !external {
                 var depth = target.hasPrefix("/") ? 0 : directory(of: part).split(separator: "/").count
@@ -1012,6 +1026,9 @@ public struct PowerPointConverter: DocumentConverter {
                 archive.fail(PicoDocsError.fileCorrupted); return nil
             }
             if tag.hasPrefix("extension") || tag == "p:ext" || tag == "a:ext" { continue }
+            if element.getAttributes()?.asList().contains(where: { $0.getKey().hasPrefix("requiredextension") }) == true {
+                archive.fail(PicoDocsError.fileCorrupted); return nil
+            }
             let required = ((try? element.attr("mc:MustUnderstand")) ?? "").split(whereSeparator: \.isWhitespace)
             if required.contains("unsupported") { archive.fail(PicoDocsError.fileCorrupted); return nil }
             if tag == "mc:alternatecontent" {

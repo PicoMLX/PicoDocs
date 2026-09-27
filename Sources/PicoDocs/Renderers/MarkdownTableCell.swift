@@ -89,7 +89,7 @@ enum MarkdownTableCell {
     }
 
     /// Decode canonical breaks without interpreting an escaped literal marker.
-    static func decodeBreaks(_ text: String) -> String {
+    static func decodeBreaks(_ text: String, breakText: String = "\n") -> String {
         var brackets = 0, destinationDepth = 0
         return mapCodeSpans(text, code: { codePipes($0, encoding: false) }, plain: { plain in
             var output = "", index = plain.startIndex
@@ -111,12 +111,20 @@ enum MarkdownTableCell {
                         destinationDepth = 1; output += "]("; index = plain.index(after: next); continue
                     }
                 } else if plain[index...].hasPrefix("<br>") {
-                    output.append("\n"); index = plain.index(index, offsetBy: 4); continue
+                    output += breakText; index = plain.index(index, offsetBy: 4); continue
                 }
                 output.append(character); index = next
             }
             return output
         })
+    }
+
+    /// Keep breaks opaque while emphasis/link parsing runs so a formatted run
+    /// can span a native cell break without leaking Markdown delimiters.
+    static func inlineText(_ text: String, breakText: String = "\n", inline: (String) -> String) -> String {
+        var token = "\u{E042}"
+        while text.contains(token) { token += "\u{E043}" }
+        return inline(decodeBreaks(text, breakText: token)).replacingOccurrences(of: token, with: breakText)
     }
 
     /// Inverse of `escapeDelimiters`: turns `\\` back into `\` and `\|` into `|`,

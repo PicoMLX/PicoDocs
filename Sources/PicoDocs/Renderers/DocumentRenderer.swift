@@ -63,7 +63,7 @@ public enum DocumentRenderer {
             case .list(let list):
                 out.append(list.plaintext { stripInline($0, footnoteNumbers: numbers) })
             case .table(let rows):
-                out.append(rows.map { $0.map { stripInline($0, footnoteNumbers: numbers) }.joined(separator: "\t") }.joined(separator: "\n"))
+                out.append(rows.map { $0.map { MarkdownTableCell.inlineText($0) { stripInline($0, footnoteNumbers: numbers) } }.joined(separator: "\t") }.joined(separator: "\n"))
             }
         }
         var text = out.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -155,7 +155,9 @@ public enum DocumentRenderer {
         for section in imageSections {
             guard let filename = imageRefName(for: section), basenameCounts[filename] == 1,
                   let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
-            let mime = section.metadata["mimeType"] ?? "application/octet-stream"
+            // Parameters are metadata, not part of the payload delimiter syntax.
+            let mime = (section.metadata["mimeType"] ?? "application/octet-stream")
+                .split(separator: ";", maxSplits: 1).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? "application/octet-stream"
             result = result.replacingOccurrences(
                 of: "src=\"\(escapeHTML(filename))\"",
                 with: "src=\"\(escapeHTML("data:\(mime);base64,\(base64)"))\""
@@ -175,10 +177,10 @@ public enum DocumentRenderer {
     private static func renderHTMLTable(_ rows: [[String]], footnoteNumbers: [String: Int] = [:]) -> String {
         guard let header = rows.first else { return "" }
         var out = "<table>\n<thead>\n<tr>"
-        out += header.map { "<th>\(inlineHTML($0, footnoteNumbers: footnoteNumbers).replacingOccurrences(of: "\n", with: "<br>"))</th>" }.joined()
+        out += header.map { "<th>\(MarkdownTableCell.inlineText($0, breakText: "<br>") { inlineHTML($0, footnoteNumbers: footnoteNumbers) })</th>" }.joined()
         out += "</tr>\n</thead>\n<tbody>\n"
         for row in rows.dropFirst() {
-            out += "<tr>" + row.map { "<td>\(inlineHTML($0, footnoteNumbers: footnoteNumbers).replacingOccurrences(of: "\n", with: "<br>"))</td>" }.joined() + "</tr>\n"
+            out += "<tr>" + row.map { "<td>\(MarkdownTableCell.inlineText($0, breakText: "<br>") { inlineHTML($0, footnoteNumbers: footnoteNumbers) })</td>" }.joined() + "</tr>\n"
         }
         out += "</tbody>\n</table>"
         return out
@@ -409,9 +411,9 @@ public enum DocumentRenderer {
                 // (second row), so all-dash data rows elsewhere are preserved.
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.decodeBreaks($0) }
+                    let cells = parseTableRow(lines[i])
                     if !(rowIndex == 1 && isTableSeparatorRow(cells)) {
-                        rows.append(cells.map { csvField(stripInline($0)) }.joined(separator: ","))
+                        rows.append(cells.map { csvField(MarkdownTableCell.inlineText($0) { stripInline($0) }) }.joined(separator: ","))
                     }
                     rowIndex += 1
                     i += 1
@@ -472,7 +474,7 @@ public enum DocumentRenderer {
                 var rows: [[String]] = []
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.decodeBreaks($0) }
+                    let cells = parseTableRow(lines[i])
                     // The header/body separator is conventionally the second row;
                     // only drop an all-dash row there, so real data rows that
                     // happen to be all dashes elsewhere are kept.

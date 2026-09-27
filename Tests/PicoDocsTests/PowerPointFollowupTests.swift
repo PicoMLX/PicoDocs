@@ -5,6 +5,143 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func repeatedSlideReferencesHaveARenderLimit() throws {
+        typealias B = PowerPointConverterTests
+        for count in [10_000, 10_001] {
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: "")], order: Array(repeating: "s.xml", count: count))
+            let package = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
+            let presentation = try #require(PowerPointConverter.xml(package, path: "ppt/presentation.xml"))
+            if count == 10_000 { #expect(try PowerPointConverter.slidePaths(presentation, archive: package).count == count) }
+            else { #expect(throws: PicoDocsError.fileCorrupted) { try PowerPointConverter.slidePaths(presentation, archive: package) } }
+        }
+    }
+
+    @Test func notesDOMIsReleasedWhileSharedMastersAreCached() throws {
+        typealias B = PowerPointConverterTests
+        let note = "<p:notes \(B.namespaces)><p:cSld><p:spTree/></p:cSld></p:notes>"
+        let master = note.replacingOccurrences(of: "p:notes", with: "p:notesMaster")
+        let data = PagesConverterTests.makeZip([("note.xml", Array(note.utf8)), ("master.xml", Array(master.utf8))])
+        let package = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
+        var cache = PowerPointConverter.PartCache(archive: package)
+        weak var released: Document?
+        do {
+            let parsed = cache.document("note.xml", root: "p:notes", cache: false)
+            let document = try #require(parsed)
+            released = document
+        }
+        #expect(released == nil)
+        let parsedMaster = cache.document("master.xml", root: "p:notesmaster")
+        let first = try #require(parsedMaster)
+        #expect(cache.document("master.xml", root: "p:notesmaster") === first)
+        try package.check()
+    }
+
+    @Test func cancelledPlaceholderIndexIsNotInstalled() async throws {
+        let count = try await Task {
+            typealias B = PowerPointConverterTests
+            let document = try SwiftSoup.parse("<p:sldLayout \(B.namespaces)><p:cSld><p:spTree>" + B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: []) + "</p:spTree></p:cSld></p:sldLayout>", "", SwiftSoup.Parser.xmlParser())
+            let cache = PowerPointConverter.PlaceholderCache()
+            withUnsafeCurrentTask { $0?.cancel() }
+            #expect(cache.match(in: document, type: "body", index: "") == nil)
+            return cache.buildCount
+        }.value
+        #expect(count == 0)
+    }
+
+    @Test func compatibilityAttributesHaveTokenAndByteLimits() {
+        let declarations = #"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main""#
+        for key in ["mc:Ignorable", "mc:ProcessContent", "mc:MustUnderstand", "Requires"] {
+            let token = key == "mc:ProcessContent" ? "a:p" : "a"
+            for count in [256, 257] {
+                let value = Array(repeating: token, count: count).joined(separator: " ")
+                #expect((PowerPointXML.normalize(Data("<root \(declarations) \(key)='\(value)'/>".utf8)) != nil) == (count == 256))
+            }
+            let huge = String(repeating: "a", count: 16 * 1024 + 1)
+            #expect(PowerPointXML.normalize(Data("<root \(declarations) \(key)='\(huge)'/>".utf8)) == nil)
+        }
+    }
+
+    @Test func namespaceScopeHasCountAndByteLimits() {
+        func declarations(_ count: Int) -> String { (0..<count).map { " xmlns:n\($0)='urn:\($0)'" }.joined() }
+        let allowed = "<root" + declarations(256) + "><child xmlns:n0='urn:rebound'/></root>"
+        #expect(PowerPointXML.normalize(Data(allowed.utf8)) != nil)
+        #expect(PowerPointXML.normalize(Data(("<root" + declarations(256) + "><child xmlns:extra='urn:new'/></root>").utf8)) == nil)
+        #expect(PowerPointXML.normalize(Data(("<root xmlns:n='" + String(repeating: "x", count: 64 * 1024) + "'/>").utf8)) == nil)
+    }
+
+    @Test func relationshipTargetLengthIsCheckedBeforeSplitting() throws {
+        typealias B = PowerPointConverterTests
+        for count in [16_384, 16_385] {
+            let target = String(repeating: "a/", count: count)
+            let rels = B.relationshipsXML([("r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide", target)])
+            let data = PagesConverterTests.makeZip([("_rels/.rels", Array(rels.utf8))])
+            let package = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
+            let values = PowerPointConverter.relationships(package, forPart: "")
+            if count == 16_384 { #expect(values["r"]?.target == target); try package.check() }
+            else { #expect(values.isEmpty); #expect(throws: PicoDocsError.fileCorrupted) { try package.check() } }
+        }
+    }
+
+    @Test func masterTextStylesReadOnlySelectedBranches() async throws {
+        typealias B = PowerPointConverterTests
+        let wrong = #"<p:bodyStyle><a:lvl1pPr><a:buChar char="•"/><a:defRPr b="1"/></a:lvl1pPr></p:bodyStyle>"#
+        let right = #"<p:bodyStyle><a:lvl1pPr><a:buNone/><a:defRPr i="1"/></a:lvl1pPr></p:bodyStyle>"#
+        let alternate = "<mc:AlternateContent xmlns:u='urn:unsupported'><mc:Choice Requires='u'>\(wrong)</mc:Choice><mc:Fallback>\(right)</mc:Fallback></mc:AlternateContent>"
+        let master = "<p:sldMaster \(B.namespaces)><p:cSld><p:spTree/></p:cSld><p:txStyles>\(alternate)</p:txStyles></p:sldMaster>"
+        let layout = "<p:sldLayout \(B.namespaces)><p:cSld><p:spTree/></p:cSld></p:sldLayout>"
+        let layoutRels = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster", "../slideMasters/m.xml")])
+        let shape = B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: ["<a:p><a:r><a:t>Selected</a:t></a:r></a:p>"])
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: shape, relationships: [("layout", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout", "../slideLayouts/l.xml")])], extraParts: [("ppt/slideLayouts/l.xml", Array(layout.utf8)), ("ppt/slideLayouts/_rels/l.xml.rels", Array(layoutRels.utf8)), ("ppt/slideMasters/m.xml", Array(master.utf8))])
+        #expect(try await PicoDocsEngine.convert(data: data, filename: "styles.pptx").markdown() == "*Selected*")
+    }
+
+    @Test func formattedWordTableBreaksStayInsideTheFormattedRun() async throws {
+        let xml = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>first</w:t><w:br/><w:t>second</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
+        let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([("word/document.xml", Array(xml.utf8))]), filename: "break.docx")
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("<strong>first  <br>second</strong>"))
+        for format in [ExportFileType.plaintext, .csv] {
+            let text = try DocumentRenderer.render(result, to: format)
+            #expect(text.contains("first  \nsecond")); #expect(!text.contains("**"))
+        }
+        let literal = ConverterResult(sections: [.init(markdown: "| **first<br>second** | `a<br>b` | \\<br> | \u{E042} |\n| --- | --- | --- | --- |")])
+        let output = try DocumentRenderer.render(literal, to: .html)
+        #expect(output.contains("<strong>first<br>second</strong>"))
+        #expect(output.contains("<code>a&lt;br&gt;b</code>")); #expect(output.contains("&lt;br&gt;")); #expect(output.contains("\u{E042}"))
+    }
+
+    @Test func imageMIMEParametersDoNotCorruptDataURLPayload() async throws {
+        typealias B = PowerPointConverterTests
+        let picture = #"<p:pic><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic>"#
+        let manifest = #"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="png" ContentType="image/png;name=&quot;a,b;c&quot;"/></Types>"#
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: picture, relationships: [("image", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "../media/a.png")])], extraParts: [("ppt/media/a.png", [1,2,3]), ("[Content_Types].xml", Array(manifest.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "mime.pptx")
+        #expect(result.sections.first { $0.kind == .image }?.metadata["mimeType"] == "image/png;name=\"a,b;c\"")
+        #expect(try DocumentRenderer.render(result, to: .html).contains("src=\"data:image/png;base64,AQID\""))
+    }
+
+    @Test func coreMetadataUsesOnlySelectedBranches() async throws {
+        typealias B = PowerPointConverterTests
+        let core = #"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:u="urn:unknown"><mc:AlternateContent><mc:Choice Requires="u"><dc:title>Wrong</dc:title><dc:creator>Wrong</dc:creator></mc:Choice><mc:Fallback><dc:title>Selected</dc:title><dc:creator>Ada</dc:creator></mc:Fallback></mc:AlternateContent></cp:coreProperties>"#
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Slide"))], extraParts: [("docProps/core.xml", Array(core.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "core.pptx")
+        #expect(result.title == "Selected"); #expect(result.author == "Ada")
+    }
+
+    @Test func requiredUnknownAttributesRespectProcessedTreeAndExtensions() async throws {
+        typealias B = PowerPointConverterTests
+        let bad = "<p:sp xmlns:u='urn:unknown' u:required='true'/>"
+        let ignored = "<p:sp xmlns:u='urn:unknown' mc:Ignorable='u' u:optional='true'/>"
+        let opaque = "<p:extLst><p:ext uri='urn:payload'>\(bad)</p:ext></p:extLst>"
+        let unselected = "<mc:AlternateContent xmlns:u='urn:unknown'><mc:Choice Requires='u'>\(bad)</mc:Choice><mc:Fallback/></mc:AlternateContent>"
+        for content in [bad, ignored, opaque, unselected] {
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Visible") + content)])
+            if content == bad { await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: data, filename: "attributes.pptx") } }
+            else { #expect(try await PicoDocsEngine.convert(data: data, filename: "attributes.pptx").markdown() == "## Visible") }
+        }
+    }
+
+
     @Test func titleMetadataUsesOnlySelectedRunText() async throws {
         typealias B = PowerPointConverterTests
         let run = "<a:r>" + selectedWrapper("<a:t>Selected</a:t>", fallback: "<a:t>Wrong</a:t>") + "</a:r>"
@@ -1090,7 +1227,7 @@ struct PowerPointFollowupTests {
         let master = "<p:notesMaster \(B.namespaces)><p:cSld><p:spTree/></p:cSld></p:notesMaster>"
         let rels = B.relationshipsXML([("master", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster", "../notesMasters/m.xml"), ("slide", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide", "../slides/s.xml")])
         let entries = [(name: "ppt/notesSlides/n.xml", data: Array(notes.utf8)), (name: "ppt/notesSlides/_rels/n.xml.rels", data: Array(rels.utf8)), (name: "ppt/notesMasters/m.xml", data: Array(master.utf8))]
-        let package = PowerPointPackage(archive: try #require(Archive(data: PagesConverterTests.makeZip(entries), accessMode: .read)), totalLimit: entries.reduce(0) { $0 + $1.data.count })
+        let package = PowerPointPackage(archive: try #require(Archive(data: PagesConverterTests.makeZip(entries), accessMode: .read)), totalLimit: entries.reduce(0) { $0 + $1.data.count } + 4 * notes.utf8.count)
         var cache = PowerPointConverter.PartCache(archive: package)
         let relations = ["notes": PowerPointConverter.Relationship(type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide", target: "../notesSlides/n.xml", external: false)]
         for _ in 0..<5 { #expect(PowerPointConverter.notes(forSlide: "ppt/slides/s.xml", relationships: relations, archive: package, parts: &cache) == "Note") }

@@ -67,6 +67,7 @@ final class PowerPointPackage {
 /// SAX parsing rejects malformed parts and bounds nesting before SwiftSoup sees them.
 final class PowerPointXML: NSObject, XMLParserDelegate {
     private var scopes: [[String: String]] = [[:]]
+    private var scopeBytes: [Int] = [0]
     private var names: [String] = []
     private var emitted: [Bool] = []
     private var compatibility: [(ignored: Set<String>, processed: Set<String>)] = [([], [])]
@@ -170,24 +171,38 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         }
         nodes += 1; attributesCount += attributes.count
         var scope = scopes.last!
+        var bytes = scopeBytes.last!
         for (key, value) in attributes {
-            if key == "xmlns" { scope[""] = value }
-            else if key.hasPrefix("xmlns:") { scope[String(key.dropFirst(6))] = value }
+            if Task.isCancelled { hasError = true; parser.abortParsing(); return }
+            guard key == "xmlns" || key.hasPrefix("xmlns:") else { continue }
+            let prefix = key == "xmlns" ? "" : String(key.dropFirst(6))
+            let prior = scope[prefix]
+            bytes -= prior.map { prefix.utf8.count + $0.utf8.count } ?? 0
+            bytes += prefix.utf8.count + value.utf8.count
+            // Each copied scope is small, even at the maximum XML depth.
+            guard bytes <= 64 * 1024, prior != nil || scope.count < 256 else {
+                hasError = true; parser.abortParsing(); return
+            }
+            scope[prefix] = value
         }
-        scopes.append(scope)
+        scopes.append(scope); scopeBytes.append(bytes)
         var settings = compatibility.last!
         for (key, value) in attributes where key != "xmlns" && !key.hasPrefix("xmlns:") {
             let attribute = name(key, scope: scope, attribute: true)
+            if ["mc:Ignorable", "mc:ProcessContent", "mc:MustUnderstand", "Requires"].contains(attribute), compatibilityTokens(value, parser: parser) == nil { return }
             if attribute == "mc:Ignorable" {
-                for prefix in value.split(whereSeparator: \.isWhitespace) {
+                for prefix in compatibilityTokens(value, parser: parser) ?? [] {
                     if let uri = scope[String(prefix)] { settings.ignored.insert(uri) }
                     else { hasError = true }
                 }
             } else if attribute == "mc:ProcessContent" {
-                for qname in value.split(whereSeparator: \.isWhitespace) {
+                for qname in compatibilityTokens(value, parser: parser) ?? [] {
                     settings.processed.insert(name(String(qname), scope: scope))
                 }
             }
+        }
+        guard settings.ignored.count <= 256, settings.processed.count <= 256 else {
+            hasError = true; parser.abortParsing(); return
         }
         compatibility.append(settings)
         var tag = name(elementName, scope: scope)
@@ -203,21 +218,38 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         for (key, value) in attributes where key != "xmlns" && !key.hasPrefix("xmlns:") {
             var value = value
             if key == "Requires" || name(key, scope: scope, attribute: true) == "mc:MustUnderstand" {
-                value = value.split(whereSeparator: \.isWhitespace).map { prefix in
+                value = (compatibilityTokens(value, parser: parser) ?? []).map { prefix in
                     if prefix == "xml" { return "xml" }
                     return Self.prefixes[scope[String(prefix)] ?? ""] ?? "unsupported"
                 }.joined(separator: " ")
             }
-            append(" \(name(key, scope: scope, attribute: true))=\"", parser: parser)
+            var attribute = name(key, scope: scope, attribute: true)
+            let prefix = key.split(separator: ":", maxSplits: 1).dropLast().first.map(String.init) ?? ""
+            if attribute.hasPrefix("extension"), !settings.ignored.contains(scope[prefix] ?? "") {
+                attribute = "required" + attribute
+            }
+            append(" \(attribute)=\"", parser: parser)
             appendEscaped(value, attribute: true, parser: parser)
             append("\"", parser: parser)
         }
         append(">", parser: parser)
     }
 
+    /// A single attribute must not create millions of token objects before the
+    /// normal node/output limits can run. maxSplits also bounds the temporary array.
+    private func compatibilityTokens(_ value: String, parser: XMLParser) -> [Substring]? {
+        guard !Task.isCancelled, value.utf8.count <= 16 * 1024 else {
+            hasError = true; parser.abortParsing(); return nil
+        }
+        let tokens = value.split(maxSplits: 256, whereSeparator: \.isWhitespace)
+        guard tokens.count <= 256 else { hasError = true; parser.abortParsing(); return nil }
+        return tokens
+    }
+
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
         if let name = names.popLast(), emitted.popLast() == true { append("</" + name + ">", parser: parser) }
         if compatibility.count > 1 { compatibility.removeLast() }
+        if scopeBytes.count > 1 { scopeBytes.removeLast() }
         if scopes.count > 1 { scopes.removeLast() }
     }
     private func countTextNode(_ parser: XMLParser) -> Bool {
