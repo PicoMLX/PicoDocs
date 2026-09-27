@@ -313,6 +313,7 @@ public struct WordConverter: DocumentConverter {
         }
         if (try? properties?.getElementsByTag("w:rStyle").first()?.attr("w:val")) == "PicoCode" {
             let code = codeText(run)
+            guard !code.isEmpty else { return "" }
             let delimiter = String(repeating: "`", count: max(1, (code.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0) + 1))
             let pad = code.hasPrefix("`") || code.hasSuffix("`") || (code.hasPrefix(" ") && code.hasSuffix(" ") && code.contains(where: { $0 != " " })) ? " " : ""
             var fragment = delimiter + pad + code + pad + delimiter

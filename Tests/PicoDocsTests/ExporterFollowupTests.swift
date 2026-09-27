@@ -8,6 +8,125 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func effectiveWorksheetTitlesArePreflightedBeforeHeadingProjection() throws {
+        let large = String(repeating: "&", count: 10 * 1024 * 1024)
+        for section in [DocumentSection(kind: .sheet, markdown: "", sheetName: large), DocumentSection(kind: .sheet, markdown: "", metadata: ["sheetName": large])] {
+            for format in [ExportableFileType.docx, .rtf, .pptx] {
+                #expect(throws: ExporterError.self) { try PicoDocsEngine.write(ConverterResult(sections: [section]), to: format) }
+            }
+        }
+        let section = DocumentSection(title: "Old", kind: .sheet, markdown: "", sheetName: "Effective & title")
+        let word = try xml(PicoDocsEngine.write(ConverterResult(sections: [section]), to: .docx), "word/document.xml")
+        #expect(word.contains("Effective &amp; title")); #expect(!word.contains(">Old<"))
+    }
+
+    @Test func largePlainInlineParagraphUsesOneTextNode() {
+        let text = String(repeating: "plain words 123 ", count: 600_000)
+        #expect(MarkdownInlineParser.parse(text) == [.text(text)])
+        #expect(MarkdownInlineParser.parse("café 😀") == [.text("café 😀")])
+        #expect(MarkdownInlineParser.parse("<br>", tableCell: true) == [.lineBreak(hard: true)])
+        #expect(MarkdownInlineParser.parse("**bold**") == [.strong([.text("bold")])])
+    }
+
+    @Test func repeatedPPTXLinksReuseBoundedSlideRelationships() throws {
+        let source = Array(repeating: "[x](https://example.test)", count: 10_000).joined(separator: " ")
+        let data = try PicoDocsEngine.write(markdown: source, to: .pptx)
+        let relationships = try xml(data, "ppt/slides/_rels/slide1.xml.rels")
+        #expect(relationships.components(separatedBy: "/hyperlink").count - 1 == 1)
+        let slide = try xml(data, "ppt/slides/slide1.xml")
+        #expect(slide.components(separatedBy: "r:id=\"hyperlink1\"").count - 1 == 10_000)
+        var budget = PPTXExporter.SlideRelationships(maximumBytes: 1300)
+        let first = try budget.add(target: "a", jump: false)
+        #expect(try budget.add(target: "a", jump: false) == first)
+        #expect(throws: ExporterError.self) { try budget.add(target: String(repeating: "&", count: 1000), jump: false) }
+    }
+
+    @Test func PPTXHorizontalRulesHaveVisibleText() throws {
+        for source in ["---", "Before\n\n---\n\nAfter"] {
+            let slide = try xml(PicoDocsEngine.write(markdown: source, to: .pptx), "ppt/slides/slide1.xml")
+            #expect(slide.contains(">---</a:t>"))
+            if source != "---" { #expect(slide.contains("Before")); #expect(slide.contains("After")) }
+        }
+    }
+
+    @Test func unresolvedEmptyAltDOCXImagesUseTheirBasename() async throws {
+        for source in ["missing.png", "assets/missing.png"] {
+            let data = try PicoDocsEngine.write(markdown: "![](" + source + ")", to: .docx)
+            let result = try await PicoDocsEngine.convert(data: data, filename: "missing.docx")
+            #expect(result.markdown() == "missing.png")
+        }
+    }
+
+    #if canImport(AppKit)
+    @Test func RTFHeadingsKeepOnlyExplicitSourceEmphasis() async throws {
+        for source in ["# Heading", "# **Heading**", "## Plain **bold** tail"] {
+            let data = try PicoDocsEngine.write(markdown: source, to: .rtf)
+            let result = try await PicoDocsEngine.convert(data: data, filename: "heading.rtf")
+            #expect(result.markdown() == source)
+        }
+    }
+    #endif
+
+    @Test func duplicateSpreadsheetRowsAreRejectedBeforeMerging() async throws {
+        let seed = try PicoDocsEngine.write(markdown: "x", to: .xlsx)
+        let archive = try #require(Archive(data: seed, accessMode: .read))
+        var files: [(name: String, data: [UInt8])] = []
+        for entry in archive {
+            var bytes = Data(); _ = try archive.extract(entry) { bytes.append($0) }
+            if entry.path == "xl/worksheets/sheet1.xml" {
+                bytes = Data(#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="XFD1" t="inlineStr"><is><t></t></is></c></row><row r="1"><c r="A1" t="inlineStr"><is><t></t></is></c></row></sheetData></worksheet>"#.utf8)
+            }
+            files.append((entry.path, Array(bytes)))
+        }
+        let data = PagesConverterTests.makeZip(files)
+        await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: data, filename: "duplicates.xlsx") }
+    }
+
+    @Test func emptyDOCXCodeRunsDoNotGenerateBackticks() async throws {
+        let empty = #"<w:p><w:r><w:rPr><w:rStyle w:val="PicoCode"/></w:rPr><w:t></w:t></w:r></w:p>"#
+        for body in [empty, empty + "<w:p><w:r><w:t>Body</w:t></w:r></w:p>"] {
+            let doc = "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:body>\(body)</w:body></w:document>"
+            let data = PagesConverterTests.makeZip([("word/document.xml", Array(doc.utf8))])
+            if body == empty {
+                await #expect(throws: PicoDocsError.emptyDocument) { try await PicoDocsEngine.convert(data: data, filename: "empty-code.docx") }
+            } else { #expect(try await PicoDocsEngine.convert(data: data, filename: "code.docx").markdown() == "Body") }
+        }
+    }
+
+    @Test func independentWordListsDoNotReuseActiveMarkerWidths() throws {
+        let numbering = #"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="100"/><w:numFmt w:val="decimal"/></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+        let data = PagesConverterTests.makeZip([("word/numbering.xml", Array(numbering.utf8))])
+        let archive = try #require(Archive(data: data, accessMode: .read))
+        func properties(_ id: Int, _ level: Int) throws -> Element {
+            let doc = try SwiftSoup.parse("<w:numPr><w:ilvl w:val='\(level)'/><w:numId w:val='\(id)'/></w:numPr>", "", SwiftSoup.Parser.xmlParser())
+            return try #require(doc.getElementsByTag("w:numPr").first())
+        }
+        for interrupted in [false, true] {
+            let reader = WordListNumbering(archive: archive)
+            #expect(reader.prefix(numPr: try properties(1, 0), style: nil) == "100. ")
+            if interrupted { #expect(reader.prefix(numPr: nil, style: nil) == nil) }
+            #expect(reader.prefix(numPr: try properties(2, 1), style: nil) == "  - ")
+        }
+    }
+
+    @Test func exportedMixedListsRetainParentMarkerWidths() async throws {
+        let source = "100. Parent\n     - Child\n       5. Grandchild\n\n          Continuation"
+        let data = try PicoDocsEngine.write(markdown: source, to: .docx)
+        let result = try await PicoDocsEngine.convert(data: data, filename: "mixed.docx")
+        #expect(result.markdown() == source)
+    }
+
+    @Test func nativeOfficeListDepthHasAnExplicitBoundary() throws {
+        for count in [9, 10] {
+            let source = (0..<count).map { String(repeating: "  ", count: $0) + "- Level \($0)" }.joined(separator: "\n")
+            for format in [ExportableFileType.docx, .pptx] {
+                if count == 9 { #expect(!(try PicoDocsEngine.write(markdown: source, to: format)).isEmpty) }
+                else { #expect(throws: ExporterError.self) { try PicoDocsEngine.write(markdown: source, to: format) } }
+            }
+        }
+    }
+
+
     @Test func invalidExactImageDoesNotFallBackToOtherDirectory() throws {
         let images: [DocumentSection] = [
             .init(kind: .image, markdown: "", sourcePath: "a/logo.png", metadata: ["base64": "invalid", "mimeType": "image/png"]),

@@ -21,7 +21,11 @@ enum OfficeDocumentBlocks {
             try charge(value.utf8.count * 7)
         }
         for section in result.sections where section.kind != .image {
-            if let title = section.title { try charge(title.utf8.count * 7) }
+            let projectedTitle = section.kind == .sheet ? (section.sheetName ?? section.metadata["sheetName"] ?? section.title) : section.title
+            for title in Set([section.title, projectedTitle].compactMap({ $0 })) {
+                guard title.utf8.count <= remaining / 7 else { throw ExporterError.serializationFailed("Office section metadata exceeds the supported byte budget") }
+                try charge(title.utf8.count * 7)
+            }
             if let csv = section.metadata["csv"], !csv.isEmpty {
                 // Bound a single field before the streaming parser decodes it.
                 guard csv.utf8.count <= remaining / 7 else { throw ExporterError.serializationFailed("Office CSV projection exceeds the supported byte budget") }

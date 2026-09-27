@@ -58,7 +58,9 @@ public struct SpreadsheetConverter: DocumentConverter {
     private static func markdownTable(rows: [Row], sharedStrings: SharedStrings?, sheetName: String?, projectionBudget: inout SpreadsheetProjectionBudget) throws -> (markdown: String, csv: String) {
         let origin = ColumnReference("A")!
         var columnCount = 0, rowCount = 0
+        var seenRows: Set<UInt> = []
         for row in rows {
+            guard row.reference > 0, seenRows.insert(row.reference).inserted else { throw PicoDocsError.fileCorrupted }
             rowCount = max(rowCount, Int(clamping: row.reference))
             for cell in row.cells { columnCount = max(columnCount, origin.distance(to: cell.reference.column) + 1) }
         }

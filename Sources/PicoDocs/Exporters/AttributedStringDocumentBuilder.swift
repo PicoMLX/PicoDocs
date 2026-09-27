@@ -70,7 +70,7 @@ enum AttributedStringDocumentBuilder {
             if preserveBlockMarkers {
                 output.append(NSAttributedString(string: String(repeating: "#", count: max(1, min(level, 6))) + " ", attributes: [.font: bodyFont()]))
             }
-            output.append(inline(text, size: headingSize(level), bold: true, escapeLiterals: preserveBlockMarkers))
+            output.append(inline(text, size: headingSize(level), bold: !preserveBlockMarkers, escapeLiterals: preserveBlockMarkers))
             output.append(NSAttributedString(string: "\n"))
 
         case .paragraph(let text):

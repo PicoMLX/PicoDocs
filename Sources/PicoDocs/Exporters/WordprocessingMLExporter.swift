@@ -276,7 +276,10 @@ public struct WordprocessingMLExporter: DocumentExporter {
         }
 
         private func appendList(_ list: MarkdownList, level: Int = 0) {
-            let level = min(level, 8)
+            guard level <= 8 else {
+                failure = ExporterError.serializationFailed("DOCX supports at most nine native list levels")
+                return
+            }
             var numId = 1
             var expected = list.items.first?.number ?? 1
             func allocate(_ start: Int) -> Int {
@@ -297,7 +300,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                             nextOrderedNumId += 1
                         }
                         let pPr = index == 0
-                            ? "<w:pPr><w:numPr><w:ilvl w:val=\"\(level)\"/><w:numId w:val=\"\(numId)\"/></w:numPr></w:pPr>"
+                            ? "<w:pPr><w:pStyle w:val=\"PicoListItem\"/><w:numPr><w:ilvl w:val=\"\(level)\"/><w:numId w:val=\"\(numId)\"/></w:numPr></w:pPr>"
                             : "<w:pPr><w:pStyle w:val=\"PicoListContinuation\"/><w:numPr><w:ilvl w:val=\"\(level)\"/><w:numId w:val=\"\(continuationNumID!)\"/></w:numPr><w:ind w:left=\"\((level + 1) * 720)\"/></w:pPr>"
                         body += paragraph(pPr: pPr, content: inlineRuns(text))
                     case .list(let child): appendList(child, level: level + 1)
@@ -368,7 +371,8 @@ public struct WordprocessingMLExporter: DocumentExporter {
                     }
                     out += "<w:hyperlink r:id=\"\(id)\">\(renderRuns(label, bold: bold, italic: italic))</w:hyperlink>"
                 case .image(let alt, let source):
-                    out += imageRun(alt: alt, source: source) ?? textRun(alt, bold: bold, italic: italic, monospace: false)
+                    let fallback = alt.isEmpty ? WordprocessingMLExporter.portableBasename(source) : alt
+                    out += imageRun(alt: alt, source: source) ?? textRun(fallback.isEmpty ? source : fallback, bold: bold, italic: italic, monospace: false)
                 case .footnoteReference(let fid):
                     // Keep textual footnotes paired using explicit marker provenance.
                     let id = MarkdownInlineParser.unescape(fid).replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "]", with: "\\]")
@@ -554,6 +558,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         for level in 1...6 {
             styles += "<w:style w:type=\"paragraph\" w:styleId=\"Heading\(level)\"><w:name w:val=\"heading \(level)\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:keepNext/><w:spacing w:before=\"240\" w:after=\"120\"/><w:outlineLvl w:val=\"\(level - 1)\"/></w:pPr><w:rPr><w:b/><w:sz w:val=\"\(40 - level * 2)\"/></w:rPr></w:style>"
         }
+        styles += "<w:style w:type=\"paragraph\" w:styleId=\"PicoListItem\"><w:name w:val=\"List Item\"/><w:basedOn w:val=\"Normal\"/></w:style>"
         styles += "<w:style w:type=\"paragraph\" w:styleId=\"PicoListContinuation\"><w:name w:val=\"List Continuation\"/><w:basedOn w:val=\"Normal\"/></w:style>"
         styles += "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:ind w:left=\"720\" w:right=\"720\"/></w:pPr><w:rPr><w:i/></w:rPr></w:style>"
         styles += "<w:style w:type=\"paragraph\" w:styleId=\"PicoCodeBlock\"><w:name w:val=\"Code Block\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr><w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/></w:rPr></w:style>"

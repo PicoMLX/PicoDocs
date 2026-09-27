@@ -30,6 +30,9 @@ public struct PPTXExporter: DocumentExporter {
         let result = PicoDocsEngine.withSynthesizedImageReferences(sanitized)
 
         let slides = try Self.slides(from: result)
+        guard slides.allSatisfy({ $0.body.allSatisfy { $0.level <= 8 } }) else {
+            throw ExporterError.serializationFailed("PPTX supports at most nine native list levels")
+        }
         let count = max(slides.count, 1)
         let effectiveSlides = slides.isEmpty ? [Slide(title: "", body: [])] : slides
 
@@ -51,12 +54,39 @@ public struct PPTXExporter: DocumentExporter {
         try pkg.addXML("ppt/slideLayouts/_rels/slideLayout1.xml.rels", PPTXTemplates.slideLayoutRels)
         try pkg.addXML("ppt/theme/theme1.xml", PPTXTemplates.theme)
         for (i, slide) in effectiveSlides.enumerated() {
-            var relationships: [String] = []
-            try pkg.addXML("ppt/slides/slide\(i + 1).xml", Self.slideXML(slide, fragmentSlides: fragmentSlides, relationships: &relationships))
-            let rels = PPTXTemplates.slideRels.replacingOccurrences(of: "</Relationships>", with: relationships.joined() + "</Relationships>")
+            var relationships = SlideRelationships()
+            try pkg.addXML("ppt/slides/slide\(i + 1).xml", try Self.slideXML(slide, fragmentSlides: fragmentSlides, relationships: &relationships))
+            let rels = PPTXTemplates.slideRels.replacingOccurrences(of: "</Relationships>", with: relationships.xml + "</Relationships>")
             try pkg.addXML("ppt/slides/_rels/slide\(i + 1).xml.rels", rels)
         }
         return try pkg.data()
+    }
+
+    struct SlideRelationships {
+        private var identifiers: [String: String] = [:]
+        private(set) var xml = ""
+        private var remainingBytes: Int
+        init(maximumBytes: Int = 8 * 1024 * 1024) {
+            remainingBytes = max(0, maximumBytes - 1024) // package wrapper/layout relationship
+        }
+        mutating func add(target: String, jump: Bool) throws -> String {
+            let key = (jump ? "slide:" : "external:") + target
+            if let id = identifiers[key] { return id }
+            guard identifiers.count < 65_536, target.utf8.count <= remainingBytes / 6 else {
+                throw ExporterError.serializationFailed("Slide relationships exceed the supported budget")
+            }
+            let id = "hyperlink\(identifiers.count + 1)"
+            let type = jump ? "slide" : "hyperlink"
+            let mode = jump ? "" : " TargetMode=\"External\""
+            let fragment = "<Relationship Id=\"\(id)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/\(type)\" Target=\"\(OOXMLPackageWriter.escapeAttribute(target))\"\(mode)/>"
+            guard fragment.utf8.count <= remainingBytes else {
+                throw ExporterError.serializationFailed("Slide relationships exceed the supported budget")
+            }
+            remainingBytes -= fragment.utf8.count
+            identifiers[key] = id
+            xml.append(contentsOf: fragment)
+            return id
+        }
     }
 
     // MARK: - Slide model
@@ -190,7 +220,7 @@ public struct PPTXExporter: DocumentExporter {
                     lines.append(Paragraph(text: nodes.plainText, inlines: normalizedBreaks(nodes)))
                 }
             case .rule:
-                continue
+                lines.append(Paragraph(text: "---"))
             }
         }
         return lines
@@ -220,13 +250,13 @@ public struct PPTXExporter: DocumentExporter {
 
     // MARK: - Slide part
 
-    private static func slideXML(_ slide: Slide, fragmentSlides: [String: Int], relationships: inout [String]) -> String {
-        let titleRuns = "<a:p>\(runs(slide.titleInlines ?? [.text(slide.title)], fragmentSlides: fragmentSlides, relationships: &relationships))</a:p>"
+    private static func slideXML(_ slide: Slide, fragmentSlides: [String: Int], relationships: inout SlideRelationships) throws -> String {
+        let titleRuns = "<a:p>\(try runs(slide.titleInlines ?? [.text(slide.title)], fragmentSlides: fragmentSlides, relationships: &relationships))</a:p>"
         let bodyParagraphs: String
         if slide.body.isEmpty {
             bodyParagraphs = "<a:p/>"
         } else {
-            bodyParagraphs = slide.body.map { paragraph in
+            bodyParagraphs = try slide.body.map { paragraph in
                 let properties: String
                 var nodes = paragraph.inlines ?? [.text(paragraph.text)]
                 switch paragraph.ordered {
@@ -237,7 +267,7 @@ public struct PPTXExporter: DocumentExporter {
                 case false?: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buChar char=\"•\"/></a:pPr>"
                 case nil: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buNone/></a:pPr>"
                 }
-                let runs = runs(nodes, fragmentSlides: fragmentSlides, relationships: &relationships)
+                let runs = try runs(nodes, fragmentSlides: fragmentSlides, relationships: &relationships)
                 return "<a:p>\(properties)\(runs)</a:p>"
             }.joined()
         }
@@ -265,35 +295,34 @@ public struct PPTXExporter: DocumentExporter {
     }
 
     /// Hyperlinks belong to runs and reference this slide's relationship part.
-    private static func runs(_ nodes: [MarkdownInline], bold: Bool = false, italic: Bool = false, link: (id: String, jump: Bool)? = nil, fragmentSlides: [String: Int], relationships: inout [String]) -> String {
+    private static func runs(_ nodes: [MarkdownInline], bold: Bool = false, italic: Bool = false, link: (id: String, jump: Bool)? = nil, fragmentSlides: [String: Int], relationships: inout SlideRelationships) throws -> String {
         var output = ""
         for node in nodes {
             switch node {
             case .strong(let children):
-                output += runs(children, bold: true, italic: italic, link: link, fragmentSlides: fragmentSlides, relationships: &relationships)
+                output += try runs(children, bold: true, italic: italic, link: link, fragmentSlides: fragmentSlides, relationships: &relationships)
             case .emphasis(let children):
-                output += runs(children, bold: bold, italic: true, link: link, fragmentSlides: fragmentSlides, relationships: &relationships)
+                output += try runs(children, bold: bold, italic: true, link: link, fragmentSlides: fragmentSlides, relationships: &relationships)
             case .link(let label, let destination):
                 guard !destination.isEmpty else {
-                    output += runs(label, bold: bold, italic: italic, fragmentSlides: fragmentSlides, relationships: &relationships)
+                    output += try runs(label, bold: bold, italic: italic, fragmentSlides: fragmentSlides, relationships: &relationships)
                     continue
                 }
-                let id = "hyperlink\(relationships.count + 1)"
+                let id: String
                 let jump: Bool
                 if destination.hasPrefix("#") {
                     let fragment = String(destination.dropFirst())
                     guard let targetSlide = fragmentSlides[fragment.removingPercentEncoding ?? fragment] else {
-                        output += runs(label, bold: bold, italic: italic, fragmentSlides: fragmentSlides, relationships: &relationships)
+                        output += try runs(label, bold: bold, italic: italic, fragmentSlides: fragmentSlides, relationships: &relationships)
                         continue
                     }
-                    relationships.append("<Relationship Id=\"\(id)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slide\(targetSlide).xml\"/>")
+                    id = try relationships.add(target: "slide\(targetSlide).xml", jump: true)
                     jump = true
                 } else {
-                    let target = OOXMLPackageWriter.relationshipURI(destination)
-                    relationships.append("<Relationship Id=\"\(id)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"\(OOXMLPackageWriter.escapeAttribute(target))\" TargetMode=\"External\"/>")
+                    id = try relationships.add(target: OOXMLPackageWriter.relationshipURI(destination), jump: false)
                     jump = false
                 }
-                output += runs(label, bold: bold, italic: italic, link: (id, jump), fragmentSlides: fragmentSlides, relationships: &relationships)
+                output += try runs(label, bold: bold, italic: italic, link: (id, jump), fragmentSlides: fragmentSlides, relationships: &relationships)
             default:
                 let text = [node].plainText
                 var attributes = bold ? " b=\"1\"" : ""

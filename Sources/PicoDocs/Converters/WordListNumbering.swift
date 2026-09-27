@@ -69,6 +69,7 @@ final class WordListNumbering {
     private(set) var lastParagraphIsContinuation = false
     private(set) var lastParagraphIsExportedContinuation = false
     private var activeMarkerWidths: [Int: Int] = [:]
+    private var activeNumberingInstance: String?
 
     func prefix(numPr: Element?, style: String?) -> String? {
         lastParagraphList = nil
@@ -80,7 +81,16 @@ final class WordListNumbering {
             numID = numID ?? inherited.numID
             level = level ?? inherited.level
         }
-        guard let numID = Self.canonicalID(numID), numID != "0" else { return nil }   // numId 0: numbering removed
+        guard let numID = Self.canonicalID(numID), numID != "0" else {
+            activeMarkerWidths.removeAll(); activeNumberingInstance = nil
+            return nil // numId 0: numbering removed
+        }
+        // Exported nested lists and continuations carry explicit provenance;
+        // unrelated numbering instances must not inherit the preceding widths.
+        if activeNumberingInstance != numID, style != "PicoListItem", !lastParagraphIsExportedContinuation {
+            activeMarkerWidths.removeAll()
+        }
+        if !lastParagraphIsExportedContinuation { activeNumberingInstance = numID }
         let ilvl = min(max(level ?? 0, 0), 8)
         lastParagraphList = (numID, ilvl)
 

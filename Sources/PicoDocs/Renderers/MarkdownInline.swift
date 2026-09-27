@@ -39,6 +39,11 @@ enum MarkdownInlineParser {
     /// for `*`/`**`/`***` emphasis.
     static func parse(_ text: String, depth: Int = 0, tableCell: Bool = false) -> [MarkdownInline] {
         guard depth < 64 else { return [.text(text)] }
+        // Plain paragraphs need no character/index tables or delimiter state.
+        let syntax: Set<Unicode.Scalar> = ["\\", "`", "[", "*", "_", "\n", "<", "\u{E020}"]
+        if !text.unicodeScalars.contains(where: { syntax.contains($0) }) {
+            return text.isEmpty ? [] : [.text(text)]
+        }
         let chars = Array(text)
         // Cache the next unescaped label closer once instead of rescanning the
         // suffix for every unmatched opener in partially generated Markdown.
