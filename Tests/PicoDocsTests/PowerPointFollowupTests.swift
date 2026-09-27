@@ -5,6 +5,78 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    private func selectedWrapper(_ selected: String, fallback: String = "") -> String {
+        "<mc:AlternateContent><mc:Choice Requires=\"a\">" + selected + "</mc:Choice><mc:Fallback>" + fallback + "</mc:Fallback></mc:AlternateContent>"
+    }
+
+    @Test func selectedTextBodyAndTableRowsSurviveWrappers() async throws {
+        typealias B = PowerPointConverterTests
+        let body = "<p:txBody><a:p><a:r><a:t>Selected title</a:t></a:r></a:p></p:txBody>"
+        let title = B.titleShape("unused").replacingOccurrences(of: "<p:txBody><a:bodyPr/><a:p><a:r><a:t>unused</a:t></a:r></a:p></p:txBody>", with: selectedWrapper(body, fallback: body.replacingOccurrences(of: "Selected", with: "Wrong")))
+        let cell = "<a:tc><a:txBody><a:p><a:r><a:t>Selected cell</a:t></a:r></a:p></a:txBody></a:tc>"
+        let table = "<p:graphicFrame><a:graphic><a:graphicData><a:tbl>" + selectedWrapper("<a:tr>" + selectedWrapper(cell) + "</a:tr>") + "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"
+        let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: title + table)]), filename: "wrapped.pptx")
+        #expect(result.sections.first?.title == "Selected title")
+        #expect(result.markdown().contains("| Selected cell |")); #expect(!result.markdown().contains("Wrong"))
+    }
+
+    @Test func selectedSlideIDListsIgnoreUnselectedBranches() async throws {
+        typealias B = PowerPointConverterTests
+        let base = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Selected"))])
+        for wrapList in [false, true] {
+            let id = #"<p:sldId id="256" r:id="rIdSlide0"/>"#
+            let list = "<p:sldIdLst>" + selectedWrapper(id, fallback: id.replacingOccurrences(of: "rIdSlide0", with: "missing")) + "</p:sldIdLst>"
+            let presentation = "<p:presentation \(B.namespaces)>" + (wrapList ? selectedWrapper(list, fallback: "<p:sldIdLst>" + id + "</p:sldIdLst>") : list) + "</p:presentation>"
+            let parts = try entries(base).filter { $0.name != "ppt/presentation.xml" } + [("ppt/presentation.xml", Array(presentation.utf8))]
+            let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(parts), filename: "ids.pptx")
+            #expect(result.sections.first?.title == "Selected")
+        }
+    }
+
+    @Test func misplacedOptionalRelationshipsFailInsteadOfDroppingContent() async throws {
+        typealias B = PowerPointConverterTests
+        let base = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Visible"))])
+        for declaration in ["<wrapper><Relationship Id=\"n\" Type=\"rel/notesSlide\" Target=\"n.xml\"/></wrapper>", "<Relationship Id=\"n\" Type=\"rel/notesSlide\" Target=\"n.xml\"><Relationship Id=\"nested\" Type=\"rel/slideLayout\" Target=\"l.xml\"/></Relationship>"] {
+            let parts = try entries(base) + [("ppt/slides/_rels/s.xml.rels", Array(("<Relationships>" + declaration + "</Relationships>").utf8))]
+            await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(parts), filename: "rels.pptx") }
+        }
+    }
+
+    @Test func hiddenDrawingObjectsDoNotContributeContentOrImages() async throws {
+        typealias B = PowerPointConverterTests
+        let hiddenShape = B.titleShape("Secret title").replacingOccurrences(of: "<p:cNvPr ", with: "<p:cNvPr hidden=\"1\" ")
+        let hiddenGroup = "<p:grpSp><p:nvGrpSpPr><p:cNvPr hidden=\"true\"/></p:nvGrpSpPr>" + B.titleShape("Secret group") + "</p:grpSp>"
+        let hiddenPicture = "<p:pic><p:nvPicPr><p:cNvPr hidden=\"1\"/></p:nvPicPr><p:blipFill><a:blip r:embed=\"missing\"/></p:blipFill></p:pic>"
+        let hiddenTable = "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr hidden=\"true\"/></p:nvGraphicFramePr><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Secret table</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></p:graphicFrame>"
+        let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: hiddenShape + hiddenGroup + hiddenPicture + hiddenTable + B.titleShape("Visible"))]), filename: "hidden.pptx")
+        #expect(result.markdown() == "## Visible"); #expect(!result.sections.contains { $0.kind == .image })
+    }
+
+    @Test func linkOnlyPicturesKeepSafeSourcesAndPreferEmbeddedData() async throws {
+        typealias B = PowerPointConverterTests
+        let picture = #"<p:pic><p:nvPicPr><p:cNvPr name="Linked"/></p:nvPicPr><p:blipFill><a:blip r:link="remote"/></p:blipFill></p:pic>"#
+        for target in ["https://example.com/image.png", "javascript:alert(1)"] {
+            let rels = "<Relationships><Relationship Id=\"remote\" Type=\"rel/image\" TargetMode=\"External\" Target=\"\(target)\"/></Relationships>"
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Slide") + picture)], extraParts: [("ppt/slides/_rels/s.xml.rels", Array(rels.utf8))])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "linked.pptx")
+            #expect(result.markdown().contains("![Linked](https://example.com/image.png)") == target.hasPrefix("https:"))
+            #expect(!result.markdown().contains("javascript:")); #expect(!result.sections.contains { $0.kind == .image })
+        }
+        let rels = #"<Relationships><Relationship Id="embedded" Type="rel/image" Target="../media/p.png"/><Relationship Id="remote" Type="rel/image" TargetMode="External" Target="https://example.com/remote.png"/></Relationships>"#
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: picture.replacingOccurrences(of: "r:link=", with: "r:embed=\"embedded\" r:link="))], extraParts: [("ppt/slides/_rels/s.xml.rels", Array(rels.utf8)), ("ppt/media/p.png", [1, 2, 3])])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "both.pptx")
+        #expect(result.markdown().contains("![Linked](p.png)")); #expect(!result.markdown().contains("remote.png"))
+    }
+
+    @Test func cancelledXMLNormalizationStopsBeforeParsingLargeProlog() async {
+        let value = await Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return PowerPointXML.normalize(Data((String(repeating: " ", count: 1_000_000) + "<root/>").utf8))
+        }.value
+        #expect(value == nil)
+    }
+
+
     private func entries(_ data: Data) throws -> [(name: String, data: [UInt8])] {
         let archive = try #require(Archive(data: data, accessMode: .read))
         return try archive.map { entry in

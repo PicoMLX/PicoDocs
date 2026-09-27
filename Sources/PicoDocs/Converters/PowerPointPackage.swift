@@ -99,7 +99,9 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         let declaration = Array("<!DOCTYPE".utf8), comment = Array("<!--".utf8)
         let cdata = Array("<![CDATA[".utf8), processing = Array("<?".utf8)
         var ending: [UInt8]?
-        for byte in data where byte != 0 {
+        for (index, byte) in data.enumerated() {
+            if index.isMultiple(of: 4096), Task.isCancelled { return true }
+            guard byte != 0 else { continue }
             tail.append(byte)
             if tail.count > 9 { tail.removeFirst() }
             if let terminator = ending {

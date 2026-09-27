@@ -113,10 +113,16 @@ public struct PowerPointConverter: DocumentConverter {
         let relationships = relationships(archive, forPart: presentationPath)
         var paths: [String] = []
         guard let root = presentation.children().first(), root.tagName().lowercased() == "p:presentation" else { throw PicoDocsError.fileCorrupted }
-        let list = child(of: root, named: "p:sldidlst")
-        let direct = list?.children().array().filter { $0.tagName().lowercased() == "p:sldid" } ?? []
-        let all = (try? presentation.getElementsByTag("p:sldId").array()) ?? []
-        guard all.count == direct.count else { throw PicoDocsError.fileCorrupted }
+        let lists = selectedChildren(in: root).filter { $0.tagName().lowercased() == "p:sldidlst" }
+        guard lists.count <= 1 else { throw PicoDocsError.fileCorrupted }
+        let direct = lists.first.map { selectedChildren(in: $0).filter { $0.tagName().lowercased() == "p:sldid" } } ?? []
+        var pending = selectedChildren(in: root), total = 0
+        while let element = pending.popLast() {
+            try Task.checkCancellation()
+            if element.tagName().lowercased() == "p:sldid" { total += 1 }
+            pending += selectedChildren(in: element)
+        }
+        guard total == direct.count else { throw PicoDocsError.fileCorrupted }
         for slideID in direct {
             guard let id = try? slideID.attr("r:id"), let relation = relationships[id], !relation.external, relation.type.hasSuffix("/slide") else { throw PicoDocsError.fileCorrupted }; let target = relation.target
             paths.append(WordConverter.resolvePartPath(target, relativeTo: directory(of: presentationPath)))
@@ -255,6 +261,13 @@ public struct PowerPointConverter: DocumentConverter {
         return (title, blocks)
     }
 
+    private static func isHidden(_ shape: Element) -> Bool {
+        let nonvisualNames: Set<String> = ["p:nvsppr", "p:nvpicpr", "p:nvgraphicframepr", "p:nvgrpsppr", "p:nvcxnsppr"]
+        guard let properties = selectedChildren(in: shape).first(where: { nonvisualNames.contains($0.tagName().lowercased()) }),
+              let common = selectedChildren(in: properties).first(where: { $0.tagName().lowercased() == "p:cnvpr" }) else { return false }
+        return isOn(common, "hidden")
+    }
+
     private static func shapeLink(_ shape: Element, context: SlideContext) -> String? {
         let properties = child(of: shape, named: "p:nvsppr").flatMap { child(of: $0, named: "p:cnvpr") }
         return hyperlink(properties.flatMap { child(of: $0, named: "a:hlinkclick") }, context: context)
@@ -280,6 +293,7 @@ public struct PowerPointConverter: DocumentConverter {
     private static func renderShapes(in container: Element, title: inout String?, blocks: inout [String], context: inout SlideContext) {
         for shape in container.children().array() {
             if Task.isCancelled { return }
+            if isHidden(shape) { continue }
             context.defaultLink = nil
             switch shape.tagName().lowercased() {
             case "p:sp":
@@ -498,7 +512,7 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     private static func textBody(of shape: Element) -> Element? {
-        child(of: shape, named: "p:txbody")
+        selectedChildren(in: shape).first { $0.tagName().lowercased() == "p:txbody" }
     }
 
     // MARK: - Paragraphs and lists
@@ -733,10 +747,10 @@ public struct PowerPointConverter: DocumentConverter {
     /// merged-away cells render empty.
     static func renderTable(_ table: Element, context: inout SlideContext) -> String {
         var rows: [[String]] = []
-        for row in table.children().array() where row.tagName().lowercased() == "a:tr" {
+        for row in selectedChildren(in: table) where row.tagName().lowercased() == "a:tr" {
             if Task.isCancelled { return "" }
             var cells: [String] = []
-            for cell in row.children().array() where cell.tagName().lowercased() == "a:tc" {
+            for cell in selectedChildren(in: row) where cell.tagName().lowercased() == "a:tc" {
                 let merged = isOn(cell, "hMerge") || isOn(cell, "vMerge")
                 var text = ""
                 if !merged, let body = textBody(ofCell: cell) {
@@ -768,7 +782,7 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     private static func textBody(ofCell cell: Element) -> Element? {
-        child(of: cell, named: "a:txbody")
+        selectedChildren(in: cell).first { $0.tagName().lowercased() == "a:txbody" }
     }
 
     // MARK: - Pictures
@@ -776,21 +790,29 @@ public struct PowerPointConverter: DocumentConverter {
     /// An inline image reference for a picture (alt text from its `descr`, else
     /// `name`), registering its bytes as an `.image` section.
     static func pictureMarkdown(_ picture: Element, context: inout SlideContext) -> String? {
-        guard let fill = child(of: picture, named: "p:blipfill"), let blip = selectedDescendant(in: fill, named: "a:blip"),
-              let id = try? blip.attr("r:embed"), !id.isEmpty else { return nil }
-        guard let relation = context.relationships[id], !relation.external, relation.type.hasSuffix("/image") else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
-        let target = relation.target
-        let mediaPath = WordConverter.resolvePartPath(target, relativeTo: directory(of: context.partPath))
-        let filename = (mediaPath as NSString).lastPathComponent
+        guard let fill = selectedChildren(in: picture).first(where: { $0.tagName().lowercased() == "p:blipfill" }),
+              let blip = selectedDescendant(in: fill, named: "a:blip") else { return nil }
+        let embedded = (try? blip.attr("r:embed")) ?? ""
+        let linked = (try? blip.attr("r:link")) ?? ""
+        let id = embedded.isEmpty ? linked : embedded
+        guard !id.isEmpty else { return nil }
+        guard let relation = context.relationships[id], relation.type.hasSuffix("/image"),
+              relation.external == embedded.isEmpty else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
+        let source: String
+        if embedded.isEmpty {
+            guard DocumentRenderer.isSafeURL(relation.target, isImage: true) else { return nil }
+            source = relation.target
+        } else {
+            let mediaPath = WordConverter.resolvePartPath(relation.target, relativeTo: directory(of: context.partPath))
+            source = (mediaPath as NSString).lastPathComponent
+            if context.embedsImages { context.images.add(path: mediaPath, filename: source, archive: context.archive) }
+        }
         let properties = child(of: picture, named: "p:nvpicpr").flatMap { child(of: $0, named: "p:cnvpr") }
         let description = (try? properties?.attr("descr")) ?? ""
         let name = (try? properties?.attr("name")) ?? ""
         let alt = !description.isEmpty ? description : (!name.isEmpty ? name : "image")
-        if context.embedsImages {
-            context.images.add(path: mediaPath, filename: filename, archive: context.archive)
-        }
         let label = escapeMarkdown(alt)
-        let image = "![\(label)](\(linkDestination(filename)))"
+        let image = "![\(label)](\(linkDestination(source)))"
         let click = properties.flatMap { child(of: $0, named: "a:hlinkclick") }
         if let target = hyperlink(click, context: context) { return "[\(image)](\(linkDestination(target)))" }
         return image
@@ -890,7 +912,10 @@ public struct PowerPointConverter: DocumentConverter {
             return [:]
         }
         var map: [String: Relationship] = [:]
-        for element in document.children().first()?.children().array() ?? [] where element.tagName().lowercased() == "relationship" {
+        for element in document.children().first()?.children().array() ?? [] {
+            guard element.tagName().lowercased() == "relationship", element.children().isEmpty() else {
+                archive.fail(PicoDocsError.fileCorrupted); return [:]
+            }
             guard let id = try? element.attr("Id"), let target = try? element.attr("Target"),
                   !id.isEmpty, !target.isEmpty, let type = try? element.attr("Type"), !type.isEmpty else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
             guard map[id] == nil else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
