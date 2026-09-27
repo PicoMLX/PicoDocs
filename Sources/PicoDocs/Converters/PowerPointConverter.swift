@@ -87,6 +87,8 @@ public struct PowerPointConverter: DocumentConverter {
             guard let slide = Self.xml(archive, path: slidePath), slide.children().first()?.tagName().lowercased() == "p:sld" else { try archive.check(); throw PicoDocsError.fileCorrupted }
             let relationships = Self.relationships(archive, forPart: slidePath)
             var context = SlideContext(archive: archive, partPath: slidePath, relationships: relationships, images: images)
+            let renderBudget = RenderBudget(maximumBytes: remainingRenderedBytes, archive: archive)
+            context.renderBudget = renderBudget
             context.defaultTextStyle = defaultTextStyle
             context.placeholders = parts.placeholders
             // Layout and master supply inherited list formatting for placeholders.
@@ -96,23 +98,28 @@ public struct PowerPointConverter: DocumentConverter {
                 .flatMap { Self.relatedPart(of: $0, type: "/slideMaster", relationships: Self.relationships(archive, forPart: $0), archive: archive) }
                 .flatMap { parts.document($0, root: "p:sldmaster") }
             let rendered = Self.renderSlide(slide, context: &context)
-            let notes = Self.notes(forSlide: slidePath, relationships: relationships, archive: archive, parts: &parts)
+            try archive.check()
+            let slideBlocks = (rendered.title.map { [renderBudget.join(["## ", $0])] } ?? []) + rendered.blocks
+            let slideText = renderBudget.join(slideBlocks, separator: "\n\n")
+            try archive.check()
+            let notesBudget = RenderBudget(maximumBytes: max(0, remainingRenderedBytes - slideText.utf8.count), archive: archive)
+            let notes = Self.notes(forSlide: slidePath, relationships: relationships, archive: archive, parts: &parts, renderBudget: notesBudget)
 
             var blocks: [String] = []
-            if let title = rendered.title { blocks.append("## \(title)") }
-            blocks += rendered.blocks
-            if let notes { blocks.append("### Notes\n\n\(notes)") }
+            if !slideText.isEmpty { blocks.append(slideText) }
+            if let notes { blocks.append(renderBudget.join(["### Notes\n\n", notes])) }
             try archive.check()
             guard !blocks.isEmpty else { continue }   // empty slide: keep its number, emit nothing
 
             let section = DocumentSection(
                 title: context.plainTitle,
                 kind: .slide,
-                markdown: blocks.joined(separator: "\n\n"),
+                markdown: renderBudget.join(blocks, separator: "\n\n"),
                 sourcePath: slidePath,
                 slideNumber: index + 1,
                 metadata: notes.map { ["notes": $0] } ?? [:]
             )
+            try archive.check()
             try chargeSection(section)
             sections.append(section)
         }
@@ -166,7 +173,7 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     /// Speaker notes for a slide, from its notes-slide part's body placeholder.
-    static func notes(forSlide slidePath: String, relationships: [String: Relationship], archive: PowerPointPackage, parts: inout PartCache) -> String? {
+    static func notes(forSlide slidePath: String, relationships: [String: Relationship], archive: PowerPointPackage, parts: inout PartCache, renderBudget: RenderBudget? = nil) -> String? {
         let noteRelations = relationships.values.filter { $0.isType("/notesSlide") }
         guard noteRelations.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         guard let relation = noteRelations.first else { return nil }
@@ -179,6 +186,7 @@ public struct PowerPointConverter: DocumentConverter {
         var context = SlideContext(archive: archive, partPath: notesPath,
                                    relationships: Self.relationships(archive, forPart: notesPath),
                                    images: ImageCollector(), embedsImages: false)
+        context.renderBudget = renderBudget
         let notesRels = Self.relationships(archive, forPart: notesPath)
         let backlinks = notesRels.values.filter { $0.isType("/slide") }
         guard backlinks.count == 1, let backlink = backlinks.first, !backlink.external,
@@ -207,13 +215,14 @@ public struct PowerPointConverter: DocumentConverter {
                     context.defaultLink = link
                     context.runDefaults = inheritedRunDefaults(for: shape, context: context)
                     if let body = textBody(of: shape) {
-                        paragraphs += renderParagraphs(body, inherited: inheritedBullets(for: shape, context: context), context: &context)
+                        let rendered = renderParagraphs(body, inherited: inheritedBullets(for: shape, context: context), context: &context)
+                        for paragraph in rendered { context.appendBlock(paragraph, to: &paragraphs) }
                     }
                 }
             }
         }
         appendNotes(in: tree)
-        let text = paragraphs.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = (renderBudget?.join(paragraphs, separator: "\n\n") ?? paragraphs.joined(separator: "\n\n")).trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : text
     }
 
@@ -238,6 +247,47 @@ public struct PowerPointConverter: DocumentConverter {
 
     // MARK: - Slides
 
+    final class RenderBudget {
+        let maximumBytes: Int
+        let archive: PowerPointPackage
+        private(set) var failed = false
+        init(maximumBytes: Int, archive: PowerPointPackage) {
+            self.maximumBytes = max(0, maximumBytes); self.archive = archive
+        }
+        func admit(_ bytes: Int, retained: inout Int) -> Bool {
+            guard !failed, bytes >= 0, bytes <= maximumBytes - retained else {
+                failed = true; archive.fail(PicoDocsError.fileCorrupted); return false
+            }
+            retained += bytes; return true
+        }
+        func fits(_ bytes: Int) -> Bool {
+            var retained = 0
+            return admit(bytes, retained: &retained)
+        }
+        func join(_ fragments: [String], separator: String = "") -> String {
+            var bytes = 0
+            for (index, fragment) in fragments.enumerated() {
+                if index > 0, !admit(separator.utf8.count, retained: &bytes) { return "" }
+                guard admit(fragment.utf8.count, retained: &bytes) else { return "" }
+            }
+            return fragments.joined(separator: separator)
+        }
+        func append(_ fragment: String, to output: inout String) -> Bool {
+            var bytes = output.utf8.count
+            guard admit(fragment.utf8.count, retained: &bytes) else { return false }
+            output.append(contentsOf: fragment); return true
+        }
+        func replaceNewlines(_ text: String, with replacement: String) -> String {
+            var bytes = text.utf8.count
+            guard fits(bytes) else { return "" }
+            let growth = max(0, replacement.utf8.count - 1)
+            for scalar in text.unicodeScalars where scalar == "\n" {
+                guard admit(growth, retained: &bytes) else { return "" }
+            }
+            return text.replacingOccurrences(of: "\n", with: replacement)
+        }
+    }
+
     /// Per-part rendering state: where relationship targets resolve from, and the
     /// images collected so far (shared across the deck so each is emitted once).
     struct SlideContext {
@@ -245,6 +295,14 @@ public struct PowerPointConverter: DocumentConverter {
         let partPath: String
         let relationships: [String: Relationship]
         var images: ImageCollector
+        var renderBudget: RenderBudget? = nil
+        var renderedBlockBytes = 0
+        mutating func appendBlock(_ text: String, to blocks: inout [String]) {
+            if let renderBudget {
+                guard renderBudget.admit(text.utf8.count + (blocks.isEmpty ? 0 : 2), retained: &renderedBlockBytes) else { return }
+            }
+            blocks.append(text)
+        }
         var embedsImages = true
         var defaultLink: String?
         var plainTitle: String?
@@ -347,7 +405,7 @@ public struct PowerPointConverter: DocumentConverter {
     /// are walked recursively.
     private static func renderShapes(in container: Element, title: inout String?, blocks: inout [String], context: inout SlideContext, inheritedLink: String? = nil) {
         for shape in container.children().array() {
-            if Task.isCancelled { return }
+            if Task.isCancelled || context.renderBudget?.failed == true { return }
             if isHidden(shape) { continue }
             let click = shapeClick(shape)
             context.defaultLink = click == nil ? inheritedLink : hyperlink(click, context: context)
@@ -358,34 +416,38 @@ public struct PowerPointConverter: DocumentConverter {
                 guard let body = textBody(of: shape) else { continue }
                 context.runDefaults = inheritedRunDefaults(for: shape, context: context)
                 if type == "title" || type == "ctrTitle" {
-                    let text = normalizedWhitespace(renderParagraphs(body, inherited: noInheritance, context: &context).joined(separator: " "))
+                    let paragraphs = renderParagraphs(body, inherited: noInheritance, context: &context)
+                    let text = normalizedWhitespace(context.renderBudget?.join(paragraphs, separator: " ") ?? paragraphs.joined(separator: " "))
                     if title == nil, !text.isEmpty {
                         title = text
-                        context.plainTitle = normalizedWhitespace(selectedParagraphs(in: body).map { paragraph in
-                            selectedChildren(in: paragraph).map { node in
+                        let titleBudget = context.renderBudget.map { RenderBudget(maximumBytes: $0.maximumBytes - text.utf8.count - context.renderedBlockBytes, archive: context.archive) }
+                        let plainParagraphs = selectedParagraphs(in: body).map { paragraph in
+                            let fragments = selectedChildren(in: paragraph).map { node in
                                 if node.tagName().lowercased() == "a:br" { return " " }
                                 guard ["a:r", "a:fld"].contains(node.tagName().lowercased()) else { return "" }
                                 return selectedChild(of: node, named: "a:t").map(wholeText) ?? ""
-                            }.joined()
-                        }.joined(separator: " "))
+                            }
+                            return titleBudget?.join(fragments) ?? fragments.joined()
+                        }
+                        context.plainTitle = normalizedWhitespace(titleBudget?.join(plainParagraphs, separator: " ") ?? plainParagraphs.joined(separator: " "))
                         continue
                     }
-                    if !text.isEmpty { blocks.append(text) }
+                    if !text.isEmpty { context.appendBlock(text, to: &blocks) }
                     continue
                 }
                 let inherited = inheritedBullets(for: shape, context: context)
                 let paragraphs = renderParagraphs(body, inherited: inherited, context: &context)
-                if !paragraphs.isEmpty { blocks.append(paragraphs.joined(separator: "\n\n")) }
+                if !paragraphs.isEmpty { context.appendBlock(context.renderBudget?.join(paragraphs, separator: "\n\n") ?? paragraphs.joined(separator: "\n\n"), to: &blocks) }
             case "p:graphicframe":
                 if let table = selectedDescendant(in: shape, named: "a:tbl") {
                     context.runDefaults = Array(repeating: [], count: 9)
                     let markdown = renderTable(table, context: &context)
-                    if !markdown.isEmpty { blocks.append(markdown) }
+                    if !markdown.isEmpty { context.appendBlock(markdown, to: &blocks) }
                 } else if let object = selectedDescendant(in: shape, named: "p:oleobj"),
                           let preview = selectedDescendant(in: object, named: "p:pic"), !isHidden(preview),
-                          let image = pictureMarkdown(preview, context: &context) { blocks.append(image) }
+                          let image = pictureMarkdown(preview, context: &context) { context.appendBlock(image, to: &blocks) }
             case "p:pic":
-                if let image = pictureMarkdown(shape, context: &context) { blocks.append(image) }
+                if let image = pictureMarkdown(shape, context: &context) { context.appendBlock(image, to: &blocks) }
             case "p:grpsp":
                 renderShapes(in: shape, title: &title, blocks: &blocks, context: &context, inheritedLink: context.defaultLink)
             case "mc:alternatecontent":
@@ -642,6 +704,19 @@ public struct PowerPointConverter: DocumentConverter {
     static func renderParagraphs(_ body: Element, inherited: [Bullet?], context: inout SlideContext) -> [String] {
         var blocks: [String] = []
         var listLines: [String] = []
+        var blockBytes = 0, listBytes = 0
+        let budget = context.renderBudget.map { RenderBudget(maximumBytes: $0.maximumBytes - context.renderedBlockBytes, archive: context.archive) }
+        func appendBlock(_ text: String) {
+            if let budget, !budget.admit(text.utf8.count + (blocks.isEmpty ? 0 : 2), retained: &blockBytes) { return }
+            blocks.append(text)
+        }
+        func appendListLine(_ text: String) {
+            let bytes = text.utf8.count + (listLines.isEmpty ? 0 : 1)
+            var retained = blockBytes + listBytes
+            if let budget, !budget.admit(bytes, retained: &retained) { return }
+            listBytes += bytes
+            listLines.append(text)
+        }
         var markerWidths: [Int] = []          // marker width per open level
         var schemes: [Int: String] = [:]
         var starts: [Int: Int] = [:]
@@ -649,15 +724,19 @@ public struct PowerPointConverter: DocumentConverter {
         var baseLevel = 0                     // shallowest level in the current list
 
         func flushList() {
-            if !listLines.isEmpty { blocks.append(listLines.joined(separator: "\n")) }
-            listLines = []; markerWidths = []; counters = [:]; schemes = [:]; starts = [:]
+            if !listLines.isEmpty { appendBlock(budget?.join(listLines, separator: "\n") ?? listLines.joined(separator: "\n")) }
+            listLines = []; listBytes = 0; markerWidths = []; counters = [:]; schemes = [:]; starts = [:]
         }
 
         for paragraph in selectedParagraphs(in: body) {
-            if Task.isCancelled { return [] }
+            if Task.isCancelled || budget?.failed == true { return [] }
             let properties = selectedChild(of: paragraph, named: "a:ppr")
             let level = min(max(Int((try? properties?.attr("lvl")) ?? "") ?? 0, 0), 8)
-            let text = escapeBlockMarkers(renderRuns(paragraph, context: &context).trimmingCharacters(in: .whitespaces))
+            let paragraphBudget = budget.map { RenderBudget(maximumBytes: $0.maximumBytes - blockBytes - listBytes, archive: context.archive) }
+            var runContext = context
+            runContext.renderBudget = paragraphBudget
+            let text = escapeBlockMarkers(renderRuns(paragraph, context: &runContext).trimmingCharacters(in: .whitespaces), budget: paragraphBudget)
+            if paragraphBudget?.failed == true { return [] }
             guard !text.isEmpty else { continue }
 
             let marker: String?
@@ -687,7 +766,7 @@ public struct PowerPointConverter: DocumentConverter {
 
             guard let marker else {
                 flushList()
-                blocks.append(text.replacingOccurrences(of: "\n", with: "  \n"))
+                appendBlock(paragraphBudget?.replaceNewlines(text, with: "  \n") ?? text.replacingOccurrences(of: "\n", with: "  \n"))
                 continue
             }
             // Deeper levels restart their numbering when a shallower item intervenes.
@@ -703,7 +782,8 @@ public struct PowerPointConverter: DocumentConverter {
             let indent = String(repeating: " ", count: markerWidths.reduce(0, +))
             markerWidths.append(marker.count)
             let continuation = "  \n" + indent + String(repeating: " ", count: marker.count)
-            listLines.append(indent + marker + text.replacingOccurrences(of: "\n", with: continuation))
+            let continued = paragraphBudget?.replaceNewlines(text, with: continuation) ?? text.replacingOccurrences(of: "\n", with: continuation)
+            appendListLine(budget?.join([indent, marker, continued]) ?? (indent + marker + continued))
         }
         flushList()
         return blocks
@@ -714,20 +794,24 @@ public struct PowerPointConverter: DocumentConverter {
     static func renderRuns(_ paragraph: Element, context: inout SlideContext) -> String {
         struct Run { var text: String; var bold: Bool; var italic: Bool; var link: String? }
         var runs: [Run] = []
+        var retainedRunBytes = 0
+        let budget = context.renderBudget
         let paragraphProperties = selectedChild(of: paragraph, named: "a:ppr")
         let level = min(max(Int((try? paragraphProperties?.attr("lvl")) ?? "") ?? 0, 0), 8)
         let defaults = [paragraphProperties.flatMap { selectedChild(of: $0, named: "a:defrpr") }].compactMap { $0 } + context.runDefaults[level]
         for node in selectedChildren(in: paragraph) {
-            if Task.isCancelled { return "" }
+            if Task.isCancelled || budget?.failed == true { return "" }
             switch node.tagName().lowercased() {
             case "a:r", "a:fld":
                 let properties = selectedChild(of: node, named: "a:rpr")
-                let text = escapeMarkdown(selectedChild(of: node, named: "a:t").map(wholeText) ?? "")
+                let text = escapeMarkdown(selectedChild(of: node, named: "a:t").map(wholeText) ?? "", budget: budget)
                 guard !text.isEmpty else { continue }
+                if let budget, !budget.admit(text.utf8.count, retained: &retainedRunBytes) { return "" }
                 let click = properties.flatMap { selectedChild(of: $0, named: "a:hlinkclick") }
                 let link = hyperlink(click, context: context)
                 runs.append(Run(text: text, bold: isOn(properties, "b", defaults: defaults), italic: isOn(properties, "i", defaults: defaults), link: click == nil ? context.defaultLink : link))
             case "a:br":
+                if let budget, !budget.admit(1, retained: &retainedRunBytes) { return "" }
                 runs.append(Run(text: "\n", bold: false, italic: false, link: nil))
             default:
                 continue
@@ -741,13 +825,22 @@ public struct PowerPointConverter: DocumentConverter {
             let link = runs[index].link
             var label = ""
             while index < runs.count, runs[index].link == link {
-                label += emphasized(runs[index].text, bold: runs[index].bold, italic: runs[index].italic)
+                let run = runs[index]
+                let wrapperBytes = run.bold && run.italic ? 6 : run.bold ? 4 : run.italic ? 2 : 0
+                if let budget, !budget.fits(run.text.utf8.count + wrapperBytes) { return "" }
+                let fragment = emphasized(run.text, bold: run.bold, italic: run.italic)
+                if let budget { guard budget.append(fragment, to: &label) else { return "" } }
+                else { label += fragment }
                 index += 1
             }
             if let link {
-                out += "[\(label)](\(linkDestination(link)))"
+                let fragments = ["[", label, "](", linkDestination(link), ")"]
+                let linked = budget?.join(fragments) ?? fragments.joined()
+                if let budget { guard budget.append(linked, to: &out) else { return "" } }
+                else { out += linked }
             } else {
-                out += label
+                if let budget { guard budget.append(label, to: &out) else { return "" } }
+                else { out += label }
             }
         }
         return out
@@ -772,7 +865,14 @@ public struct PowerPointConverter: DocumentConverter {
         return value == "1" || value == "true"
     }
 
-    private static func escapeMarkdown(_ text: String) -> String {
+    private static func escapeMarkdown(_ text: String, budget: RenderBudget? = nil) -> String {
+        if let budget {
+            var bytes = text.utf8.count
+            guard budget.fits(bytes) else { return "" }
+            for character in text where #"\`*_{}[]<>"#.contains(character) {
+                guard budget.admit(1, retained: &bytes) else { return "" }
+            }
+        }
         var out = ""
         for character in text {
             if #"\`*_{}[]<>"#.contains(character) { out.append("\\") }
@@ -781,14 +881,25 @@ public struct PowerPointConverter: DocumentConverter {
         return out
     }
 
-    static func escapeBlockMarkers(_ text: String) -> String {
+    static func escapeBlockMarkers(_ text: String, budget: RenderBudget? = nil) -> String {
         var output = ""
         func appendLine(_ slice: Substring) {
-            guard !slice.isEmpty else { return }
+            guard !slice.isEmpty, budget?.failed != true else { return }
+            if let budget {
+                var bytes = output.utf8.count
+                guard budget.admit(slice.utf8.count, retained: &bytes) else { return }
+            }
             let line = String(slice)
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard let first = trimmed.unicodeScalars.first, "#-+|0123456789".unicodeScalars.contains(first) else { output += line; return }
             if trimmed.count >= 3, trimmed.allSatisfy({ $0 == "-" || $0 == " " }) {
+                if let budget {
+                    var bytes = output.utf8.count
+                    guard budget.admit(line.utf8.count, retained: &bytes) else { return }
+                    for scalar in line.unicodeScalars where scalar == "-" {
+                        guard budget.admit(1, retained: &bytes) else { return }
+                    }
+                }
                 output += line.replacingOccurrences(of: "-", with: "\\-")
                 return
             }
@@ -798,10 +909,13 @@ public struct PowerPointConverter: DocumentConverter {
         }
         var start = text.startIndex
         for index in text.unicodeScalars.indices where text.unicodeScalars[index] == "\n" {
-            appendLine(text[start..<index]); output.append("\n")
+            appendLine(text[start..<index])
+            if let budget { guard budget.append("\n", to: &output) else { return "" } }
+            else { output.append("\n") }
             start = text.unicodeScalars.index(after: index)
         }
         appendLine(text[start...])
+        if let budget, !budget.fits(output.utf8.count) { return "" }
         return output
     }
 
@@ -872,8 +986,10 @@ public struct PowerPointConverter: DocumentConverter {
     /// merged-away cells render empty.
     static func renderTable(_ table: Element, context: inout SlideContext) -> String {
         var rows: [[String]] = []
+        let budget = context.renderBudget
+        var cellBytes = 0
         for row in selectedChildren(in: table) where row.tagName().lowercased() == "a:tr" {
-            if Task.isCancelled { return "" }
+            if Task.isCancelled || budget?.failed == true { return "" }
             var cells: [String] = []
             for cell in selectedChildren(in: row) where cell.tagName().lowercased() == "a:tc" {
                 let merged = isOn(cell, "hMerge") || isOn(cell, "vMerge")
@@ -893,7 +1009,16 @@ public struct PowerPointConverter: DocumentConverter {
                                 .compactMap { $0.flatMap { selectedChild(of: $0, named: "a:defrpr") } }
                         }
                     }
-                    text = renderParagraphs(body, inherited: inherited, context: &context).joined(separator: "\n")
+                    let paragraphs = renderParagraphs(body, inherited: inherited, context: &context)
+                    text = budget?.join(paragraphs, separator: "\n") ?? paragraphs.joined(separator: "\n")
+                }
+                if let budget {
+                    var expanded = text.utf8.count
+                    guard budget.fits(expanded) else { return "" }
+                    for scalar in text.unicodeScalars where scalar == "|" || scalar == "\n" {
+                        guard budget.admit(scalar == "\n" ? 3 : 1, retained: &expanded) else { return "" }
+                    }
+                    guard budget.admit(expanded, retained: &cellBytes) else { return "" }
                 }
                 cells.append(MarkdownTableCell.escapeCanonicalPipes(text).replacingOccurrences(of: "\n", with: "<br>"))
             }
@@ -901,6 +1026,14 @@ public struct PowerPointConverter: DocumentConverter {
         }
         guard rows.contains(where: { $0.contains { !$0.isEmpty } }) else { return "" }
         let columns = rows.map(\.count).max() ?? 0
+        if let budget {
+            // Table separators and padding are determined by the dense dimensions.
+            guard columns <= budget.maximumBytes / 6, rows.count <= budget.maximumBytes / max(1, columns * 3 + 4) else {
+                _ = budget.fits(budget.maximumBytes + 1); return ""
+            }
+            let wrappers = rows.count * (columns * 3 + 4) + columns * 6 + 4
+            guard budget.admit(wrappers, retained: &cellBytes) else { return "" }
+        }
         func pad(_ row: [String]) -> [String] { row + Array(repeating: "", count: columns - row.count) }
         var markdown = "| " + pad(rows[0]).joined(separator: " | ") + " |\n"
         markdown += "| " + Array(repeating: "---", count: columns).joined(separator: " | ") + " |"
@@ -943,10 +1076,14 @@ public struct PowerPointConverter: DocumentConverter {
         let title = (try? properties?.attr("title")) ?? ""
         let name = (try? properties?.attr("name")) ?? ""
         let alt = [description, title, name].first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) ?? "image"
-        let label = escapeMarkdown(normalizedWhitespace(alt))
-        let image = "![\(label)](\(linkDestination(source)))"
+        let label = escapeMarkdown(normalizedWhitespace(alt), budget: context.renderBudget)
+        let fragments = ["![", label, "](", linkDestination(source), ")"]
+        let image = context.renderBudget?.join(fragments) ?? fragments.joined()
         let click = properties.flatMap { selectedChild(of: $0, named: "a:hlinkclick") }
-        if let target = click == nil ? context.defaultLink : hyperlink(click, context: context) { return "[\(image)](\(linkDestination(target)))" }
+        if let target = click == nil ? context.defaultLink : hyperlink(click, context: context) {
+            let linked = ["[", image, "](", linkDestination(target), ")"]
+            return context.renderBudget?.join(linked) ?? linked.joined()
+        }
         return image
     }
 

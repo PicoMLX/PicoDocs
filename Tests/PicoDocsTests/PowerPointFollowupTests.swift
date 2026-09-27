@@ -5,6 +5,57 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func renderBudgetRejectsExpansionBeforeRetainingRuns() throws {
+        typealias B = PowerPointConverterTests
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title"))])
+        func render(_ body: String, limit: Int) throws -> (String, PowerPointConverter.RenderBudget) {
+            let package = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
+            let budget = PowerPointConverter.RenderBudget(maximumBytes: limit, archive: package)
+            var context = PowerPointConverter.SlideContext(archive: package, partPath: "ppt/slides/s.xml", relationships: [:], images: .init())
+            context.renderBudget = budget
+            let xml = try SwiftSoup.parse("<a:p>" + body + "</a:p>", "", SwiftSoup.Parser.xmlParser())
+            let paragraph = try #require(xml.getElementsByTag("a:p").first())
+            return (PowerPointConverter.renderRuns(paragraph, context: &context), budget)
+        }
+        let escaped = "<a:r><a:t>" + String(repeating: "*", count: 100) + "</a:t></a:r>"
+        let exact = try render(escaped, limit: 200)
+        #expect(exact.0 == String(repeating: "\\*", count: 100)); #expect(!exact.1.failed)
+        let rejected = try render(escaped, limit: 199)
+        #expect(rejected.0.isEmpty); #expect(rejected.1.failed)
+        let plain = "<a:r><a:t>" + String(repeating: "x", count: 100) + "</a:t></a:r>"
+        let cumulative = try render(plain + plain, limit: 199)
+        #expect(cumulative.0.isEmpty); #expect(cumulative.1.failed)
+    }
+
+    @Test func renderBudgetBoundsJoinsAndNewlineExpansion() throws {
+        typealias B = PowerPointConverterTests
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title"))])
+        func budget(_ bytes: Int) throws -> PowerPointConverter.RenderBudget {
+            let package = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
+            return .init(maximumBytes: bytes, archive: package)
+        }
+        let join = try budget(5)
+        #expect(join.join(["aa", "bb"], separator: " ") == "aa bb")
+        #expect(join.join(["aaa", "bb"], separator: " ").isEmpty); #expect(join.failed)
+        let lines = try budget(4)
+        #expect(lines.replaceNewlines("a\nb", with: "  \n").isEmpty); #expect(lines.failed)
+        let rule = try budget(5)
+        #expect(PowerPointConverter.escapeBlockMarkers("---", budget: rule).isEmpty); #expect(rule.failed)
+    }
+
+    @Test func punctuationHeavySlidesFailInsideRenderingAtSmallLimits() async throws {
+        typealias B = PowerPointConverterTests
+        let run = "<a:p><a:r><a:t>" + String(repeating: "*", count: 1024) + "</a:t></a:r></a:p>"
+        let shape = B.shape(placeholder: nil, paragraphs: [run])
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: shape)])
+        await #expect(throws: PicoDocsError.fileCorrupted) {
+            try await PowerPointConverter(maximumRenderedBytes: 1536).convert(data, info: StreamInfo(detectedFormat: .pptx))
+        }
+        let result = try await PowerPointConverter(maximumRenderedBytes: 4096).convert(data, info: StreamInfo(detectedFormat: .pptx))
+        #expect(result.markdown() == String(repeating: "\\*", count: 1024))
+    }
+
+
     @Test func strictGraphicPayloadURIsRetainTablesAndOLEPreviews() async throws {
         typealias B = PowerPointConverterTests
         let picture = #"<p:pic><p:nvPicPr><p:cNvPr name="Preview"/></p:nvPicPr><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic>"#
