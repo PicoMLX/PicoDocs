@@ -8,6 +8,53 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func docxRulesAndTableBreaksRoundTripWithoutLossOrPadding() async throws {
+        for source in ["---", "Before\n\n---\n\nAfter", "| Header |\n| --- |\n| first<br>second |"] {
+            var result = ConverterResult(sections: [.init(markdown: source)])
+            for _ in 0..<3 {
+                result = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(result, to: .docx), filename: "round.docx")
+                #expect(result.sections[0].markdown == source)
+            }
+            if source.contains("<br>") {
+                let sheet = try xml(PicoDocsEngine.write(result, to: .xlsx), "xl/worksheets/sheet1.xml")
+                #expect(sheet.contains("first\nsecond"))
+                #expect(!sheet.contains("first  "))
+            }
+        }
+    }
+
+    @Test func textProjectionsKeepEmptyAltImagesAndLegacySheetNames() throws {
+        let result = ConverterResult(sections: [.init(markdown: "![](folder/missing.png)")])
+        #expect(try xml(PicoDocsEngine.write(result, to: .xlsx), "xl/worksheets/sheet1.xml").contains("missing.png"))
+        #expect(try xml(PicoDocsEngine.write(result, to: .pptx), "ppt/slides/slide1.xml").contains("missing.png"))
+        for preferred in [false, true] {
+            let section = DocumentSection(title: "Old", kind: .sheet, markdown: "Value", sheetName: preferred ? "Primary" : nil, metadata: ["sheetName": "Legacy"])
+            let workbook = try xml(PicoDocsEngine.write(ConverterResult(sections: [section]), to: .xlsx), "xl/workbook.xml")
+            #expect(workbook.contains("name=\"" + (preferred ? "Primary" : "Legacy") + "\""))
+        }
+    }
+
+    @Test func RTFFencesPreserveIntentionalTrailingCodeLines() async throws {
+        for code in ["first", "first\n", "first\n\n"] {
+            let source = "```\n" + code + "\n```"
+            var result = ConverterResult(sections: [.init(markdown: source)])
+            for _ in 0..<3 {
+                result = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(result, to: .rtf), filename: "round.rtf")
+                #expect(result.sections[0].markdown == source)
+            }
+        }
+    }
+
+    @Test func docxTableSpansAreBoundedBeforeAllocating() throws {
+        for span in ["1000000000", "999999999999999999999999", "0", "-1", "16385"] {
+            let table = try SwiftSoup.parse("<w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"\(span)\"/></w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>", "", SwiftSoup.Parser.xmlParser())
+            #expect(throws: PicoDocsError.fileCorrupted) { try WordConverter.renderTable(table.children().first()!, relationships: [:]) }
+        }
+        let row = "<w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"16384\"/></w:tcPr><w:p/></w:tc></w:tr>"
+        let table = try SwiftSoup.parse("<w:tbl>" + String(repeating: row, count: 62) + "</w:tbl>", "", SwiftSoup.Parser.xmlParser())
+        #expect(throws: PicoDocsError.fileCorrupted) { try WordConverter.renderTable(table.children().first()!, relationships: [:]) }
+    }
+
     @Test func RTFBinaryLengthsCountLatin1BytesIncludingCRLF() async throws {
         for payload: [UInt8] in [[13, 10], [13, 10, 123, 92], [255, 13, 10, 125]] {
             var data = Data("{\\rtf1 Before{\\pict\\bin\(payload.count) ".utf8)

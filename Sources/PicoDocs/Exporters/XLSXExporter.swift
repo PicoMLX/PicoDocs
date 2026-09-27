@@ -116,7 +116,7 @@ public struct XLSXExporter: DocumentExporter {
         // in-body headings.
         if section.kind == .sheet,
            case .heading(_, let text)? = blocks.first,
-           let title = section.sheetName ?? section.title,
+           let title = section.sheetName ?? section.metadata["sheetName"] ?? section.title,
            (text == title || plain(text) == title) {
             blocks.removeFirst()
         }
@@ -155,7 +155,7 @@ public struct XLSXExporter: DocumentExporter {
     // MARK: - Sheet naming
 
     private static func uniqueSheetName(_ section: DocumentSection, index: Int, used: inout Set<String>, nextSuffix: inout [String: Int]) -> String {
-        let raw = section.sheetName ?? section.title ?? "Sheet\(index)"
+        let raw = section.sheetName ?? section.metadata["sheetName"] ?? section.title ?? "Sheet\(index)"
         var name = sanitizeSheetName(raw)
         if name.isEmpty { name = "Sheet\(index)" }
         var candidate = name

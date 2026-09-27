@@ -281,8 +281,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 body += table(rows)
 
             case .rule:
-                // A bottom-bordered empty paragraph. WordConverter drops empty
-                // paragraphs, so a rule simply doesn't survive round-trip (acceptable).
+                // A bottom-bordered empty paragraph, recognized by WordConverter.
                 body += "<w:p><w:pPr><w:pBdr><w:bottom w:val=\"single\" w:sz=\"6\" w:space=\"1\" w:color=\"auto\"/></w:pBdr></w:pPr></w:p>"
             }
         }

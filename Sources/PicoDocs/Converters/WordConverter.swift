@@ -139,7 +139,7 @@ public struct WordConverter: DocumentConverter {
                 }
             case "w:tbl":
                 previousList = nil
-                let table = renderTable(element, relationships: relationships, numbering: numbering)
+                let table = try renderTable(element, relationships: relationships, numbering: numbering)
                 if !table.isEmpty { blocks.append(table) }
             case "w:sdt":
                 if let content = element.children().first(where: { $0.tagName().lowercased() == "w:sdtcontent" }) {
@@ -233,7 +233,12 @@ public struct WordConverter: DocumentConverter {
         let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
         let prefix = numbering.map { $0.prefix(numPr: numPr, style: style) } ?? (numPr != nil ? "- " : nil)
         let text = escapeBlockStarts(renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces))
-        guard !text.isEmpty else { return prefix }
+        guard !text.isEmpty else {
+            if let borders = properties?.children().first(where: { $0.tagName().lowercased() == "w:pbdr" }),
+               let bottom = borders.children().first(where: { $0.tagName().lowercased() == "w:bottom" }),
+               let value = try? bottom.attr("w:val"), !value.isEmpty, !["nil", "none"].contains(value) { return "---" }
+            return prefix
+        }
 
         if let level = headingLevel(forStyle: style) {
             let title = (prefix ?? "") + text
@@ -261,16 +266,16 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Inline content (runs, hyperlinks)
 
-    static func renderInline(_ container: Element, relationships: [String: String]) -> String {
+    static func renderInline(_ container: Element, relationships: [String: String], hardBreak: String = "  \n") -> String {
         var out = ""
         for child in container.children().array() {
             switch child.tagName().lowercased() {
             case "w:ppr":
                 continue // paragraph properties, not content
             case "w:r":
-                out += renderRun(child, relationships: relationships)
+                out += renderRun(child, relationships: relationships, hardBreak: hardBreak)
             case "w:hyperlink":
-                let inner = renderInline(child, relationships: relationships)
+                let inner = renderInline(child, relationships: relationships, hardBreak: hardBreak)
                 let relId = (try? child.attr("r:id")) ?? ""
                 let anchor = (try? child.attr("w:anchor")) ?? ""
                 let target = relationships[relId] ?? (anchor.isEmpty ? nil : (relationships["#" + anchor] ?? "#" + anchor))
@@ -296,13 +301,13 @@ public struct WordConverter: DocumentConverter {
                 }
             default:
                 // smartTag / ins / proofErr / other wrappers: recurse for nested runs.
-                out += renderInline(child, relationships: relationships)
+                out += renderInline(child, relationships: relationships, hardBreak: hardBreak)
             }
         }
         return out
     }
 
-    static func renderRun(_ run: Element, relationships: [String: String]) -> String {
+    static func renderRun(_ run: Element, relationships: [String: String], hardBreak: String = "  \n") -> String {
         let properties = try? run.getElementsByTag("w:rPr").first()
         let bold = isFormattingEnabled(properties, tag: "w:b")
         let italic = isFormattingEnabled(properties, tag: "w:i")
@@ -346,7 +351,7 @@ public struct WordConverter: DocumentConverter {
             case "w:tab":
                 textBuffer += "\t"
             case "w:br", "w:cr":
-                textBuffer += "  \n"
+                textBuffer += hardBreak
             case "w:drawing", "w:pict":
                 flushText()
                 out += imageMarkdown(in: node, relationships: relationships)   // not wrapped in emphasis
@@ -446,11 +451,16 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Tables
 
-    static func renderTable(_ table: Element, relationships: [String: String], numbering: WordListNumbering? = nil) -> String {
+    static func renderTable(_ table: Element, relationships: [String: String], numbering: WordListNumbering? = nil) throws -> String {
         var rows: [[String]] = []
+        var widestRow = 0
         for tr in table.children().array() where tr.tagName().lowercased() == "w:tr" {
             var cells: [String] = []
             for tc in tr.children().array() where tc.tagName().lowercased() == "w:tc" {
+                let span = try gridSpan(of: tc)
+                guard cells.count <= 16_384 - span else { throw PicoDocsError.fileCorrupted }
+                widestRow = max(widestRow, cells.count + span)
+                guard rows.count < 1_000_000 / widestRow else { throw PicoDocsError.fileCorrupted }
                 var cellText = ""
                 // Gather all descendant paragraphs so paragraphs inside block
                 // content controls (w:sdt) within the cell are included too. Skip
@@ -464,7 +474,7 @@ public struct WordConverter: DocumentConverter {
                     let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
                     let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
                     let prefix = numbering?.prefix(numPr: numPr, style: style)
-                    let t = (prefix ?? "") + renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
+                    let t = (prefix ?? "") + renderInline(paragraph, relationships: relationships, hardBreak: "\n").trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
@@ -474,7 +484,6 @@ public struct WordConverter: DocumentConverter {
                     .replacingOccurrences(of: "\n", with: "<br>"))
                 // Honor horizontally merged cells (w:gridSpan) so later columns
                 // stay aligned, by emitting empty placeholders for the span.
-                let span = gridSpan(of: tc)
                 if span > 1 {
                     cells.append(contentsOf: Array(repeating: "", count: span - 1))
                 }
@@ -494,10 +503,11 @@ public struct WordConverter: DocumentConverter {
     }
 
     /// Number of grid columns a table cell spans (`w:gridSpan`); 1 if absent.
-    private static func gridSpan(of cell: Element) -> Int {
-        guard let value = try? cell.getElementsByTag("w:gridSpan").first()?.attr("w:val"),
-              let span = Int(value) else { return 1 }
-        return max(1, span)
+    private static func gridSpan(of cell: Element) throws -> Int {
+        guard let properties = cell.children().first(where: { $0.tagName().lowercased() == "w:tcpr" }),
+              let element = properties.children().first(where: { $0.tagName().lowercased() == "w:gridspan" }) else { return 1 }
+        guard let span = Int(try element.attr("w:val")), (1...16_384).contains(span) else { throw PicoDocsError.fileCorrupted }
+        return span
     }
 
     // MARK: - Relationships (hyperlink targets)
