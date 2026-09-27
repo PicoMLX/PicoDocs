@@ -21,6 +21,7 @@ public struct AttributedStringRTFExporter: DocumentExporter {
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .rtf else { throw ExporterError.notAccepted }
+        try OfficeDocumentBlocks.rejectUnsupportedCoverOnlyInput(result)
         let attributed = AttributedStringDocumentBuilder.attributedString(from: result, preserveBlockMarkers: true)
         var properties: [NSAttributedString.DocumentAttributeKey: Any] = [.documentType: NSAttributedString.DocumentType.rtf]
         if let title = result.title { properties[.title] = title }

@@ -70,11 +70,11 @@ enum AttributedStringDocumentBuilder {
             if preserveBlockMarkers {
                 output.append(NSAttributedString(string: String(repeating: "#", count: max(1, min(level, 6))) + " ", attributes: [.font: bodyFont()]))
             }
-            output.append(inline(text, size: headingSize(level), bold: true))
+            output.append(inline(text, size: headingSize(level), bold: true, escapeLiterals: preserveBlockMarkers))
             output.append(NSAttributedString(string: "\n"))
 
         case .paragraph(let text):
-            output.append(inline(text))
+            output.append(inline(text, escapeLiterals: preserveBlockMarkers))
             output.append(NSAttributedString(string: "\n"))
 
         case .code(let code):
@@ -92,7 +92,7 @@ enum AttributedStringDocumentBuilder {
         case .blockquote(let lines):
             for line in lines {
                 if preserveBlockMarkers { output.append(NSAttributedString(string: "> ", attributes: [.font: bodyFont()])) }
-                output.append(inline(line, italic: true))
+                output.append(inline(line, italic: true, escapeLiterals: preserveBlockMarkers))
                 output.append(NSAttributedString(string: "\n"))
             }
 
@@ -104,7 +104,7 @@ enum AttributedStringDocumentBuilder {
                 let marker = String(repeating: " ", count: indent + (item.continuation ? (widths[item.level] ?? visible.count) : 0)) + (item.continuation ? "" : visible)
                 if !item.continuation { widths[item.level] = visible.count }
                 output.append(NSAttributedString(string: marker, attributes: [.font: bodyFont()]))
-                output.append(inline(item.text))
+                output.append(inline(item.text, escapeLiterals: preserveBlockMarkers))
                 output.append(NSAttributedString(string: "\n"))
             }
 
@@ -161,29 +161,35 @@ enum AttributedStringDocumentBuilder {
     }
 
 
-    private static func inline(_ markdown: String, size: CGFloat = baseSize, bold: Bool = false, italic: Bool = false) -> NSAttributedString {
+    private static func inline(_ markdown: String, size: CGFloat = baseSize, bold: Bool = false, italic: Bool = false, escapeLiterals: Bool = false) -> NSAttributedString {
         let result = NSMutableAttributedString()
-        render(MarkdownInlineParser.parse(markdown), into: result, size: size, bold: bold, italic: italic, link: nil)
+        render(MarkdownInlineParser.parse(markdown), into: result, size: size, bold: bold, italic: italic, link: nil, escapeLiterals: escapeLiterals)
         return result
     }
 
-    private static func render(_ nodes: [MarkdownInline], into output: NSMutableAttributedString, size: CGFloat, bold: Bool, italic: Bool, link: String?) {
+    private static func render(_ nodes: [MarkdownInline], into output: NSMutableAttributedString, size: CGFloat, bold: Bool, italic: Bool, link: String?, escapeLiterals: Bool = false) {
+        func escaped(_ text: String) -> String {
+            // The reader already escapes hyperlink labels before adding Markdown.
+            guard escapeLiterals, link == nil else { return text }
+            return text.map { #"\`*_{}[]<>()#+-.!|"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+        }
         for node in nodes {
             switch node {
             case .text(let s):
-                output.append(NSAttributedString(string: s, attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
+                output.append(NSAttributedString(string: escaped(s), attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
             case .lineBreak(let hard):
                 output.append(NSAttributedString(string: hard ? "\n" : " ", attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
             case .code(let s):
-                output.append(NSAttributedString(string: s, attributes: attributes(size: size, bold: bold, italic: italic, monospace: true, link: link)))
+                let text = escapeLiterals && link == nil ? tableMarkup([.code(s)]) : s
+                output.append(NSAttributedString(string: text, attributes: attributes(size: size, bold: bold, italic: italic, monospace: true, link: link)))
             case .strong(let children):
-                render(children, into: output, size: size, bold: true, italic: italic, link: link)
+                render(children, into: output, size: size, bold: true, italic: italic, link: link, escapeLiterals: escapeLiterals)
             case .emphasis(let children):
-                render(children, into: output, size: size, bold: bold, italic: true, link: link)
+                render(children, into: output, size: size, bold: bold, italic: true, link: link, escapeLiterals: escapeLiterals)
             case .link(let label, let destination):
-                render(label, into: output, size: size, bold: bold, italic: italic, link: destination)
+                render(label, into: output, size: size, bold: bold, italic: italic, link: destination, escapeLiterals: escapeLiterals)
             case .image(let alt, _):
-                output.append(NSAttributedString(string: alt, attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
+                output.append(NSAttributedString(string: escaped(alt), attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
             case .footnoteReference(let id):
                 // No footnote machinery in RTF output; keep the marker as literal text
                 // (as the DOCX writer does) so references and `[^id]: note`

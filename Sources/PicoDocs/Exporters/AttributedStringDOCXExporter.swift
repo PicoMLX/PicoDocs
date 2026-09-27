@@ -28,6 +28,7 @@ public struct AttributedStringDOCXExporter: DocumentExporter {
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .docx else { throw ExporterError.notAccepted }
         #if canImport(AppKit)
+        try OfficeDocumentBlocks.rejectUnsupportedCoverOnlyInput(result)
         let attributed = AttributedStringDocumentBuilder.attributedString(from: result)
         var properties: [NSAttributedString.DocumentAttributeKey: Any] = [.documentType: NSAttributedString.DocumentType.officeOpenXML]
         if let title = result.title { properties[.title] = title }

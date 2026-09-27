@@ -24,6 +24,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .docx else { throw ExporterError.notAccepted }
+        try OfficeDocumentBlocks.rejectUnsupportedCoverOnlyInput(result)
         let result = PicoDocsEngine.withSynthesizedImageReferences(result)
 
         let blocks = OfficeDocumentBlocks.parse(result)

@@ -24,6 +24,7 @@ public struct PPTXExporter: DocumentExporter {
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .pptx else { throw ExporterError.notAccepted }
+        try OfficeDocumentBlocks.rejectUnsupportedCoverOnlyInput(result)
         let result = PicoDocsEngine.withSynthesizedImageReferences(result)
 
         let slides = try Self.slides(from: result)

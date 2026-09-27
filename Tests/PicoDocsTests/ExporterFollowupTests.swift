@@ -8,6 +8,44 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func builtInExportersRejectCoverOnlyPayloads() throws {
+        let result = ConverterResult(cover: Data([1, 2, 3]), sections: [])
+        let exporters: [(any DocumentExporter, ExportableFileType)] = [(WordprocessingMLExporter(), .docx), (XLSXExporter(), .xlsx), (PPTXExporter(), .pptx)]
+        for (exporter, format) in exporters {
+            #expect(throws: PicoDocsError.emptyDocument) { try PicoDocsEngine.write(result, to: format) }
+            #expect(throws: PicoDocsError.emptyDocument) { try exporter.write(result, format: format) }
+        }
+        #if canImport(AppKit)
+        for (exporter, format) in [(AttributedStringRTFExporter() as any DocumentExporter, ExportableFileType.rtf), (AttributedStringDOCXExporter(), .docx)] {
+            #expect(throws: PicoDocsError.emptyDocument) { try exporter.write(result, format: format) }
+        }
+        #expect(throws: PicoDocsError.emptyDocument) { try PicoDocsEngine.write(result, to: .rtf) }
+        #endif
+        let textAndCover = ConverterResult(cover: Data([1]), sections: [.init(markdown: "Body")])
+        #expect(!(try PicoDocsEngine.write(textAndCover, to: .docx)).isEmpty)
+    }
+
+    #if canImport(AppKit)
+    @Test func RTFRoundTripsLiteralInlineAndBlockPunctuation() async throws {
+        for source in [#"\*literal\*"#, ##"\# literal"##, #"1\. literal"#, #"\- literal"#, #"\| literal"#, #"\[literal\] and slash\\tail"#, #"**bold \*literal\***"#, #"[\*literal\*](https://example.com)"#, #"`*literal*`"#] {
+            let original = ConverterResult(sections: [.init(markdown: source)])
+            let bytes = try PicoDocsEngine.write(original, to: .rtf)
+            let restored = try await PicoDocsEngine.convert(data: bytes, filename: "literal.rtf")
+            let expected = try DocumentRenderer.render(original, to: .plaintext)
+            #expect(try DocumentRenderer.render(restored, to: .plaintext) == expected)
+            let expectedHTML = try SwiftSoup.parse(DocumentRenderer.render(original, to: .html))
+            let actualHTML = try SwiftSoup.parse(DocumentRenderer.render(restored, to: .html))
+            for tag in ["h1", "ul", "ol", "table", "em", "strong", "a", "code"] {
+                #expect(try actualHTML.getElementsByTag(tag).count == expectedHTML.getElementsByTag(tag).count)
+            }
+            let docx = try PicoDocsEngine.write(restored, to: .docx)
+            let word = try await PicoDocsEngine.convert(data: docx, filename: "literal.docx")
+            #expect(try DocumentRenderer.render(word, to: .plaintext) == expected)
+        }
+    }
+    #endif
+
+
     @Test func PPTXDeckLimitAppliesToMarkdownAndUnnumberedSlides() throws {
         let markdown = ConverterResult(sections: [.init(markdown: String(repeating: "# Slide\n\n", count: 10_001))])
         let unnumbered = ConverterResult(sections: Array(repeating: DocumentSection(kind: .slide, markdown: "Slide"), count: 10_001))

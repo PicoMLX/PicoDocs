@@ -105,18 +105,19 @@ public enum PicoDocsEngine {
         to format: ExportableFileType,
         registry: DocumentExporterRegistry = .default
     ) throws -> Data {
-        // Mirror `convert`'s post-sanitize check: an empty document is an error,
-        // *unless* it carries image sections (an image-only doc is valid output).
+        guard !isEmptyForExport(result) else { throw PicoDocsError.emptyDocument }
+        return try registry.write(result, format: format)
+    }
+
+    /// Custom writers may consume covers; built-ins validate their own support.
+    static func isEmptyForExport(_ result: ConverterResult, includingCover: Bool = true) -> Bool {
         let isEmpty = result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasImages = result.sections.contains { $0.kind == .image }
-        let hasCover = !(result.cover?.isEmpty ?? true)
+        let hasCover = includingCover && !(result.cover?.isEmpty ?? true)
         let hasCSV = result.sections.contains { !($0.metadata["csv"] ?? "").isEmpty }
         let hasSheets = result.sections.contains { $0.kind == .sheet }
         let hasSlides = result.sections.contains { $0.kind == .slide || $0.slideNumber != nil }
-        if isEmpty, !hasImages, !hasCover, !hasCSV, !hasSheets, !hasSlides {
-            throw PicoDocsError.emptyDocument
-        }
-        return try registry.write(result, format: format)
+        return isEmpty && !hasImages && !hasCover && !hasCSV && !hasSheets && !hasSlides
     }
 
     /// Appends a `.body` section with an inline `![alt](reference)` for each `.image`

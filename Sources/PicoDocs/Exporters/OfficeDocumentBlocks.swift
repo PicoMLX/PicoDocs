@@ -3,6 +3,14 @@ import Foundation
 /// Office writers share a lossless projection of structured worksheet cells.
 /// Markdown remains the fallback for sections without a raw CSV carrier.
 enum OfficeDocumentBlocks {
+    /// These writers do not serialize result.cover; do not silently discard it
+    /// when it is the only payload. Custom exporters remain free to support it.
+    static func rejectUnsupportedCoverOnlyInput(_ result: ConverterResult) throws {
+        if !(result.cover?.isEmpty ?? true), PicoDocsEngine.isEmptyForExport(result, includingCover: false) {
+            throw PicoDocsError.emptyDocument
+        }
+    }
+
     static func parse(_ result: ConverterResult, includeSlideTitles: Bool = true) -> [MarkdownBlock] {
         var blocks: [MarkdownBlock] = []
         var pending: [String] = []
