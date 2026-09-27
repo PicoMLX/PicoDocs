@@ -173,7 +173,7 @@ enum HTMLToMarkdown {
 
     private static func escapeLiteral(_ text: String, blockSyntax: Bool) -> String {
         let punctuation = blockSyntax ? #"\`*_{}[]<>()#+-.!|"# : #"\`*_{}[]<>"#
-        return text.map { punctuation.contains($0) ? "\\" + String($0) : String($0) }.joined()
+        return MarkdownLiteral.escapePunctuation(text, characters: punctuation)
     }
 
     /// Cell content already carries canonical inline escapes. Add only missing

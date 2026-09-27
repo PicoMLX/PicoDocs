@@ -2,6 +2,19 @@ import Foundation
 
 /// Protect literal source text from being reinterpreted as nested Markdown blocks.
 enum MarkdownLiteral {
+    /// An HTML comment records a native restart after an inline table. It also
+    /// separates lists in ordinary Markdown renderers without adding visible text.
+    static let listRestartBoundary = "<!-- PicoDocs:list-restart -->"
+
+    static func escapePunctuation(_ text: String, characters: String) -> String {
+        var output = ""
+        for scalar in text.unicodeScalars {
+            if characters.unicodeScalars.contains(scalar) { output.append("\\") }
+            output.unicodeScalars.append(scalar)
+        }
+        return output
+    }
+
     /// Verbatim converters predate canonical Markdown escaping. Protect their
     /// literal backslashes before the renderer decodes generated escapes.
     static func escapeBackslashes(_ text: String, paragraphEndLines: Set<Int> = [], structuralText: String? = nil) -> String {
@@ -177,7 +190,7 @@ enum MarkdownLiteral {
     static func escapeBlockStart(_ line: String) -> String {
         let content = line.drop { $0 == " " || $0 == "\t" }
         let lead = String(line[..<content.startIndex])
-        if content.hasPrefix("[^"), let close = content.firstIndex(of: "]"), content[content.index(after: close)...].hasPrefix(":") { return lead + "\\" + content }
+        if DocumentRenderer.literalFootnoteDefinition(String(content)) || content == listRestartBoundary { return lead + "\\" + content }
         if content.hasPrefix("```") {
             return lead + content.replacingOccurrences(of: "`", with: "\\`")
         }

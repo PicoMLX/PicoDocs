@@ -504,7 +504,7 @@ public enum DocumentRenderer {
                 i += 1
                 continue
             }
-            if line.isEmpty { i += 1; continue }
+            if line.isEmpty || line == MarkdownLiteral.listRestartBoundary { i += 1; continue }
             if line.hasPrefix("|") {
                 // Within a run of table rows, drop only the conventional separator
                 // (second row), so all-dash data rows elsewhere are preserved.
@@ -571,7 +571,7 @@ public enum DocumentRenderer {
             let line = lines[i]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
-            if isBlank(line) { i += 1; continue }
+            if isBlank(line) || trimmed == MarkdownLiteral.listRestartBoundary { i += 1; continue }
 
             if trimmed.hasPrefix("```") {
                 i += 1
@@ -671,7 +671,7 @@ public enum DocumentRenderer {
             var paragraph: [String] = []
             while i < lines.count {
                 let candidate = lines[i].trimmingCharacters(in: .whitespaces)
-                if isBlank(lines[i]) || candidate.hasPrefix("```") || candidate.hasPrefix("|")
+                if isBlank(lines[i]) || candidate == MarkdownLiteral.listRestartBoundary || candidate.hasPrefix("```") || candidate.hasPrefix("|")
                     || candidate.hasPrefix(">") || candidate == "---" || candidate == "***" || candidate == "___"
                     || headingMatch(candidate) != nil || listMarker(candidate) != nil || confirmedBareMarker(lines, index: i) != nil {
                     break
@@ -777,7 +777,7 @@ public enum DocumentRenderer {
         let isFootnote = literalFootnoteDefinition(line)
         let line = line.trimmingCharacters(in: .whitespaces)
         let single = headingMatch(line) != nil || line.hasPrefix("|") || line.hasPrefix(">")
-            || ["---", "***", "___"].contains(line)
+            || ["---", "***", "___", MarkdownLiteral.listRestartBoundary].contains(line)
         return (single || listMarker(line) != nil || isFootnote, single)
     }
 

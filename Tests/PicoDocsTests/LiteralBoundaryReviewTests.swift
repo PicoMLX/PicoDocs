@@ -4,6 +4,51 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func nativePunctuationEscapesOperateOnUnicodeScalars() async throws {
+        for mark in ["\u{0301}", "\u{FE0F}"] {
+            let source = "*" + mark + "x*" + mark
+            let html = try await PicoDocsEngine.convert(data: Data("<p>\(source)</p>".utf8), filename: "literal.html")
+            let document = "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:body><w:p><w:r><w:t>\(source)</w:t></w:r></w:p></w:body></w:document>"
+            let word = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([("word/document.xml", Array(document.utf8))]), filename: "literal.docx")
+            let pages = try await PicoDocsEngine.convert(data: PagesConverterTests.makeListPagesFile(text: "\u{FFFC}", style: .bullet, restarts: [], tableCell: source), filename: "literal.pages")
+            for result in [html, word, pages] {
+                #expect(try DocumentRenderer.render(result, to: .plaintext).contains(source))
+                let rendered = try DocumentRenderer.render(result, to: .html)
+                #expect(rendered.contains(source)); #expect(!rendered.contains("<em>"))
+            }
+        }
+    }
+
+    @Test func nativeRestartsAfterTablesRemainDistinctEvenWithSequentialNumbers() async throws {
+        for ordered in [true, false] {
+            for restart in [true, false] {
+                let data = PagesConverterTests.makeListPagesFile(text: "a\nb \u{FFFC}\nc", style: ordered ? .ordered : .bullet,
+                    restarts: [(0, 1), (2, 0), (6, restart ? (ordered ? 3 : 1) : 0)], tableCell: "X")
+                let result = try await PicoDocsEngine.convert(data: data, filename: "restart.pages")
+                #expect(result.markdown().contains(MarkdownLiteral.listRestartBoundary) == restart)
+                let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+                let lists = try html.getElementsByTag(ordered ? "ol" : "ul")
+                #expect(lists.count == (restart ? 2 : 1))
+                if restart { #expect(lists.last()?.children().count == 1) }
+                else { #expect(lists.first()?.children().count == 3) }
+                for format in [ExportFileType.html, .plaintext, .csv] {
+                    #expect(!(try DocumentRenderer.render(result, to: format)).contains("PicoDocs:list-restart"))
+                }
+            }
+        }
+    }
+
+    @Test func PagesListLiteralFootnotesFindTheirUnescapedCloser() async throws {
+        for source in [#"[^a\]b]: note"#, #"[^a\\\]b]: note"#] {
+            let data = PagesConverterTests.makeListPagesFile(text: "item\u{2028}" + source, style: .bullet, restarts: [])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "literal.pages")
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(source))
+            let html = try DocumentRenderer.render(result, to: .html)
+            #expect(html.contains(source)); #expect(!html.contains("class=\"footnotes\""))
+        }
+    }
+
+
     @Test func blankLinesEndListScopedFencesAtTheContentColumn() async throws {
         let source = "1. x\n   ```\n\n  a\\*b"
         let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "fence.txt")

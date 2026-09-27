@@ -165,6 +165,7 @@ enum IWATable {
                 if !segment.isEmpty { blocks.append(.text(segment)) }
                 let indent = lists.lastList == nil ? "" : String(repeating: " ", count: lists.markerWidth)
                 blocks.append(.table(markdown.components(separatedBy: "\n").map { indent + $0 }.joined(separator: "\n")))
+                lists.afterInlineTable = lists.lastList != nil
                 placed.insert(tile)
                 segmentStart = marker + 1                                   // drop the table ￼
                 continuesParagraph = true
@@ -288,6 +289,7 @@ enum IWATable {
         var orderedList: UInt64?   // style of the ordered run currently counting
         var counter = "0"
         var markerWidth = 2
+        var afterInlineTable = false
     }
 
     /// Renders a UTF-16 range as Markdown: split into paragraphs at true paragraph
@@ -341,22 +343,26 @@ enum IWATable {
                 case .heading(let text)?:
                     parts.append((text, false))
                     pendingEmpty = []
-                    lists.lastList = nil; lists.orderedList = nil
+                    lists.lastList = nil; lists.orderedList = nil; lists.afterInlineTable = false
                 case .body(let text)?:
                     if let listKind {
+                        let afterTable = lists.afterInlineTable
                         let (marker, tight) = try nextListMarker(listKind, style: listStyle, at: visibleStart ?? start, body, &lists)
+                        if afterTable, !tight { parts.append((MarkdownLiteral.listRestartBoundary, false)) }
                         if tight { parts += pendingEmpty }
                         pendingEmpty = []
                         parts.append((listItem(marker + " ", text), tight))
                     } else {
                         parts.append((text, false))
                         pendingEmpty = []
-                        lists.lastList = nil; lists.orderedList = nil
+                        lists.lastList = nil; lists.orderedList = nil; lists.afterInlineTable = false
                     }
                 case nil:
                     if let listKind {
                         // An empty list item still takes a number (Pages shows its marker).
+                        let afterTable = lists.afterInlineTable
                         let (marker, tight) = try nextListMarker(listKind, style: listStyle, at: visibleStart ?? start, body, &lists)
+                        if afterTable, !tight { parts.append((MarkdownLiteral.listRestartBoundary, false)) }
                         if !tight { pendingEmpty = [] }
                         pendingEmpty.append((marker, tight))
                     } else {
@@ -364,7 +370,7 @@ enum IWATable {
                         // following same-style list restarts its numbering and is set
                         // off by a blank line, not tight-joined.
                         pendingEmpty = []
-                        lists.lastList = nil; lists.orderedList = nil
+                        lists.lastList = nil; lists.orderedList = nil; lists.afterInlineTable = false
                     }
                 }
                 start = index + 1
@@ -394,6 +400,7 @@ enum IWATable {
     /// list, so it is set off by a blank line rather than tight-joined.
     private static func nextListMarker(_ kind: ListMarker, style: UInt64?, at offset: Int,
                                        _ body: BodyStorage, _ lists: inout ListState) throws -> (marker: String, tight: Bool) {
+        defer { lists.afterInlineTable = false }
         switch kind {
         case .bullet:
             let restart = listRestart(at: offset, in: body.listRestarts)
@@ -1335,7 +1342,7 @@ enum IWATable {
                 || (0x7F...0x9F).contains(value)             // DEL + C1 controls
                 || value == 0xFFFC                           // object-replacement placeholder
         }
-        let escaped = String(scalars).map { #"\`*_{}[]<>|"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+        let escaped = MarkdownLiteral.escapePunctuation(String(scalars), characters: #"\`*_{}[]<>|"#)
         return escaped.trimmingCharacters(in: .whitespaces)
     }
 }
