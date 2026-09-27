@@ -55,8 +55,12 @@ enum OfficeDocumentBlocks {
                     if endsRow { try charge(32); rows += 1; columns = 0 }
                 }
             } else {
-                var hasContent = false, tableLine = false
+                var hasContent = false, tableLine = false, previousWasCR = false
                 for scalar in section.markdown.unicodeScalars {
+                    // Match the block parser's CRLF normalization for both byte
+                    // and physical-line charges, without allocating a new string.
+                    if scalar == "\n", previousWasCR { previousWasCR = false; continue }
+                    previousWasCR = scalar == "\r"
                     let value = scalar.value
                     let bytes = value <= 0x7F ? 1 : value <= 0x7FF ? 2 : value <= 0xFFFF ? 3 : 4
                     try charge(bytes * 7)

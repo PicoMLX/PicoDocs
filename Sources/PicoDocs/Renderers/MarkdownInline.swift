@@ -83,13 +83,12 @@ enum MarkdownInlineParser {
         }
         if let literal = escapeOnlyText(text) { return literal.isEmpty ? [] : [.text(literal)] }
         let chars = IndexedText(text)
-        // Cache the next unescaped label closer once instead of rescanning the
-        // suffix for every unmatched opener in partially generated Markdown.
-        var escapedPositions = Set<Int>()
-        var cursor = 0
-        while cursor < chars.count {
-            if chars[cursor] == "\\", cursor + 1 < chars.count { escapedPositions.insert(cursor + 1); cursor += 2 }
-            else { cursor += 1 }
+        // Inspect backslash parity only at actual delimiters. The preceding
+        // runs are disjoint, so this is linear without a per-escape index/set.
+        func isEscapedDelimiter(at index: Int) -> Bool {
+            var start = index
+            while start > 0, chars[start - 1] == "\\" { start -= 1 }
+            return !(index - start).isMultiple(of: 2)
         }
         // Footnote candidates advance monotonically, so retain one closer
         // instead of a dictionary entry per opener (dense or sparse).
@@ -101,7 +100,7 @@ enum MarkdownInlineParser {
             while footnoteSearch < chars.count {
                 let index = footnoteSearch
                 footnoteSearch += 1
-                if chars[index] == "]", !escapedPositions.contains(index) {
+                if chars[index] == "]", !isEscapedDelimiter(at: index) {
                     footnoteClose = index
                     return index
                 }
@@ -112,13 +111,17 @@ enum MarkdownInlineParser {
         // Pair destinations once; failed candidates never rescan a suffix.
         var parenCloses: [Int: Int] = [:], stack: [Int] = []
         var nextAngle: [Int: Int] = [:]
-        for index in chars.indices where !escapedPositions.contains(index) {
-            if chars[index] == "(" { stack.append(index) }
+        for index in chars.indices {
+            let delimiter = chars[index]
+            guard delimiter == "(" || delimiter == ")", !isEscapedDelimiter(at: index) else { continue }
+            if delimiter == "(" { stack.append(index) }
             else if chars[index] == ")", let open = stack.popLast() { parenCloses[open] = index }
         }
         var angleClose: Int?
-        for index in chars.indices.reversed() where !escapedPositions.contains(index) {
-            if chars[index] == ">" { angleClose = index }
+        for index in chars.indices.reversed() {
+            let delimiter = chars[index]
+            guard delimiter == "<" || delimiter == ">", !isEscapedDelimiter(at: index) else { continue }
+            if delimiter == ">" { angleClose = index }
             else if chars[index] == "<", let close = angleClose { nextAngle[index] = close }
         }
         var tickRuns: [(start: Int, length: Int)] = [], scan = 0

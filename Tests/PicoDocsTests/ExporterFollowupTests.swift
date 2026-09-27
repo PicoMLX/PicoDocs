@@ -9,6 +9,36 @@ import AppKit
 
 struct ExporterFollowupTests {
 
+    @Test func OfficePreflightCountsCRLFAsOnePhysicalLine() throws {
+        for newline in ["\n", "\r", "\r\n"] {
+            try OfficeDocumentBlocks.validateInput(ConverterResult(sections: [.init(markdown: String(repeating: "x" + newline, count: 250_000))]))
+            try OfficeDocumentBlocks.validateInput(ConverterResult(sections: [.init(markdown: "```" + newline + String(repeating: newline, count: 250_000) + "```")]))
+            let tooMany = ConverterResult(sections: [.init(markdown: "```" + newline + String(repeating: newline, count: 1_000_000) + "```")])
+            #expect(throws: ExporterError.self) { try OfficeDocumentBlocks.validateInput(tooMany) }
+        }
+    }
+
+    @Test func DOCXGeneratedLeadingEmphasisAlreadySurvivesRoundTrips() async throws {
+        for source in ["**Bold**", "*Italic*", "***Both***", "first  \n**Bold**", "first  \n*Italic*", "- **Bold**", #"\* literal"#, ##"\# literal"##] {
+            var result = ConverterResult(sections: [.init(markdown: source)])
+            for _ in 0..<3 {
+                result = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(result, to: .docx), filename: "leading.docx")
+                #expect(result.markdown() == source)
+            }
+        }
+    }
+
+    @Test func DenseIrrelevantBackslashesDoNotNeedAnEscapeIndex() {
+        for follower in ["a", ".", "*"] {
+            let source = String(repeating: "\\" + follower, count: 100_000) + "["
+            let visible = String(repeating: follower == "a" ? "\\a" : follower, count: 100_000) + "["
+            #expect(MarkdownInlineParser.parse(source) == [.text(visible)])
+        }
+        #expect(MarkdownInlineParser.parse(#"[x](a\)b)"#) == [.link(label: [.text("x")], destination: "a)b")])
+        #expect(MarkdownInlineParser.parse(#"[x](<a\>b>)"#) == [.link(label: [.text("x")], destination: "a>b")])
+        #expect(MarkdownInlineParser.parse(#"[x](a\\)"#) == [.link(label: [.text("x")], destination: #"a\"#)])
+    }
+
     @Test func SpreadsheetMLEscapesDecodeIncrementallyWithUTF16Semantics() {
         let dense = SpreadsheetMLText.decode(String(repeating: "_x0000_", count: 100_000))
         #expect(dense.utf8.count == 100_000)
