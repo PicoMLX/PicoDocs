@@ -236,7 +236,7 @@ enum IWATable {
             guard remainingStyleWork > 0 else { break }
             if let marker = listMarker(of: id, in: objects, remainingWork: &remainingStyleWork) { listMarkers[id] = marker }
         }
-        return BodyStorage(units: Array(text.utf16), escapedBackslashes: MarkdownLiteral.backslashEscapeCounts(text),
+        return BodyStorage(units: Array(text.utf16), escapedBackslashes: MarkdownLiteral.backslashEscapeCounts(text, paragraphSeparators: [0x0A, 0x0D, 0x2029]),
                            paragraphStyles: indexedReferences(in: storage, field: 5),
                            characterStyles: characterStyles, smartFields: smartFields,
                            listStyles: listStyles, listRestarts: listRestarts(in: storage),

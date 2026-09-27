@@ -4,7 +4,7 @@ import Foundation
 enum MarkdownLiteral {
     /// Verbatim converters predate canonical Markdown escaping. Protect their
     /// literal backslashes before the renderer decodes generated escapes.
-    static func escapeBackslashes(_ text: String) -> String {
+    static func escapeBackslashes(_ text: String, separateParagraphLines: Bool = false) -> String {
         var inFence = false
         var prose = ""
         var output = ""
@@ -29,12 +29,26 @@ enum MarkdownLiteral {
                 flushProse()
                 output += line
                 if index < lines.count - 1 { output += "\n" }
+            } else if line.trimmingCharacters(in: .whitespaces).hasPrefix("|") {
+                flushProse()
+                var cell = "", escaped = false
+                func flushCell() {
+                    output += MarkdownTableCell.mapCodeSpans(cell, code: { $0 }, plain: { escapeProseBackslashes($0) })
+                    cell = ""
+                }
+                for character in line {
+                    if character == "|", !escaped { flushCell(); output.append(character) }
+                    else { cell.append(character) }
+                    escaped = character == "\\" && !escaped
+                }
+                flushCell()
+                if index < lines.count - 1 { output += "\n" }
             } else {
                 let boundary = DocumentRenderer.literalBlockBoundary(line)
                 if boundary.starts { flushProse() }
                 prose += line
                 if index < lines.count - 1 { prose += "\n" }
-                if boundary.ends { flushProse() }
+                if boundary.ends || separateParagraphLines { flushProse() }
             }
         }
         flushProse()
@@ -54,8 +68,11 @@ enum MarkdownLiteral {
 
     /// Count added backslashes while retaining source
     /// UTF-16 indices, so styled runs can share whole-document code context.
-    static func backslashEscapeCounts(_ text: String) -> [Int] {
-        let source = Array(text.utf16), escaped = Array(escapeBackslashes(text).utf16)
+    static func backslashEscapeCounts(_ text: String, paragraphSeparators: Set<UInt16> = []) -> [Int] {
+        let source = Array(text.utf16)
+        // Replacing each separator with one LF preserves UTF-16 source offsets.
+        let context = String(decoding: source.map { paragraphSeparators.contains($0) ? 0x0A : $0 }, as: UTF16.self)
+        let escaped = Array(escapeBackslashes(context, separateParagraphLines: !paragraphSeparators.isEmpty).utf16)
         var counts = Array(repeating: 0, count: source.count)
         var i = 0, j = 0
         while i < source.count {
