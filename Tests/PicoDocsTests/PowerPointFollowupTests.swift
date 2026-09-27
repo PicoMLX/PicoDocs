@@ -5,6 +5,48 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func titleMetadataUsesOnlySelectedRunText() async throws {
+        typealias B = PowerPointConverterTests
+        let run = "<a:r>" + selectedWrapper("<a:t>Selected</a:t>", fallback: "<a:t>Wrong</a:t>") + "</a:r>"
+        let shape = B.shape(placeholder: #"<p:ph type="title"/>"#, paragraphs: ["<a:p>" + run + "</a:p>"])
+        let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: shape)]), filename: "title.pptx")
+        #expect(result.sections.first?.title == "Selected")
+        #expect(result.markdown() == "## Selected")
+    }
+
+    @Test func nativeLoneListMarkersRemainLiteralProse() async throws {
+        for value in ["-", "+", "1.", "123."] {
+            let xml = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>\(value)</w:t></w:r></w:p></w:body></w:document>"
+            let word = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([("word/document.xml", Array(xml.utf8))]), filename: "marker.docx")
+            let html = try await PicoDocsEngine.convert(data: Data("<p>\(value)</p>".utf8), filename: "marker.html")
+            for result in [word, html] {
+                #expect(try DocumentRenderer.render(result, to: .plaintext) == value)
+                let output = try DocumentRenderer.render(result, to: .html)
+                #expect(!output.contains("<ul>")); #expect(!output.contains("<ol"))
+                #expect(output.contains("<p>\(value)</p>"))
+            }
+        }
+        let emptyList = ConverterResult(sections: [.init(markdown: "-\n- item")])
+        #expect(try DocumentRenderer.render(emptyList, to: .html).contains("<li></li>"))
+        let nativeList = try await PicoDocsEngine.convert(data: Data("<ul><li>item</li></ul>".utf8), filename: "actual-list.html")
+        #expect(try DocumentRenderer.render(nativeList, to: .html).contains("<li>item</li>"))
+    }
+
+    @Test func percentEncodedImageReferencesStillEmbedTheirCarriers() async throws {
+        typealias B = PowerPointConverterTests
+        for filename in ["chart(1).png", "chart[1].png", "chart one.png"] {
+            let picture = #"<p:pic><p:nvPicPr><p:cNvPr descr="Chart"/></p:nvPicPr><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic>"#
+            let target = "../media/" + filename
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: picture, relationships: [("image", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", target)])], extraParts: [("ppt/media/" + filename, [1, 2, 3])])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "image.pptx")
+            let html = try DocumentRenderer.render(result, to: .html)
+            #expect(html.contains("src=\"data:image/png;base64,AQID\""))
+        }
+        let ambiguous = ConverterResult(sections: [.init(markdown: "![Chart](chart%281%29.png)"), .init(kind: .image, markdown: "", sourcePath: "chart(1).png", metadata: ["base64": "AQID", "mimeType": "image/png", "markdownReference": "chart%281%29.png"]), .init(kind: .image, markdown: "", sourcePath: "chart%281%29.png", metadata: ["base64": "BAUG", "mimeType": "image/png"])])
+        #expect(!(try DocumentRenderer.render(ambiguous, to: .html)).contains("data:image"))
+    }
+
+
     @Test func graphicDataAcceptsOpaqueNamespacesAtItsSchemaExtensionPoint() async throws {
         typealias B = PowerPointConverterTests
         let opaque = "<c:chart xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\">" + B.titleShape("Hidden") + "</c:chart>"

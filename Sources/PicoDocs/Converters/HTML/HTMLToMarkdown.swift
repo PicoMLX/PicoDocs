@@ -57,7 +57,11 @@ enum HTMLToMarkdown {
     private static func render(_ node: Node, into out: inout String, preserveWhitespace: Bool = false) {
         if let text = node as? TextNode {
             let whole = text.getWholeText()
-            out += preserveWhitespace ? whole : collapseWhitespace(whole).map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+            if preserveWhitespace { out += whole }
+            else {
+                let escaped = collapseWhitespace(whole).map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+                out += MarkdownList.escapeBareMarkerText(escaped)
+            }
             return
         }
         guard let element = node as? Element else { return }
@@ -129,9 +133,9 @@ enum HTMLToMarkdown {
             if !table.isEmpty { out += "\n\n\(table)\n\n" }
 
         case "p", "div", "section", "article", "main", "header", "footer", "figure", "figcaption":
-            out += "\n\n"
-            renderChildren(of: element, into: &out, preserveWhitespace: preserveWhitespace)
-            out += "\n\n"
+            var content = ""
+            renderChildren(of: element, into: &content, preserveWhitespace: preserveWhitespace)
+            out += "\n\n" + MarkdownList.escapeBareMarkerText(content) + "\n\n"
 
         default:
             renderChildren(of: element, into: &out, preserveWhitespace: preserveWhitespace)

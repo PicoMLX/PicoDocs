@@ -164,10 +164,10 @@ public enum DocumentRenderer {
         return result
     }
 
-    /// The basename a `.image` section is referenced by in the body Markdown:
-    /// its source path's last component, falling back to its title.
+    /// The serialized destination carried by an image producer, or its source
+    /// basename/title for producers that emit their filenames unchanged.
     private static func imageRefName(for section: DocumentSection) -> String? {
-        let filename = (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
+        let filename = section.metadata["markdownReference"] ?? (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
         guard let filename, !filename.isEmpty else { return nil }
         return filename
     }

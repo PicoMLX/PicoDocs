@@ -204,7 +204,7 @@ public struct WordConverter: DocumentConverter {
         if isListItem {
             return "- " + text
         }
-        return text
+        return MarkdownList.escapeBareMarkerText(text)
     }
 
     static func headingLevel(forStyle style: String?) -> Int? {

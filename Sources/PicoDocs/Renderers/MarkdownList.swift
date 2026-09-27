@@ -35,6 +35,18 @@ struct MarkdownList {
         return item(markerWidth: digits.count + 1, number: number)
     }
 
+    /// Native prose containing only a list marker is literal text. Keep the
+    /// Markdown parser's valid empty-item syntax available to actual list input.
+    static func escapeBareMarkerText(_ text: String) -> String {
+        guard !text.contains("\n") else { return text }
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard let parsed = marker(trimmed), parsed.text.isEmpty else { return text }
+        let leading = text.prefix { $0 == " " || $0 == "\t" }
+        let trailing = text.reversed().prefix { $0 == " " || $0 == "\t" }.reversed()
+        let escaped = parsed.number == nil ? "\\" + trimmed : String(trimmed.dropLast()) + "\\."
+        return String(leading) + escaped + String(trailing)
+    }
+
     static func startsItem(_ line: String) -> Bool { marker(line) != nil }
 
     static func parse(_ lines: [String], index: inout Int, depth: Int = 0, minimumIndent: Int = 0) -> MarkdownList? {

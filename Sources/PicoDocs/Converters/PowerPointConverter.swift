@@ -161,7 +161,9 @@ public struct PowerPointConverter: DocumentConverter {
         }
         var paragraphs: [String] = []
         func appendNotes(in container: Element, inheritedLink: String? = nil) {
+            guard !Task.isCancelled else { return }
             for shape in selectedChildren(in: container, visibleOnly: true) {
+                if Task.isCancelled { return }
                 let click = shapeClick(shape)
                 let link = click == nil ? inheritedLink : hyperlink(click, context: context)
                 if shape.tagName().lowercased() == "p:grpsp" {
@@ -326,7 +328,8 @@ public struct PowerPointConverter: DocumentConverter {
                         context.plainTitle = selectedParagraphs(in: body).map { paragraph in
                             selectedChildren(in: paragraph).map { node in
                                 if node.tagName().lowercased() == "a:br" { return " " }
-                                return ((try? node.getElementsByTag("a:t").array()) ?? []).map(wholeText).joined()
+                                guard ["a:r", "a:fld"].contains(node.tagName().lowercased()) else { return "" }
+                                return selectedChild(of: node, named: "a:t").map(wholeText) ?? ""
                             }.joined()
                         }.joined(separator: " ").split(whereSeparator: \.isWhitespace).joined(separator: " ")
                         continue
@@ -536,9 +539,11 @@ public struct PowerPointConverter: DocumentConverter {
     // MARK: - Paragraphs and lists
 
     private static func selectedChildren(in container: Element, descendingInto groups: Set<String> = [], visibleOnly: Bool = false) -> [Element] {
+        guard !Task.isCancelled else { return [] }
         var children: [Element] = []
         var pending = Array(container.children().array().reversed())
         while let element = pending.popLast() {
+            if Task.isCancelled { return [] }
             let tag = element.tagName().lowercased()
             if tag.hasPrefix("extension") || tag.hasPrefix("requiredextension") || (visibleOnly && isHidden(element)) { continue }
             if tag == "mc:alternatecontent" {
@@ -869,11 +874,12 @@ public struct PowerPointConverter: DocumentConverter {
             sections.append(DocumentSection(
                 title: filename,
                 kind: .image,
-                markdown: "![\(filename)](\(filename))",
+                markdown: "![\(PowerPointConverter.escapeMarkdown(filename))](\(PowerPointConverter.linkDestination(filename)))",
                 sourcePath: path,
                 metadata: [
                     "mimeType": PowerPointConverter.contentType(path, archive: archive) ?? PowerPointConverter.mimeType(forExtension: (filename as NSString).pathExtension),
                     "base64": bytes.base64EncodedString(),
+                    "markdownReference": PowerPointConverter.linkDestination(filename),
                 ]
             ))
         }
