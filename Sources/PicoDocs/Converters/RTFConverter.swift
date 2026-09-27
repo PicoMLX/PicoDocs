@@ -43,8 +43,9 @@ public struct RTFConverter: DocumentConverter {
 
     // MARK: - Parser
 
-    private struct Run { var text: String; var bold: Bool; var italic: Bool }
-    private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool; var ucSkip: Int }
+    private struct Run { var text: String; var bold: Bool; var italic: Bool; var link: String? }
+    private final class Field { var instruction = ""; var target: String? }
+    private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool; var ucSkip: Int; var field: Field?; var instruction: Bool }
 
     /// Destination control words whose group contents are not body text.
     private static let ignoredDestinations: Set<String> = [
@@ -68,6 +69,8 @@ public struct RTFConverter: DocumentConverter {
         var italic = false
         var ignore = false
         var ucSkip = 1
+        var field: Field?
+        var instruction = false
         var ansiEncoding: String.Encoding = .windowsCP1252
         var isDBCS = false
         var stack: [GroupState] = []
@@ -80,12 +83,13 @@ public struct RTFConverter: DocumentConverter {
         var paragraphs: [String] = []
 
         func appendText(_ s: String) {
+            if instruction, let field { field.instruction += s; return }
             guard !ignore, !s.isEmpty else { return }
-            if var last = runs.last, last.bold == bold, last.italic == italic {
+            if var last = runs.last, last.bold == bold, last.italic == italic, last.link == field?.target {
                 last.text += s
                 runs[runs.count - 1] = last
             } else {
-                runs.append(Run(text: s, bold: bold, italic: italic))
+                runs.append(Run(text: s, bold: bold, italic: italic, link: field?.target))
             }
         }
 
@@ -99,10 +103,24 @@ public struct RTFConverter: DocumentConverter {
         }
 
         func flushParagraph() {
-            let rendered = runs.map { renderRun($0) }.joined()
+            var rendered = "", index = 0
+            while index < runs.count {
+                let start = index, link = runs[index].link
+                while index < runs.count, runs[index].link == link { index += 1 }
+                let text = runs[start..<index].map { renderRun($0) }.joined()
+                if let link {
+                    let target = link.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E")
+                    let destination = target.contains(where: { $0.isWhitespace || $0 == "(" || $0 == ")" }) ? "<" + target + ">" : target
+                    rendered += "[" + text + "](" + destination + ")"
+                } else { rendered += text }
+            }
             runs.removeAll(keepingCapacity: true)
             let trimmed = rendered.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { paragraphs.append(trimmed) }
+            if !trimmed.isEmpty {
+                // Leading indentation carries nested list content columns.
+                let trailing = rendered.reversed().prefix { $0.isWhitespace }.count
+                paragraphs.append(String(rendered.dropLast(trailing)))
+            }
         }
 
         while i < n {
@@ -119,12 +137,14 @@ public struct RTFConverter: DocumentConverter {
             }
             switch c {
             case "{":
-                stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip))
+                stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip, field: field, instruction: instruction))
                 i += 1
 
             case "}":
                 if let saved = stack.popLast() {
+                    if instruction, !saved.instruction, let field { field.target = hyperlinkTarget(field.instruction) }
                     bold = saved.bold; italic = saved.italic; ignore = saved.ignore; ucSkip = saved.ucSkip
+                    field = saved.field; instruction = saved.instruction
                 }
                 i += 1
 
@@ -144,6 +164,9 @@ public struct RTFConverter: DocumentConverter {
                     if i < n, chars[i] == " " { i += 1 }
 
                     switch word {
+                    case "field": field = Field()
+                    case "fldinst": instruction = field != nil; ignore = true
+                    case "fldrslt": instruction = false
                     case "par", "row", "sect", "page":
                         if !ignore { flushParagraph() }   // a \par inside a skipped destination isn't a body break
                     case "line":
@@ -270,6 +293,15 @@ public struct RTFConverter: DocumentConverter {
         return paragraphs.joined(separator: "\n\n")
     }
 
+    private static let hyperlinkPattern = try! NSRegularExpression(pattern: #"^\s*HYPERLINK\s+(?:"([^"]*)"|(\S+))"#, options: .caseInsensitive)
+    private static func hyperlinkTarget(_ instruction: String) -> String? {
+        let ns = instruction as NSString
+        guard let match = hyperlinkPattern.firstMatch(in: instruction, range: NSRange(location: 0, length: ns.length)) else { return nil }
+        let range = match.range(at: 1).location == NSNotFound ? match.range(at: 2) : match.range(at: 1)
+        let target = ns.substring(with: range)
+        return target.isEmpty ? nil : target
+    }
+
     /// Windows code pages that are double-byte (DBCS): one character may span two
     /// consecutive `\'hh` escapes, so their bytes are buffered and group-decoded
     /// (`decodeBytes`) rather than decoded one byte at a time. 932 Shift-JIS, 936
@@ -346,6 +378,7 @@ public struct RTFConverter: DocumentConverter {
         let trailingCount = afterLeading.reversed().prefix(while: isSpace).count
         let trailing = String(afterLeading.suffix(trailingCount))
         var core = String(afterLeading.dropLast(trailingCount))
+        if run.link != nil { core = core.map { #"\`*_[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined() }
         if run.italic { core = "*\(core)*" }
         if run.bold { core = "**\(core)**" }
         return leading + core + trailing

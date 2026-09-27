@@ -179,7 +179,7 @@ enum MarkdownInlineParser {
                 }
             }
         }
-        return restore(parseEmphasis(run))
+        return restore(parseEmphasis(run, structured: structured))
     }
 
     // MARK: - Link / image
@@ -269,7 +269,7 @@ enum MarkdownInlineParser {
 
     // MARK: - Emphasis
 
-    static func parseEmphasis(_ text: String) -> [MarkdownInline] {
+    static func parseEmphasis(_ text: String, structured: [MarkdownInline] = []) -> [MarkdownInline] {
         var protected = "", escapes: [String] = []
         var index = text.startIndex
         while index < text.endIndex {
@@ -284,7 +284,7 @@ enum MarkdownInlineParser {
                 index = text.index(after: next)
             } else { protected.append(text[index]); index = next }
         }
-        let nodes = parseEmphasisProtected(protected)
+        let nodes = parseEmphasisProtected(protected, structured: structured, escapes: escapes)
         guard !escapes.isEmpty else { return nodes }
         func restore(_ text: String) -> String {
             let ns = text as NSString
@@ -311,7 +311,7 @@ enum MarkdownInlineParser {
 
     private static let escapeRegex = try! NSRegularExpression(pattern: "\u{E010}([0-9]+)\u{E011}")
 
-    private static func parseEmphasisProtected(_ text: String) -> [MarkdownInline] {
+    private static func parseEmphasisProtected(_ text: String, structured: [MarkdownInline], escapes: [String]) -> [MarkdownInline] {
         // Keep unmatched delimiter runs on a stack. A closing run is consumed
         // from its left edge, so *** can close an inner * and then an outer **.
         struct Frame {
@@ -321,6 +321,32 @@ enum MarkdownInlineParser {
             var nodes: [MarkdownInline]
         }
         let chars = Array(text)
+        // Placeholder boundaries have the source node's punctuation/whitespace
+        // class, never the private-use sentinel's alphanumeric-like class.
+        var boundaries: [Int: Character] = [:]
+        var position = 0
+        while position < chars.count {
+            let start = position
+            let opener = chars[position]
+            guard opener == "\u{E020}" || opener == "\u{E010}" else { position += 1; continue }
+            position += 1
+            let digits = position
+            while position < chars.count, chars[position].isASCII, chars[position].isNumber { position += 1 }
+            let closer: Character = opener == "\u{E020}" ? "\u{E021}" : "\u{E011}"
+            guard position < chars.count, chars[position] == closer,
+                  let item = Int(String(chars[digits..<position])) else { continue }
+            let boundary: Character
+            if opener == "\u{E010}", escapes.indices.contains(item), let value = escapes[item].first { boundary = value }
+            else if opener == "\u{E020}", structured.indices.contains(item) {
+                switch structured[item] {
+                case .lineBreak: boundary = " "
+                case .text(let text): boundary = text.first ?? " "
+                default: boundary = "`"
+                }
+            } else { position += 1; continue }
+            boundaries[start] = boundary; boundaries[position] = boundary
+            position += 1
+        }
         var frames: [Frame] = [Frame(count: 0, delimiter: "*", canClose: false, nodes: [])]
         var index = 0
         func punctuation(_ c: Character?) -> Bool {
@@ -345,8 +371,8 @@ enum MarkdownInlineParser {
             let delimiter = chars[index]
             while index < chars.count, chars[index] == delimiter { index += 1 }
             var remaining = index - start
-            let before: Character? = start > 0 ? chars[start - 1] : nil
-            let after: Character? = index < chars.count ? chars[index] : nil
+            let before: Character? = start > 0 ? (boundaries[start - 1] ?? chars[start - 1]) : nil
+            let after: Character? = index < chars.count ? (boundaries[index] ?? chars[index]) : nil
             let beforeSpace = before?.isWhitespace ?? true
             let afterSpace = after?.isWhitespace ?? true
             let leftFlanking = !afterSpace && (!punctuation(after) || beforeSpace || punctuation(before))

@@ -60,6 +60,54 @@ enum OfficeImageDimensions {
             }
             return nil
         }
+        if bytes.starts(with: [0x49, 0x49, 42, 0]) || bytes.starts(with: [0x4D, 0x4D, 0, 42]) {
+            let little = bytes.first == 0x49
+            guard let offset = unsigned(4, 4, littleEndian: little) else { return nil }
+            func read(_ offset: Int, _ count: Int) -> UInt32? {
+                guard offset >= 0, offset <= data.count, count <= data.count - offset else { return nil }
+                let slice = data.dropFirst(offset).prefix(count)
+                return (little ? Array(slice.reversed()) : Array(slice)).reduce(0) { ($0 << 8) | UInt32($1) }
+            }
+            let start = Int(offset)
+            guard let count = read(start, 2), count <= 4096,
+                  start + 2 <= data.count, Int(count) <= (data.count - start - 2) / 12 else { return nil }
+            var width: UInt32?, height: UInt32?
+            for index in 0..<Int(count) {
+                let entry = start + 2 + index * 12
+                guard let tag = read(entry, 2), tag == 256 || tag == 257,
+                      let type = read(entry + 2, 2), type == 3 || type == 4,
+                      read(entry + 4, 4) == 1, let value = read(entry + 8, type == 3 ? 2 : 4) else { continue }
+                if tag == 256 { width = value } else { height = value }
+            }
+            guard let width, let height else { return nil }
+            return valid(Double(width), Double(height))
+        }
+        if bytes.starts(with: Array("RIFF".utf8)), bytes.dropFirst(8).starts(with: Array("WEBP".utf8)) {
+            guard let length = unsigned(4, 4), Int(length) + 8 <= data.count, length >= 4 else { return nil }
+            let end = Int(length) + 8
+            var offset = 12
+            func read(_ offset: Int, _ count: Int) -> UInt32? {
+                guard offset >= 0, offset <= end, count <= end - offset else { return nil }
+                return data.dropFirst(offset).prefix(count).reversed().reduce(0) { ($0 << 8) | UInt32($1) }
+            }
+            while offset + 8 <= end {
+                guard let size = read(offset + 4, 4), Int(size) <= end - offset - 8 else { return nil }
+                let kind = String(decoding: data.dropFirst(offset).prefix(4), as: UTF8.self)
+                let payload = offset + 8
+                if kind == "VP8X", size >= 10, let width = read(payload + 4, 3), let height = read(payload + 7, 3) {
+                    return valid(Double(width) + 1, Double(height) + 1)
+                }
+                if kind == "VP8L", size >= 5, read(payload, 1) == 0x2F, let packed = read(payload + 1, 4) {
+                    return valid(Double(packed & 0x3FFF) + 1, Double((packed >> 14) & 0x3FFF) + 1)
+                }
+                if kind == "VP8 ", size >= 10, read(payload + 3, 3) == 0x2A019D,
+                   let width = read(payload + 6, 2), let height = read(payload + 8, 2) {
+                    return valid(Double(width & 0x3FFF), Double(height & 0x3FFF))
+                }
+                offset = payload + Int(size) + Int(size % 2)
+            }
+            return nil
+        }
         let reader = SVGSizeReader()
         let parser = XMLParser(data: data.prefix(65_536))
         parser.shouldResolveExternalEntities = false

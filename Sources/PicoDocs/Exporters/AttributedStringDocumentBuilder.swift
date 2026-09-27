@@ -83,8 +83,12 @@ enum AttributedStringDocumentBuilder {
             }
 
         case .list(let list):
+            var widths: [Int: Int] = [:]
             for item in list.paragraphs() {
-                let marker = String(repeating: "\t", count: item.level) + (item.continuation ? "" : item.ordered ? "\(item.number ?? 1).\t" : "•\t")
+                let visible = item.ordered ? "\(item.number ?? 1). " : "- "
+                let indent = (0..<item.level).reduce(0) { $0 + (widths[$1] ?? 2) }
+                let marker = String(repeating: " ", count: indent + (item.continuation ? (widths[item.level] ?? visible.count) : 0)) + (item.continuation ? "" : visible)
+                if !item.continuation { widths[item.level] = visible.count }
                 output.append(NSAttributedString(string: marker, attributes: [.font: bodyFont()]))
                 output.append(inline(item.text))
                 output.append(NSAttributedString(string: "\n"))

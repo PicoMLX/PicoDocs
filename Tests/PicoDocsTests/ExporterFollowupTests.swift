@@ -8,6 +8,84 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func inlinePlaceholdersKeepSourceDelimiterFlanking() {
+        for source in ["[x](u)_em_", "`x`_em_", "_em_[x](u)", "_em_`x`", #"\*_em_"#] {
+            #expect(MarkdownInlineParser.parse(source).contains(.emphasis([.text("em")])))
+        }
+        #expect(MarkdownInlineParser.parse("a_em_") == [.text("a_em_")])
+        #expect(!MarkdownInlineParser.parse("_a\nb_").isEmpty)
+    }
+
+    @Test func portableTIFFAndWebPHeadersKeepImageAspectRatios() throws {
+        func integer(_ value: UInt32, _ count: Int, little: Bool = true) -> [UInt8] {
+            let bytes = (0..<count).map { UInt8(truncatingIfNeeded: value >> ($0 * 8)) }
+            return little ? bytes : bytes.reversed()
+        }
+        var images: [(String, Data)] = []
+        for little in [true, false] {
+            for type: UInt32 in [3, 4] {
+                var bytes: [UInt8] = little ? [0x49, 0x49, 42, 0] : [0x4D, 0x4D, 0, 42]
+                bytes += integer(80, 4, little: little)
+                bytes += Array(repeating: 0, count: 72)
+                bytes += integer(2, 2, little: little)
+                for (tag, value): (UInt32, UInt32) in [(256, 20), (257, 60)] {
+                    bytes += integer(tag, 2, little: little) + integer(type, 2, little: little) + integer(1, 4, little: little)
+                    bytes += integer(value, type == 3 ? 2 : 4, little: little)
+                    if type == 3 { bytes += [0, 0] }
+                }
+                bytes += [0, 0, 0, 0]
+                images.append(("tiff", Data(bytes)))
+            }
+        }
+        func webp(_ kind: String, _ payload: [UInt8]) -> Data {
+            let chunk = Array(kind.utf8) + integer(UInt32(payload.count), 4) + payload + (payload.count.isMultiple(of: 2) ? [] : [0])
+            return Data(Array("RIFF".utf8) + integer(UInt32(chunk.count + 4), 4) + Array("WEBP".utf8) + chunk)
+        }
+        images.append(("webp", webp("VP8X", [0,0,0,0] + integer(19,3) + integer(59,3))))
+        images.append(("webp", webp("VP8L", [0x2F] + integer(19 | (59 << 14), 4))))
+        images.append(("webp", webp("VP8 ", [0,0,0,0x9D,1,0x2A] + integer(20,2) + integer(60,2))))
+        for (ext, data) in images {
+            let size = try #require(OfficeImageDimensions.read(data))
+            #expect(size.0 == 20 && size.1 == 60)
+            let result = ConverterResult(sections: [.init(kind: .image, markdown: "", sourcePath: "image." + ext, metadata: ["mimeType": "image/" + ext, "base64": data.base64EncodedString()])])
+            let doc = try SwiftSoup.parse(xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml"), "", SwiftSoup.Parser.xmlParser())
+            let extent = try #require(doc.getElementsByTag("wp:extent").first())
+            let width = try #require(Double(extent.attr("cx"))), height = try #require(Double(extent.attr("cy")))
+            #expect(abs(width / height - 1.0 / 3.0) < 0.001)
+            #expect(OfficeImageDimensions.read(Data(data.prefix(12))) == nil)
+        }
+    }
+
+    @Test func RTFFieldsKeepHyperlinkTargetsAndFormattedLabels() async throws {
+        let rtf = #"{\rtf1 Before {\field{\*\fldinst HYPERLINK "https://example.test/a(b)"}{\fldrslt {\b Docs}}} after}"#
+        let result = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "fields.rtf")
+        #expect(result.markdown().contains("[**Docs**](<https://example.test/a(b)>)"))
+        #expect(try DocumentRenderer.render(result, to: .html).contains(#"href="https://example.test/a(b)""#))
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == "Before Docs after")
+        let ignored = #"{\rtf1 Visible {\*\unknown {\field{\*\fldinst HYPERLINK "https://hidden"}{\fldrslt Secret}}}}"#
+        #expect(RTFConverter.markdown(fromRTF: ignored) == "Visible")
+        #if canImport(AppKit)
+        let generated = try PicoDocsEngine.write(markdown: "[Docs](https://example.test)", to: .rtf)
+        let recovered = try await PicoDocsEngine.convert(data: generated, filename: "generated.rtf")
+        #expect(recovered.markdown().contains("[Docs](https://example.test)"))
+        #endif
+    }
+
+    #if canImport(AppKit)
+    @Test func RTFUnorderedListsRoundTripWithNestedMarkers() async throws {
+        let source = "- Parent\n  - Child\n- Next"
+        let generated = try PicoDocsEngine.write(markdown: source, to: .rtf)
+        let result = try await PicoDocsEngine.convert(data: generated, filename: "lists.rtf")
+        #expect(result.markdown().contains("- Parent")); #expect(result.markdown().contains("  - Child"))
+        #expect(result.markdown().contains("- Next")); #expect(!result.markdown().contains("•"))
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.components(separatedBy: "<ul>").count - 1 == 2)
+        let docx = try PicoDocsEngine.write(result, to: .docx)
+        #expect(try xml(docx, "word/document.xml").contains("<w:numPr>"))
+    }
+    #endif
+
+
     @Test func WordMediaBudgetIsSharedAcrossBodyAndNotes() throws {
         let body = try SwiftSoup.parse(#"<w:body><a:blip r:embed="body"/></w:body>"#, "", SwiftSoup.Parser.xmlParser())
         let note = #"<w:footnotes><w:footnote w:id="1"><a:blip r:embed="note"/></w:footnote></w:footnotes>"#
