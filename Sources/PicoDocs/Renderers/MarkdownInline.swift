@@ -515,7 +515,7 @@ extension MarkdownInline {
         case .strong(let children), .emphasis(let children): return children.plainText
         case .link(let label, _): return label.plainText
         case .image(let alt, let source):
-            guard alt.isEmpty else { return alt }
+            guard alt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return alt }
             let basename = (source.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent
             return basename.isEmpty ? source : basename
         case .footnoteReference(let id): return "[^\(id)]"

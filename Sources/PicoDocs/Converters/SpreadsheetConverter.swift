@@ -62,7 +62,15 @@ public struct SpreadsheetConverter: DocumentConverter {
         for row in rows {
             guard row.reference > 0, seenRows.insert(row.reference).inserted else { throw PicoDocsError.fileCorrupted }
             rowCount = max(rowCount, Int(clamping: row.reference))
-            for cell in row.cells { columnCount = max(columnCount, origin.distance(to: cell.reference.column) + 1) }
+            var seenColumns: Set<Int> = []
+            for cell in row.cells {
+                let column = origin.distance(to: cell.reference.column)
+                // Bound the set before insertion and reject physical duplicates,
+                // including empty cells that consume no decoded-value budget.
+                guard column >= 0, column < 16_384 else { throw PicoDocsError.parsingError }
+                guard seenColumns.insert(column).inserted else { throw PicoDocsError.fileCorrupted }
+                columnCount = max(columnCount, column + 1)
+            }
         }
         guard columnCount > 0 else {
             try projectionBudget.reserveGrid(rows: 0, columns: 0, name: sheetName)

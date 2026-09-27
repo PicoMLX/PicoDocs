@@ -8,6 +8,42 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+
+    @Test func whitespaceAltImagesUseVisibleFallbackAcrossExporters() async throws {
+        for alt in [" ", "\t", "\u{00A0}"] {
+            let source = "![" + alt + "](folder/missing.png)"
+            #expect(MarkdownInlineParser.parse(source).plainText == "missing.png")
+            let input = ConverterResult(sections: [.init(markdown: source)])
+            #expect(try xml(PicoDocsEngine.write(input, to: .xlsx), "xl/worksheets/sheet1.xml").contains("missing.png"))
+            #expect(try xml(PicoDocsEngine.write(input, to: .pptx), "ppt/slides/slide1.xml").contains("missing.png"))
+            for format in [ExportableFileType.docx, .rtf] {
+                let imported = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(input, to: format), filename: "image." + format.rawValue)
+                #expect(try DocumentRenderer.render(imported, to: .plaintext) == "missing.png")
+            }
+        }
+        #expect(MarkdownInline.image(alt: "  Meaningful alt  ", source: "folder/missing.png").plainText == "  Meaningful alt  ")
+    }
+
+    @Test func duplicateSpreadsheetCellsAreRejectedBeforeProjection() async throws {
+        let seed = try PicoDocsEngine.write(markdown: "x", to: .xlsx)
+        for duplicate in [true, false] {
+            let archive = try #require(Archive(data: seed, accessMode: .read))
+            var files: [(name: String, data: [UInt8])] = []
+            let cells = duplicate ? #"<c r="A1"/><c r="A1"/>"# : #"<c r="A1"/><c r="B1"/>"#
+            let sheet = #"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">"# + cells + #"</row><row r="2"><c r="A2" t="inlineStr"><is><t>value</t></is></c></row></sheetData></worksheet>"#
+            for entry in archive {
+                var bytes = Data(); _ = try archive.extract(entry) { bytes.append($0) }
+                if entry.path == "xl/worksheets/sheet1.xml" { bytes = Data(sheet.utf8) }
+                files.append((entry.path, Array(bytes)))
+            }
+            let data = PagesConverterTests.makeZip(files)
+            if duplicate {
+                await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: data, filename: "duplicates.xlsx") }
+            } else {
+                #expect(try await PicoDocsEngine.convert(data: data, filename: "valid.xlsx").markdown().contains("value"))
+            }
+        }
+    }
     @Test func orderedListRestartsAreBoundedBeforeNumberingSerialization() throws {
         let tooMany = ConverterResult(sections: [.init(markdown: String(repeating: "1. item\n", count: 16_385))])
         try OfficeDocumentBlocks.validateInput(tooMany)

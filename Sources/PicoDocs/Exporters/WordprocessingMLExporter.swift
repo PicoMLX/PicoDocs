@@ -408,8 +408,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                     }
                     out += "<w:hyperlink r:id=\"\(id)\">\(renderRuns(label, bold: bold, italic: italic))</w:hyperlink>"
                 case .image(let alt, let source):
-                    let fallback = alt.isEmpty ? WordprocessingMLExporter.portableBasename(source) : alt
-                    out += imageRun(alt: alt, source: source) ?? textRun(fallback.isEmpty ? source : fallback, bold: bold, italic: italic, monospace: false)
+                    out += imageRun(alt: alt, source: source) ?? textRun(node.plainText, bold: bold, italic: italic, monospace: false)
                 case .footnoteReference(let fid):
                     // Keep textual footnotes paired using explicit marker provenance.
                     let id = MarkdownInlineParser.unescape(fid).replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "]", with: "\\]")
