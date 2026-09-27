@@ -448,8 +448,19 @@ public enum DocumentRenderer {
         let lines = markdown.components(separatedBy: "\n")
         var i = 0
         var inCodeFence = false
+        var lists: [(base: Int, content: Int)] = []
+        var followsBlank = false
+        var inNote = false
         while i < lines.count {
             let line = lines[i].trimmingCharacters(in: .whitespaces)
+            if !inCodeFence, !line.isEmpty {
+                if inNote, !lines[i].hasPrefix("    "), !lines[i].hasPrefix("\t") { inNote = false }
+                if literalFootnoteDefinition(lines[i]) { inNote = true }
+                let indent = indentWidth(lines[i])
+                while let last = lists.last, indent < (followsBlank ? last.content : last.base + 2) { lists.removeLast() }
+                if let item = literalListIndent(lines, index: i) { lists.append(item) }
+            }
+            followsBlank = line.isEmpty
             if line.hasPrefix("```") {
                 inCodeFence.toggle()
                 i += 1
@@ -482,6 +493,8 @@ public enum DocumentRenderer {
                     while i < lines.count {
                         let candidate = lines[i].trimmingCharacters(in: .whitespaces)
                         if candidate.isEmpty || candidate.hasPrefix("```") || literalBlockBoundary(candidate).starts { break }
+                        if let list = lists.last, indentWidth(lines[i]) < list.base + 2 { break }
+                        if inNote, !lines[i].hasPrefix("    "), !lines[i].hasPrefix("\t") { break }
                         paragraph.append(candidate)
                         i += 1
                     }
@@ -698,6 +711,10 @@ public enum DocumentRenderer {
     }
 
     /// Shared boundaries for verbatim-source escaping and rendered inline blocks.
+    static func literalFootnoteDefinition(_ line: String) -> Bool {
+        parseFootnoteDefinition(dropLeadingSpaces(line, max: 3)) != nil
+    }
+
     static func literalBlockBoundary(_ line: String) -> (starts: Bool, ends: Bool) {
         let line = line.trimmingCharacters(in: .whitespaces)
         let single = headingMatch(line) != nil || line.hasPrefix("|") || line.hasPrefix(">")

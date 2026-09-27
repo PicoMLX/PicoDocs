@@ -3,6 +3,43 @@ import Testing
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func sourceFootnoteInlineContextStopsAtItsUnindentedEnd() async throws {
+        for indent in ["", "   "] {
+            let source = "See[^x]\n" + indent + "[^x]: `open\noutside " + #"\* `close"#
+            let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "end.txt")
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                let rendered = try DocumentRenderer.render(result, to: format)
+                #expect(rendered.contains(#"outside \* `close"#))
+                #expect(!rendered.contains(#"outside \\\*"#))
+            }
+        }
+        for indent in ["    ", "\t"] {
+            let source = "See[^x]\n[^x]: `open\n" + indent + #"\* close`"#
+            let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "continued.txt")
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                let rendered = try DocumentRenderer.render(result, to: format)
+                #expect(rendered.contains(#"\* close"#)); #expect(!rendered.contains(#"\\\* close"#))
+            }
+        }
+    }
+
+    @Test func CSVInlineContextStopsWhenAnOutdentLeavesAList() async throws {
+        for marker in ["-", "1.", "123."] {
+            for bare in [false, true] {
+                let prefix = bare ? marker + "\n" + String(repeating: " ", count: marker.count + 1) : marker + " "
+                let source = prefix + "`open\noutside " + #"\* `close"#
+                let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "outdent.txt")
+                let csv = try DocumentRenderer.render(result, to: .csv)
+                #expect(csv.contains(#"outside \* `close"#)); #expect(!csv.contains(#"outside \\\*"#))
+            }
+            let source = marker + " `open\n" + String(repeating: " ", count: marker.count + 1) + #"\* close`"#
+            let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "nested.txt")
+            let csv = try DocumentRenderer.render(result, to: .csv)
+            #expect(csv.contains(#"\* close"#)); #expect(!csv.contains(#"\\\* close"#))
+        }
+    }
+
+
     @Test func footnoteDefinitionsEndSourceInlineCode() async throws {
         let source = "See[^x]\n`open\n[^x]: " + #"\* `close"#
         let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "notes.txt")
