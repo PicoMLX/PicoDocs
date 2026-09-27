@@ -3,6 +3,20 @@ import Testing
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func leavingListsEndsInlineCodeButIndentedContinuationKeepsIt() async throws {
+        for marker in ["- ", "1. ", "123. "] {
+            let source = marker + "`open\noutside " + #"\* `close"#
+            let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "list.txt")
+            for format in [ExportFileType.html, .plaintext] {
+                #expect(try DocumentRenderer.render(result, to: format).contains(#"outside \* `close"#))
+            }
+            let indented = marker + "`open\n" + String(repeating: " ", count: marker.count) + #"\* close`"#
+            let continued = try await PicoDocsEngine.convert(data: Data(indented.utf8), filename: "list.txt")
+            let html = try DocumentRenderer.render(continued, to: .html)
+            #expect(html.contains("<code>")); #expect(html.contains(#"\* close"#)); #expect(!html.contains(#"\\* close"#))
+        }
+    }
+
     @Test func verbatimTableCellsHaveIndependentInlineCode() async throws {
         for source in [#"| `open | \* `close |"#, #"| `open | x\|y \* `close |"#] {
             let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "table.txt")

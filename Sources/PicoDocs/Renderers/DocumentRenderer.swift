@@ -672,6 +672,13 @@ public enum DocumentRenderer {
         return digits.count <= 9 ? Int(digits) ?? 1 : 1
     }
 
+    static func literalListIndent(_ line: String) -> (base: Int, content: Int)? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard listMarker(trimmed) != nil else { return nil }
+        let base = indentWidth(line)
+        return (base, base + markerWidth(trimmed))
+    }
+
     /// Shared boundaries for verbatim-source escaping and rendered inline blocks.
     static func literalBlockBoundary(_ line: String) -> (starts: Bool, ends: Bool) {
         let line = line.trimmingCharacters(in: .whitespaces)

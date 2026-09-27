@@ -6,6 +6,8 @@ enum MarkdownLiteral {
     /// literal backslashes before the renderer decodes generated escapes.
     static func escapeBackslashes(_ text: String, separateParagraphLines: Bool = false) -> String {
         var inFence = false
+        var lists: [(base: Int, content: Int)] = []
+        var followsBlank = false
         var prose = ""
         var output = ""
         func flushProse() {
@@ -16,6 +18,17 @@ enum MarkdownLiteral {
         }
         let lines = text.components(separatedBy: "\n")
         for (index, line) in lines.enumerated() {
+            let blank = line.trimmingCharacters(in: .whitespaces).isEmpty
+            if !inFence, !blank {
+                let indent = line.prefix { $0 == " " }.count
+                var exitedList = false
+                while let last = lists.last, indent < (followsBlank ? last.content : last.base + 2) {
+                    lists.removeLast(); exitedList = true
+                }
+                if exitedList { flushProse() }
+                if let item = DocumentRenderer.literalListIndent(line) { lists.append(item) }
+            }
+            followsBlank = blank
             if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
                 flushProse()
                 inFence.toggle()
