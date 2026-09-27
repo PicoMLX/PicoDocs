@@ -284,6 +284,7 @@ struct PowerPointConverterTests {
             ("rIdSlide\($0.offset)", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide", "slides/\($0.element)")
         })
         var parts: [(name: String, data: [UInt8])] = [
+            ("_rels/.rels", Array(relationshipsXML([("office", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument", "ppt/presentation.xml")]).utf8)),
             ("ppt/presentation.xml", Array(presentation.utf8)),
             ("ppt/_rels/presentation.xml.rels", Array(presentationRels.utf8)),
         ]

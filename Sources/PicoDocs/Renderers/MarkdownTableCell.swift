@@ -68,10 +68,26 @@ enum MarkdownTableCell {
         return output
     }
 
+    /// Only runs immediately before pipes need a table layer inside code.
+    /// Backslashes elsewhere are source text and must remain untouched.
+    static func codePipes(_ text: String, encoding: Bool) -> String {
+        var output = "", slashes = 0
+        for character in text {
+            if character == "\\" { slashes += 1; continue }
+            let count: Int
+            if character == "|" {
+                count = encoding ? slashes * 2 + 1 : (slashes.isMultiple(of: 2) ? slashes : (slashes - 1) / 2)
+            } else { count = slashes }
+            output += String(repeating: "\\", count: count)
+            output.append(character); slashes = 0
+        }
+        return output + String(repeating: "\\", count: slashes)
+    }
+
     /// Decode canonical breaks without interpreting an escaped literal marker.
     static func decodeBreaks(_ text: String) -> String {
         var brackets = 0, destinationDepth = 0
-        return mapCodeSpans(text, code: { $0 }, plain: { plain in
+        return mapCodeSpans(text, code: { codePipes($0, encoding: false) }, plain: { plain in
             var output = "", index = plain.startIndex
             while index < plain.endIndex {
                 let character = plain[index]

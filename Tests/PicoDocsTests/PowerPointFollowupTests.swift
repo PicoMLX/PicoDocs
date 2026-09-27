@@ -5,6 +5,58 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func selectedAlternateParagraphsReachTitlesTablesAndNotes() async throws {
+        typealias B = PowerPointConverterTests
+        let alternate = #"<mc:AlternateContent><mc:Choice Requires="a"><a:p><a:r><a:t>Selected</a:t></a:r></a:p></mc:Choice><mc:Fallback><a:p><a:r><a:t>Unselected</a:t></a:r></a:p></mc:Fallback></mc:AlternateContent>"#
+        let table = "<p:graphicFrame><a:tbl><a:tr><a:tc><a:txBody>" + alternate + "</a:txBody></a:tc></a:tr></a:tbl></p:graphicFrame>"
+        let notes = "<p:notes \(B.namespaces)><p:cSld><p:spTree>" + B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: [alternate]) + "</p:spTree></p:cSld></p:notes>"
+        let shapes = B.shape(placeholder: #"<p:ph type="title"/>"#, paragraphs: [alternate]) + B.shape(placeholder: nil, paragraphs: [alternate]) + table
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: shapes, relationships: [("notes", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide", "../notesSlides/n.xml")])], extraParts: [("ppt/notesSlides/n.xml", Array(notes.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "alternate.pptx")
+        #expect(result.sections.first?.title == "Selected")
+        #expect(result.markdown().components(separatedBy: "Selected").count == 5)
+        #expect(!result.markdown().contains("Unselected"))
+    }
+
+    @Test func tableCodePipesRemoveOnlyTheTableEscapeLayer() throws {
+        for (source, expected) in [(#"`a\|b`"#, "a|b"), (#"`a\\\|b`"#, #"a\|b"#), (#"`a\*b<br>`"#, #"a\*b<br>"#)] {
+            let result = ConverterResult(sections: [.init(markdown: "| " + source + " |\n| --- |")])
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                let rendered = try DocumentRenderer.render(result, to: format)
+                #expect(rendered.contains(format == .html ? expected.replacingOccurrences(of: "<br>", with: "&lt;br&gt;") : expected))
+            }
+        }
+    }
+
+    @Test func packageRelationshipLocatesMovedPresentation() async throws {
+        typealias B = PowerPointConverterTests
+        let source = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Moved"))])
+        let archive = try #require(Archive(data: source, accessMode: .read))
+        var entries: [(name: String, data: [UInt8])] = []
+        for entry in archive {
+            var bytes = Data(); _ = try archive.extract(entry) { bytes.append($0) }
+            var name = entry.path
+            if name == "_rels/.rels" { continue }
+            if name == "ppt/presentation.xml" { name = "custom/deck.xml" }
+            if name == "ppt/_rels/presentation.xml.rels" {
+                name = "custom/_rels/deck.xml.rels"
+                bytes = Data(String(decoding: bytes, as: UTF8.self).replacingOccurrences(of: "slides/s.xml", with: "../ppt/slides/s.xml").utf8)
+            }
+            entries.append((name, Array(bytes)))
+        }
+        let relation = #"<Relationship Id="office" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="custom/deck.xml"/>"#
+        for body: String? in [nil, "", relation, relation + relation.replacingOccurrences(of: "office\"", with: "second\""), relation.replacingOccurrences(of: "Target=", with: "TargetMode=\"External\" Target=")] {
+            let parts = entries + (body.map { [("_rels/.rels", Array(("<Relationships>" + $0 + "</Relationships>").utf8))] } ?? [])
+            if body == relation {
+                let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(parts), filename: "moved.pptx")
+                #expect(result.markdown() == "## Moved")
+                #expect(result.sections.first?.sourcePath == "ppt/slides/s.xml")
+            } else {
+                await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(parts), filename: "invalid.pptx") }
+            }
+        }
+    }
+
     @Test func emptyMarkdownItemsAndLiteralPowerPointMarkers() async throws {
         typealias B = PowerPointConverterTests
         for marker in ["-", "*", "+", "1."] {

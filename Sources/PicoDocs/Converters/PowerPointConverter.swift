@@ -3,7 +3,7 @@
 //  PicoDocs
 //
 //  Converts PowerPoint (PPTX, OOXML PresentationML) to Markdown: unzip with
-//  ZIPFoundation, resolve the deck's slide order from `ppt/presentation.xml`,
+//  ZIPFoundation, resolve the deck's presentation and slide order through OPC relationships,
 //  and walk each slide's shape tree via SwiftSoup's XML parser. One `.slide`
 //  section per slide, in presentation order:
 //
@@ -42,7 +42,14 @@ public struct PowerPointConverter: DocumentConverter {
         let archive = PowerPointPackage(archive: zip)
         _ = Self.contentType("", archive: archive)
         try archive.check()
-        guard let presentation = Self.xml(archive, path: "ppt/presentation.xml"), presentation.children().first()?.tagName().lowercased() == "p:presentation" else {
+        let packageRelationships = Self.relationships(archive, forPart: "")
+        let officeDocuments = packageRelationships.values.filter { $0.type.hasSuffix("/officeDocument") }
+        guard officeDocuments.count == 1, let officeDocument = officeDocuments.first, !officeDocument.external else {
+            try archive.check()
+            throw PicoDocsError.fileCorrupted
+        }
+        let presentationPath = WordConverter.resolvePartPath(officeDocument.target, relativeTo: "")
+        guard let presentation = Self.xml(archive, path: presentationPath), presentation.children().first()?.tagName().lowercased() == "p:presentation" else {
             try archive.check()
             throw PicoDocsError.fileCorrupted
         }
@@ -51,7 +58,7 @@ public struct PowerPointConverter: DocumentConverter {
         var sections: [DocumentSection] = []
         var images = ImageCollector()
         var parts = PartCache(archive: archive)
-        for (index, slidePath) in try Self.slidePaths(presentation, archive: archive).enumerated() {
+        for (index, slidePath) in try Self.slidePaths(presentation, archive: archive, presentationPath: presentationPath).enumerated() {
             try Task.checkCancellation()
             guard let slide = Self.xml(archive, path: slidePath), slide.children().first()?.tagName().lowercased() == "p:sld" else { try archive.check(); throw PicoDocsError.fileCorrupted }
             let relationships = Self.relationships(archive, forPart: slidePath)
@@ -102,8 +109,8 @@ public struct PowerPointConverter: DocumentConverter {
     /// Slide part paths in presentation order: `p:sldIdLst` entries resolved
     /// through `presentation.xml.rels` (slide file names don't encode order — a
     /// moved slide keeps its `slideN.xml`).
-    static func slidePaths(_ presentation: Document, archive: PowerPointPackage) throws -> [String] {
-        let relationships = relationships(archive, forPart: "ppt/presentation.xml")
+    static func slidePaths(_ presentation: Document, archive: PowerPointPackage, presentationPath: String = "ppt/presentation.xml") throws -> [String] {
+        let relationships = relationships(archive, forPart: presentationPath)
         var paths: [String] = []
         guard let root = presentation.children().first(), root.tagName().lowercased() == "p:presentation" else { throw PicoDocsError.fileCorrupted }
         let list = child(of: root, named: "p:sldidlst")
@@ -112,7 +119,7 @@ public struct PowerPointConverter: DocumentConverter {
         guard all.count == direct.count else { throw PicoDocsError.fileCorrupted }
         for slideID in direct {
             guard let id = try? slideID.attr("r:id"), let relation = relationships[id], !relation.external, relation.type.hasSuffix("/slide") else { throw PicoDocsError.fileCorrupted }; let target = relation.target
-            paths.append(WordConverter.resolvePartPath(target, relativeTo: "ppt"))
+            paths.append(WordConverter.resolvePartPath(target, relativeTo: directory(of: presentationPath)))
         }
         return paths
     }
@@ -284,7 +291,7 @@ public struct PowerPointConverter: DocumentConverter {
                         .split(whereSeparator: \.isWhitespace).joined(separator: " ")
                     if title == nil, !text.isEmpty {
                         title = text
-                        context.plainTitle = ((try? body.getElementsByTag("a:p").array()) ?? []).map { paragraph in
+                        context.plainTitle = selectedParagraphs(in: body).map { paragraph in
                             paragraph.children().array().map { node in
                                 if node.tagName().lowercased() == "a:br" { return " " }
                                 return ((try? node.getElementsByTag("a:t").array()) ?? []).map(wholeText).joined()
@@ -493,6 +500,18 @@ public struct PowerPointConverter: DocumentConverter {
 
     // MARK: - Paragraphs and lists
 
+    private static func selectedParagraphs(in body: Element) -> [Element] {
+        var paragraphs: [Element] = []
+        var pending = Array(body.children().array().reversed())
+        while let element = pending.popLast() {
+            if element.tagName().lowercased() == "a:p" { paragraphs.append(element) }
+            else if element.tagName().lowercased() == "mc:alternatecontent", let branch = selectedAlternateBranch(element) {
+                pending += branch.children().array().reversed()
+            }
+        }
+        return paragraphs
+    }
+
     /// Renders a text body's paragraphs to Markdown blocks. Consecutive list items
     /// are joined tight into one block; a nested item is indented under its parent
     /// (by the parent marker's width), and numbered lists count per level,
@@ -511,7 +530,7 @@ public struct PowerPointConverter: DocumentConverter {
             listLines = []; markerWidths = []; counters = [:]; schemes = [:]; starts = [:]
         }
 
-        for paragraph in body.children().array() where paragraph.tagName().lowercased() == "a:p" {
+        for paragraph in selectedParagraphs(in: body) {
             if Task.isCancelled { return [] }
             let properties = child(of: paragraph, named: "a:ppr")
             let level = min(max(Int((try? properties?.attr("lvl")) ?? "") ?? 0, 0), 8)
@@ -848,7 +867,7 @@ public struct PowerPointConverter: DocumentConverter {
     /// A part's relationships (`<dir>/_rels/<file>.rels`), keyed by id.
     static func relationships(_ archive: PowerPointPackage, forPart part: String) -> [String: Relationship] {
         if let cached = archive.relationshipMaps[part] { return cached }
-        let relsPath = "\(directory(of: part))/_rels/\((part as NSString).lastPathComponent).rels"
+        let relsPath = part.isEmpty ? "_rels/.rels" : "\(directory(of: part))/_rels/\((part as NSString).lastPathComponent).rels"
         guard let document = xml(archive, path: relsPath) else {
             if archive.archive[relsPath] != nil { archive.fail(PicoDocsError.fileCorrupted) }
             archive.relationshipMaps[part] = [:]
