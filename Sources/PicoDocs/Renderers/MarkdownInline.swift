@@ -120,6 +120,9 @@ enum MarkdownInlineParser {
         var angleClose: Int?
         for index in chars.indices.reversed() {
             let delimiter = chars[index]
+            // Angle destinations cannot cross a physical line, including CRLF
+            // represented as one extended grapheme cluster by String.
+            if delimiter == "\n" || delimiter == "\r" || delimiter == "\r\n" { angleClose = nil; continue }
             guard delimiter == "<" || delimiter == ">", !isEscapedDelimiter(at: index) else { continue }
             if delimiter == ">" { angleClose = index }
             else if chars[index] == "<", let close = angleClose { nextAngle[index] = close }

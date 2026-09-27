@@ -51,7 +51,7 @@ enum OfficeDocumentBlocks {
                     guard columns <= 16_384, cells <= 1_000_000, rows < 1_048_576 else {
                         throw ExporterError.serializationFailed("Office CSV projection exceeds supported dimensions")
                     }
-                    try charge(field.utf8.count * 7 + 64)
+                    try charge(field.utf8.count * 7 + 256)
                     if endsRow { try charge(32); rows += 1; columns = 0 }
                 }
             } else {
@@ -66,8 +66,9 @@ enum OfficeDocumentBlocks {
                     try charge(bytes * 7)
                     // Potential inline delimiters can each produce a node/run,
                     // even when the paragraph occupies only one source line.
+                    // Include parentheses: even literal pairs occupy the link index.
                     // Charge conservatively before constructing the inline IR.
-                    if "*_[]`<>".unicodeScalars.contains(scalar) { try charge(64) }
+                    if "*_[]`<>()".unicodeScalars.contains(scalar) { try charge(64) }
                     if scalar == "\n" || scalar == "\r" {
                         // Empty/whitespace-only lines still become parser line
                         // records and code-block paragraphs or break runs.
@@ -78,7 +79,7 @@ enum OfficeDocumentBlocks {
                         hasContent = true; tableLine = scalar == "|"
                         try charge(128) // line/block/row storage before Markdown parsing
                     }
-                    if tableLine, scalar == "|" { try charge(64) } // conservative cell storage
+                    if tableLine, scalar == "|" { try charge(256) } // cell, grid and paragraph markup plus storage
                 }
             }
         }

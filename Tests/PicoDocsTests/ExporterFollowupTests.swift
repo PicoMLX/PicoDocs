@@ -9,6 +9,46 @@ import AppKit
 
 struct ExporterFollowupTests {
 
+    @Test func OfficePreflightChargesParenthesisIndexesAndFullTableCells() throws {
+        let parentheses = ConverterResult(sections: [.init(markdown: String(repeating: "()", count: 600_000) + "[")])
+        #expect(throws: ExporterError.self) { try OfficeDocumentBlocks.validateInput(parentheses) }
+        let table = ConverterResult(sections: [.init(markdown: String(repeating: "|", count: 800_000))])
+        #expect(throws: ExporterError.self) { try OfficeDocumentBlocks.validateInput(table) }
+        let csv = ConverterResult(sections: [.init(kind: .sheet, markdown: "", metadata: ["csv": String(repeating: String(repeating: ",", count: 999) + "\n", count: 300)])])
+        #expect(throws: ExporterError.self) { try OfficeDocumentBlocks.validateInput(csv) }
+        try OfficeDocumentBlocks.validateInput(ConverterResult(sections: [.init(markdown: "Literal () and [x](a(b)c)\n\n| A | B |\n| --- | --- |\n| x | y |")]))
+    }
+
+    @Test func DOCXTableBudgetIncludesSynthesizedPadding() throws {
+        // About 5 KB of source expands to a million cells when rows are padded.
+        let ragged = String(repeating: "|", count: 1_001) + "\n" + String(repeating: "|x|\n", count: 1_000)
+        #expect(throws: ExporterError.self) { try PicoDocsEngine.write(markdown: ragged, to: .docx) }
+    }
+
+    @Test func RTFFontFallbackNamesDoNotChangePrimaryClassification() {
+        for (primary, alternate, label) in [("Arial", "Courier New", "Label"), ("Courier New", "Arial", "`Label`")] {
+            let rtf = #"{\rtf1\deff0{\fonttbl{\f0 "# + primary + #"{\*\falt "# + alternate + #";};}}{\field{\*\fldinst HYPERLINK "https://example.test"}{\fldrslt \f0 Label}}}"#
+            #expect(RTFConverter.markdown(fromRTF: rtf) == "[" + label + "](https://example.test)")
+        }
+    }
+
+    @Test func RTFHyperlinkSwitchCasePreservesOperandCase() {
+        for instruction in [#"HYPERLINK \\L "MixedCase""#, #"hyperlink \\O "Tooltip" \\t "_Blank" \\L "MixedCase""#] {
+            let rtf = #"{\rtf1{\field{\*\fldinst "# + instruction + #"}{\fldrslt Label}}}"#
+            #expect(RTFConverter.markdown(fromRTF: rtf) == "[Label](#MixedCase)")
+        }
+    }
+
+    @Test func angleLinkDestinationsCannotCrossPhysicalLines() throws {
+        for newline in ["\n", "\r", "\r\n"] {
+            let source = "[x](<https://example.test/a" + newline + "b>)"
+            #expect(!MarkdownInlineParser.parse(source).contains { if case .link = $0 { return true }; return false })
+            let relationships = try xml(PicoDocsEngine.write(markdown: source, to: .docx), "word/_rels/document.xml.rels")
+            #expect(!relationships.contains("/hyperlink"))
+        }
+        #expect(MarkdownInlineParser.parse("[x](<https://example.test/a b>)") == [.link(label: [.text("x")], destination: "https://example.test/a b")])
+    }
+
     @Test func OfficePreflightCountsCRLFAsOnePhysicalLine() throws {
         for newline in ["\n", "\r", "\r\n"] {
             try OfficeDocumentBlocks.validateInput(ConverterResult(sections: [.init(markdown: String(repeating: "x" + newline, count: 250_000))]))

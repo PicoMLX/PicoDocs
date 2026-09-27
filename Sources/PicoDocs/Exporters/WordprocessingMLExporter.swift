@@ -256,6 +256,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         private var numberingRelAdded = false
         private var drawingCounter = 0
         private var drawingBudget = DrawingBudget()
+        private var remainingTableStructure = 64 * 1024 * 1024
         private var externalLinkRelationships: [String: String] = [:]
         private var emittedMediaRel: [String: String] = [:]   // media filename -> relID
         private var nextOrderedNumId = 2                       // 1 is reserved for bullets
@@ -519,6 +520,16 @@ public struct WordprocessingMLExporter: DocumentExporter {
             guard !rows.isEmpty else { return "" }
             let columns = rows.map(\.count).max() ?? 0
             guard columns > 0 else { return "" }
+            // Reserve the padded rectangle before grid/cell strings are built.
+            // Source delimiters alone cannot bound synthesized missing cells.
+            // 256 bytes covers fixed cell/paragraph/grid XML and cell storage;
+            // the shared input preflight separately charges source text.
+            guard columns <= remainingTableStructure / 256,
+                  rows.count <= remainingTableStructure / 256 / columns else {
+                failure = ExporterError.serializationFailed("DOCX table structure exceeds its 64 MiB budget")
+                return ""
+            }
+            remainingTableStructure -= rows.count * columns * 256
             let borders = """
             <w:tblBorders>\
             <w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>\

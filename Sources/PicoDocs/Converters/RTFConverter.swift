@@ -60,7 +60,7 @@ public struct RTFConverter: DocumentConverter {
             instruction += text
         }
     }
-    private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool; var ucSkip: Int; var field: Field?; var instruction: Bool; var font: Int; var fontTable: Bool }
+    private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool; var ucSkip: Int; var field: Field?; var instruction: Bool; var font: Int; var fontTable: Bool; var fontNameIgnored: Bool }
 
     /// Destination control words whose group contents are not body text.
     private static let ignoredDestinations: Set<String> = [
@@ -86,6 +86,7 @@ public struct RTFConverter: DocumentConverter {
         var instruction = false
         var font = 0, defaultFont = 0
         var fontTable = false
+        var fontNameIgnored = false
         var fontNames: [Int: String] = [:]
         var monospacedFonts: Set<Int> = []
         var ansiEncoding: String.Encoding = .windowsCP1252
@@ -102,13 +103,16 @@ public struct RTFConverter: DocumentConverter {
         var previousBlankParagraph = true
 
         func finishFont() {
-            guard fontTable else { return }
+            guard fontTable, !fontNameIgnored else { return }
             let name = fontNames[font, default: ""].lowercased()
             if ["menlo", "monaco", "courier", "consolas", "sfmono", "sfnsmono", "monospaced"].contains(where: name.contains) { monospacedFonts.insert(font) }
         }
 
         func appendText(_ s: String) {
-            if fontTable { fontNames[font, default: ""] += s; return }
+            if fontTable {
+                if !fontNameIgnored { fontNames[font, default: ""] += s }
+                return
+            }
             if instruction, let field { field.appendInstruction(s); return }
             let code = field?.target != nil && monospacedFonts.contains(font)
             guard !ignore, !s.isEmpty else { return }
@@ -183,7 +187,7 @@ public struct RTFConverter: DocumentConverter {
             }
             switch c {
             case "{":
-                stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip, field: field, instruction: instruction, font: font, fontTable: fontTable))
+                stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip, field: field, instruction: instruction, font: font, fontTable: fontTable, fontNameIgnored: fontNameIgnored))
                 i += 1
 
             case "}":
@@ -192,7 +196,7 @@ public struct RTFConverter: DocumentConverter {
                     if instruction, !saved.instruction, let field { field.target = hyperlinkTarget(field.instruction) }
                     bold = saved.bold; italic = saved.italic; ignore = saved.ignore; ucSkip = saved.ucSkip
                     field = saved.field; instruction = saved.instruction
-                    font = saved.font; fontTable = saved.fontTable
+                    font = saved.font; fontTable = saved.fontTable; fontNameIgnored = saved.fontNameIgnored
                 }
                 i += 1
 
@@ -215,7 +219,8 @@ public struct RTFConverter: DocumentConverter {
                     case "fonttbl": fontTable = true; ignore = true
                     case "deff": if let param { defaultFont = param; font = param }
                     case "f": if let param { finishFont(); font = param }
-                    case "fmodern": if fontTable { monospacedFonts.insert(font) }
+                    case "fmodern": if fontTable, !fontNameIgnored { monospacedFonts.insert(font) }
+                    case "falt": if fontTable { fontNameIgnored = true }
                     case "field": field = Field()
                     case "fldinst": instruction = field != nil; ignore = true
                     case "fldrslt": instruction = false
@@ -316,7 +321,11 @@ public struct RTFConverter: DocumentConverter {
                     case "~": appendText("\u{00A0}")          // non-breaking space
                     case "_": appendText("-")                 // non-breaking hyphen
                     case "-": break                            // optional hyphen
-                    case "*": ignore = true                    // ignorable destination
+                    case "*":
+                        ignore = true
+                        // fonttbl is ignored as body text, but its primary names
+                        // are collected separately from ignorable subgroups.
+                        if fontTable { fontNameIgnored = true }
                     case "'":
                         if i + 1 < n, let byte = UInt8(String([chars[i], chars[i + 1]]), radix: 16) {
                             // DBCS code pages: buffer the byte (a lead byte alone is
@@ -360,10 +369,11 @@ public struct RTFConverter: DocumentConverter {
         var target: String?, bookmark: String?, index = 1
         while index < tokens.count {
             let entry = tokens[index], token = entry.text
+            let switchName = token.lowercased()
             index += 1
-            if !entry.quoted, token == "\\l" || token == "\\o" || token == "\\t" {
+            if !entry.quoted, switchName == "\\l" || switchName == "\\o" || switchName == "\\t" {
                 guard index < tokens.count else { return nil }
-                if token == "\\l" { bookmark = tokens[index].text }
+                if switchName == "\\l" { bookmark = tokens[index].text }
                 index += 1
             } else if !entry.quoted, token.hasPrefix("\\") { continue }
             else if target == nil { target = token }
