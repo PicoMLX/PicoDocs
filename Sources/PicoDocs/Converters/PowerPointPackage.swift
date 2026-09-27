@@ -61,6 +61,8 @@ final class PowerPointPackage {
 final class PowerPointXML: NSObject, XMLParserDelegate {
     private var scopes: [[String: String]] = [[:]]
     private var names: [String] = []
+    private var emitted: [Bool] = []
+    private var compatibility: [(ignored: Set<String>, processed: Set<String>)] = [([], [])]
     private var unknownPrefixes: [String: String] = [:]
     private var output = ""
     private var hasError = false
@@ -145,8 +147,27 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
             else if key.hasPrefix("xmlns:") { scope[String(key.dropFirst(6))] = value }
         }
         scopes.append(scope)
+        var settings = compatibility.last!
+        for (key, value) in attributes where key != "xmlns" && !key.hasPrefix("xmlns:") {
+            let attribute = name(key, scope: scope, attribute: true)
+            if attribute == "mc:Ignorable" {
+                for prefix in value.split(whereSeparator: \.isWhitespace) {
+                    if let uri = scope[String(prefix)] { settings.ignored.insert(uri) }
+                    else { hasError = true }
+                }
+            } else if attribute == "mc:ProcessContent" {
+                for qname in value.split(whereSeparator: \.isWhitespace) {
+                    settings.processed.insert(name(String(qname), scope: scope))
+                }
+            }
+        }
+        compatibility.append(settings)
         let tag = name(elementName, scope: scope)
         names.append(tag)
+        let prefix = elementName.split(separator: ":", maxSplits: 1).dropLast().first.map(String.init) ?? ""
+        let transparent = tag.hasPrefix("extension") && settings.ignored.contains(scope[prefix] ?? "") && settings.processed.contains(tag)
+        emitted.append(!transparent)
+        if transparent { return }
         append("<" + tag, parser: parser)
         for (key, value) in attributes where key != "xmlns" && !key.hasPrefix("xmlns:") {
             var value = value
@@ -161,7 +182,8 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
-        if let name = names.popLast() { append("</" + name + ">", parser: parser) }
+        if let name = names.popLast(), emitted.popLast() == true { append("</" + name + ">", parser: parser) }
+        if compatibility.count > 1 { compatibility.removeLast() }
         if scopes.count > 1 { scopes.removeLast() }
     }
     func parser(_ parser: XMLParser, foundCharacters string: String) {

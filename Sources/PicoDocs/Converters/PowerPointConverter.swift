@@ -268,9 +268,14 @@ public struct PowerPointConverter: DocumentConverter {
         return isOn(common, "hidden")
     }
 
+    private static func shapeClick(_ shape: Element) -> Element? {
+        let names: Set<String> = ["p:nvsppr", "p:nvpicpr", "p:nvgraphicframepr", "p:nvgrpsppr"]
+        let properties = selectedChildren(in: shape).first { names.contains($0.tagName().lowercased()) }
+        return properties.flatMap { selectedChild(of: $0, named: "p:cnvpr") }.flatMap { selectedChild(of: $0, named: "a:hlinkclick") }
+    }
+
     private static func shapeLink(_ shape: Element, context: SlideContext) -> String? {
-        let properties = child(of: shape, named: "p:nvsppr").flatMap { child(of: $0, named: "p:cnvpr") }
-        return hyperlink(properties.flatMap { child(of: $0, named: "a:hlinkclick") }, context: context)
+        hyperlink(shapeClick(shape), context: context)
     }
 
     private static func hyperlink(_ click: Element?, context: SlideContext) -> String? {
@@ -290,17 +295,17 @@ public struct PowerPointConverter: DocumentConverter {
     /// Renders a shape tree (or group) in order. The first title placeholder
     /// becomes the slide title; nested groups and markup-compatibility branches
     /// are walked recursively.
-    private static func renderShapes(in container: Element, title: inout String?, blocks: inout [String], context: inout SlideContext) {
+    private static func renderShapes(in container: Element, title: inout String?, blocks: inout [String], context: inout SlideContext, inheritedLink: String? = nil) {
         for shape in container.children().array() {
             if Task.isCancelled { return }
             if isHidden(shape) { continue }
-            context.defaultLink = nil
+            let click = shapeClick(shape)
+            context.defaultLink = click == nil ? inheritedLink : hyperlink(click, context: context)
             switch shape.tagName().lowercased() {
             case "p:sp":
                 let type = placeholderType(of: shape)
                 if let type, skippedPlaceholders.contains(type) { continue }
                 guard let body = textBody(of: shape) else { continue }
-                context.defaultLink = shapeLink(shape, context: context)
                 context.runDefaults = inheritedRunDefaults(for: shape, context: context)
                 if type == "title" || type == "ctrTitle" {
                     let text = renderParagraphs(body, inherited: noInheritance, context: &context)
@@ -327,14 +332,16 @@ public struct PowerPointConverter: DocumentConverter {
                     context.runDefaults = Array(repeating: [], count: 9)
                     let markdown = renderTable(table, context: &context)
                     if !markdown.isEmpty { blocks.append(markdown) }
-                }
+                } else if let object = selectedDescendant(in: shape, named: "p:oleobj"),
+                          let preview = selectedDescendant(in: object, named: "p:pic"), !isHidden(preview),
+                          let image = pictureMarkdown(preview, context: &context) { blocks.append(image) }
             case "p:pic":
                 if let image = pictureMarkdown(shape, context: &context) { blocks.append(image) }
             case "p:grpsp":
-                renderShapes(in: shape, title: &title, blocks: &blocks, context: &context)
+                renderShapes(in: shape, title: &title, blocks: &blocks, context: &context, inheritedLink: context.defaultLink)
             case "mc:alternatecontent":
                 if let branch = selectedAlternateBranch(shape) {
-                    renderShapes(in: branch, title: &title, blocks: &blocks, context: &context)
+                    renderShapes(in: branch, title: &title, blocks: &blocks, context: &context, inheritedLink: inheritedLink)
                 }
             default:
                 continue
@@ -818,7 +825,7 @@ public struct PowerPointConverter: DocumentConverter {
         let label = escapeMarkdown(alt)
         let image = "![\(label)](\(linkDestination(source)))"
         let click = properties.flatMap { child(of: $0, named: "a:hlinkclick") }
-        if let target = hyperlink(click, context: context) { return "[\(image)](\(linkDestination(target)))" }
+        if let target = click == nil ? context.defaultLink : hyperlink(click, context: context) { return "[\(image)](\(linkDestination(target)))" }
         return image
     }
 
@@ -873,8 +880,14 @@ public struct PowerPointConverter: DocumentConverter {
         return archive.contentTypes?["/" + path] ?? archive.contentTypes?["." + (path as NSString).pathExtension.lowercased()]
     }
 
+    private static let mediaTypePattern: NSRegularExpression = {
+        let token = #"[A-Za-z0-9!#$%&'*+.^_`|~-]+"#
+        let quoted = #""(?:[\x20-\x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\x20-\x7E])*""#
+        return try! NSRegularExpression(pattern: "\\A" + token + "/" + token + "(?:[ \t]*;[ \t]*" + token + "=(?:" + token + "|" + quoted + "))*\\z")
+    }()
+
     private static func validatedMIME(_ value: String?) -> String? {
-        guard let value, value.range(of: #"\A[A-Za-z0-9!#$%&'*+.^_`|~-]+/[A-Za-z0-9!#$%&'*+.^_`|~-]+\z"#, options: .regularExpression) != nil else { return nil }
+        guard let value, mediaTypePattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else { return nil }
         return value
     }
 
@@ -923,7 +936,9 @@ public struct PowerPointConverter: DocumentConverter {
             guard let id = try? element.attr("Id"), let target = try? element.attr("Target"),
                   !id.isEmpty, !target.isEmpty, let type = try? element.attr("Type"), !type.isEmpty else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
             guard map[id] == nil else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
-            let external = ((try? element.attr("TargetMode")) ?? "").lowercased() == "external"
+            let mode = (try? element.attr("TargetMode")) ?? ""
+            guard !element.hasAttr("TargetMode") || ["Internal", "External"].contains(mode) else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
+            let external = mode == "External"
             if !external {
                 var depth = target.hasPrefix("/") ? 0 : directory(of: part).split(separator: "/").count
                 for segment in target.split(separator: "/") {

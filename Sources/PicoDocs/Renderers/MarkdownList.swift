@@ -74,9 +74,13 @@ struct MarkdownList {
 
     private var displayedNumbers: [Int?] {
         var previousDisplay: Int?
+        var previousSource: Int?
         return items.map { item in
             guard let number = item.number else { return nil }
-            let displayed = previousDisplay.map { number <= $0 ? min($0, Int.max - 1) + 1 : number } ?? number
+            // Repeated markers are shorthand; a decrease in the source is an explicit restart.
+            let restarts = previousSource.map { number < $0 } ?? false
+            let displayed = restarts ? number : previousDisplay.map { max(number, min($0, Int.max - 1) + 1) } ?? number
+            previousSource = number
             previousDisplay = displayed
             return displayed
         }
@@ -106,12 +110,12 @@ struct MarkdownList {
     }
 
     private static func inlineText(_ text: String, breakText: String, inline: (String) -> String) -> String {
-        let lines = text.components(separatedBy: "\n")
-        return lines.enumerated().map { index, line in
-            guard index + 1 < lines.count else { return inline(line) }
-            if line.hasSuffix("  ") { return inline(line.trimmingCharacters(in: .whitespaces)) + breakText }
-            return inline(line) + " "
-        }.joined()
+        var hardBreak = "\u{E040}"
+        while text.contains(hardBreak) { hardBreak += "\u{E041}" }
+        let protected = MarkdownTableCell.mapCodeSpans(text, code: { $0 }, plain: {
+            $0.replacingOccurrences(of: " {2,}\n", with: hardBreak, options: .regularExpression)
+        })
+        return inline(protected).replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: hardBreak, with: breakText)
     }
 
     var texts: [String] { items.flatMap { [$0.text] + $0.children.flatMap(\.texts) } }
