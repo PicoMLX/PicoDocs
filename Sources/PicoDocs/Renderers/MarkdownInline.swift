@@ -255,7 +255,7 @@ enum MarkdownInlineParser {
 
     /// Removes backslash escapes (`\x` -> `x`), recovering the literal label/destination
     /// text that `WordConverter` (and CommonMark authors) escape.
-    private static func unescape(_ text: String) -> String {
+    static func unescape(_ text: String) -> String {
         guard text.contains("\\") else { return text }
         var out = "", index = text.startIndex
         while index < text.endIndex {

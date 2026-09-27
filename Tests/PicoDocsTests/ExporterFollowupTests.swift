@@ -8,6 +8,89 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func bodyCSVPayloadIsConsumedByEveryOfficeWriter() async throws {
+        let source = ConverterResult(sections: [.init(kind: .body, markdown: "", metadata: ["csv": "UniqueValue,Second\nThird,Fourth"])])
+        for format in [ExportableFileType.docx, .rtf, .pptx] {
+            let data = try PicoDocsEngine.write(source, to: format)
+            if format == .pptx { #expect(try xml(data, "ppt/slides/slide1.xml").contains("UniqueValue")) }
+            else {
+                let recovered = try await PicoDocsEngine.convert(data: data, filename: "payload." + (format == .docx ? "docx" : "rtf"))
+                #expect(recovered.markdown().contains("UniqueValue")); #expect(recovered.markdown().contains("Fourth"))
+            }
+        }
+    }
+
+    @Test func DOCXExactImageAmbiguityUsesAltText() throws {
+        let body = DocumentSection(markdown: "![Unresolved](media/a.png)")
+        func carrier(_ bytes: String) -> DocumentSection { .init(kind: .image, markdown: "", sourcePath: "media/a.png", metadata: ["base64": bytes, "mimeType": "image/png"]) }
+        let data = try PicoDocsEngine.write(ConverterResult(sections: [body, carrier("AQID"), carrier("BAUG")]), to: .docx)
+        let document = try xml(data, "word/document.xml")
+        #expect(document.contains("Unresolved")); #expect(!document.contains("<w:drawing>"))
+        let unique = try PicoDocsEngine.write(ConverterResult(sections: [body, carrier("!"), carrier("AQID")]), to: .docx)
+        #expect(try xml(unique, "word/document.xml").contains("<w:drawing>"))
+    }
+
+    @Test func ambiguousImageAliasesStopDecodingAtSecondValidMatch() throws {
+        let base64 = Data(repeating: 1, count: 1024 * 1024).base64EncodedString()
+        let carriers = (0..<65).map { DocumentSection(kind: .image, markdown: "", sourcePath: "dir\($0)/logo.png", metadata: ["base64": base64, "mimeType": "image/png"]) }
+        let unique = DocumentSection(kind: .image, markdown: "", sourcePath: "unique.png", metadata: ["base64": "AQID", "mimeType": "image/png"])
+        let result = ConverterResult(sections: [.init(markdown: "![Ambiguous](logo.png) ![Unique](unique.png)")] + carriers + [unique])
+        let data = try PicoDocsEngine.write(result, to: .docx)
+        #expect(try xml(data, "word/document.xml").contains("Ambiguous"))
+        let archive = try #require(Archive(data: data, accessMode: .read))
+        #expect(archive.filter { $0.path.hasPrefix("word/media/") }.count == 1)
+    }
+
+    @Test func CSVPreflightBudgetsRowsBeforeGridAllocation() throws {
+        let csv = String(repeating: "\n", count: 1_000_000)
+        var budget = SpreadsheetProjectionBudget()
+        #expect(throws: ExporterError.self) { try XLSXExporter.preflightCSV(csv, name: "Empty", budget: &budget) }
+        var small = SpreadsheetProjectionBudget(maximumBytes: 200)
+        #expect(throws: ExporterError.self) { try XLSXExporter.preflightCSV("a\nb", name: "S", budget: &small) }
+        var enough = SpreadsheetProjectionBudget(maximumBytes: 256)
+        try XLSXExporter.preflightCSV("a\nb", name: "S", budget: &enough)
+        #expect(CSVConverter.parseCSV("\"a\nb\",\"c\"\"d\"\r\n,\n") == [["a\nb", "c\"d"], ["", ""]])
+    }
+
+    @Test func numberedWordHeadingsAndNestedTableItemsKeepPrefixes() async throws {
+        let ns = #"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"decimal\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:numFmt w:val=\"decimal\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
+        func p(_ text: String, level: Int = 0, heading: Bool = false) -> String {
+            let style = heading ? "<w:pStyle w:val=\"Heading1\"/>" : ""
+            return "<w:p><w:pPr>\(style)<w:numPr><w:numId w:val=\"1\"/><w:ilvl w:val=\"\(level)\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>"
+        }
+        for table in [false, true] {
+            let content = table ? "<w:tbl><w:tr><w:tc>" + p("Parent") + p("Child", level: 1) + "</w:tc></w:tr></w:tbl>" : p("Intro", heading: true) + p("Item")
+            let document = "<w:document \(ns)><w:body>\(content)</w:body></w:document>"
+            let data = PagesConverterTests.makeZip([("word/document.xml", Array(document.utf8)), ("word/numbering.xml", Array(numbering.utf8))])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "numbered.docx")
+            if table { #expect(result.markdown().contains("1. Parent<br>   1. Child")) }
+            else { #expect(result.markdown().contains("# 1. Intro")); #expect(result.markdown().contains("2. Item")) }
+        }
+    }
+
+    @Test func footnoteIdentifiersRemainStableAcrossRepeatedDOCXExports() async throws {
+        for id in [#"a\]b"#, #"a\\b"#, #"a\\\]b"#] {
+            let marker = "[^" + id + "]"
+            var result = ConverterResult(sections: [.init(markdown: "Claim" + marker + "\n\n" + marker + ": Note")])
+            for _ in 0..<4 {
+                let data = try PicoDocsEngine.write(result, to: .docx)
+                result = try await PicoDocsEngine.convert(data: data, filename: "notes.docx")
+                #expect(result.markdown().contains("Claim" + marker))
+                #expect(try DocumentRenderer.render(result, to: .plaintext) == "Claim[1]\n\n[1] Note")
+            }
+        }
+    }
+
+    @Test func emptyDOCXLinkDestinationsRemainPlainText() async throws {
+        let data = try PicoDocsEngine.write(markdown: "[**label**]()", to: .docx)
+        #expect(!(try xml(data, "word/_rels/document.xml.rels")).contains("/hyperlink"))
+        #expect(!(try xml(data, "word/document.xml")).contains("<w:hyperlink"))
+        let recovered = try await PicoDocsEngine.convert(data: data, filename: "empty-link.docx")
+        #expect(recovered.markdown() == "**label**")
+    }
+
+
     @Test func adjacentRTFFieldsWithTheSameTargetStaySeparate() throws {
         let first = #"{\field{\*\fldinst HYPERLINK "https://x"}{\fldrslt one}}"#
         let second = #"{\field{\*\fldinst HYPERLINK "https://x"}{\fldrslt two}}"#

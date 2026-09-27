@@ -105,9 +105,19 @@ public struct WordprocessingMLExporter: DocumentExporter {
         let byBasename: [String: [IndexedImage]]
 
         func lookup(_ source: String) throws -> IndexedImage? {
-            if let image = try byPath[source]?.last(where: { try $0.decodedData() != nil }) { return image }
-            let candidates = try byBasename[WordprocessingMLExporter.portableBasename(source)]?.filter { try $0.decodedData() != nil } ?? []
-            return candidates.count == 1 ? candidates[0] : nil
+            func unique(_ candidates: [IndexedImage]) throws -> (image: IndexedImage?, ambiguous: Bool) {
+                var match: IndexedImage?
+                for candidate in candidates where try candidate.decodedData() != nil {
+                    if match != nil { return (nil, true) }
+                    match = candidate
+                }
+                return (match, false)
+            }
+            if let exact = byPath[source] {
+                let result = try unique(exact)
+                if result.ambiguous || result.image != nil { return result.image }
+            }
+            return try unique(byBasename[WordprocessingMLExporter.portableBasename(source)] ?? []).image
         }
     }
 
@@ -314,6 +324,10 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 case .emphasis(let children):
                     out += renderRuns(children, bold: bold, italic: true)
                 case .link(let label, let destination):
+                    guard !destination.isEmpty else {
+                        out += renderRuns(label, bold: bold, italic: italic)
+                        continue
+                    }
                     if destination.hasPrefix("#") {
                         let fragment = String(destination.dropFirst())
                         if let bookmark = fragmentBookmarks[fragment.removingPercentEncoding ?? fragment] {
@@ -336,7 +350,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                     out += imageRun(alt: alt, source: source) ?? textRun(alt, bold: bold, italic: italic, monospace: false)
                 case .footnoteReference(let fid):
                     // Keep textual footnotes paired using explicit marker provenance.
-                    let id = fid.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "]", with: "\\]")
+                    let id = MarkdownInlineParser.unescape(fid).replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "]", with: "\\]")
                     out += "<w:r><w:rPr><w:rStyle w:val=\"PicoFootnoteMarker\"/></w:rPr><w:t xml:space=\"preserve\">\(OOXMLPackageWriter.escape("[^" + id + "]"))</w:t></w:r>"
                 }
             }

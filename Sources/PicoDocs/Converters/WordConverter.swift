@@ -250,7 +250,7 @@ public struct WordConverter: DocumentConverter {
         guard !text.isEmpty else { return prefix }
 
         if let level = headingLevel(forStyle: style) {
-            return String(repeating: "#", count: level) + " " + text
+            return String(repeating: "#", count: level) + " " + (prefix ?? "") + text
         }
         if style?.lowercased() == "quote" {
             return text.components(separatedBy: "\n").map { "> " + $0 }.joined(separator: "\n")
@@ -476,7 +476,7 @@ public struct WordConverter: DocumentConverter {
                     let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
                     let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
                     let prefix = numbering?.prefix(numPr: numPr, style: style)
-                    let t = ((prefix ?? "") + renderInline(paragraph, relationships: relationships)).trimmingCharacters(in: .whitespaces)
+                    let t = (prefix ?? "") + renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.

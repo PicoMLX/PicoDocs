@@ -19,6 +19,15 @@ struct SpreadsheetProjectionBudget {
         remaining -= bytes
     }
 
+    /// Account for retained row/cell arrays and XML wrappers in the writer.
+    mutating func reserveWriterStorage(rows: Int, columns: Int) throws {
+        guard rows >= 0, columns >= 0, rows <= 1_048_576, columns <= 16_384,
+              columns == 0 || rows <= 1_000_000 / columns else { throw PicoDocsError.parsingError }
+        let bytes = rows * 32 + rows * columns * 64
+        guard bytes <= remaining else { throw PicoDocsError.parsingError }
+        remaining -= bytes
+    }
+
     mutating func reserveValue(_ value: String) throws {
         let bytes = value.utf8.count
         guard bytes <= remaining / 5 else { throw PicoDocsError.parsingError }

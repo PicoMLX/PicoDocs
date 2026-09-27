@@ -29,17 +29,25 @@ public struct XLSXExporter: DocumentExporter {
         var nextNameSuffix: [String: Int] = [:]
         var projectionBudget = SpreadsheetProjectionBudget()
         for section in result.sections where section.kind != .image {
-            let rows = Self.rows(for: section)
-            guard rows.allSatisfy({ $0.allSatisfy { $0.utf16.count <= 32_767 } }) else {
-                throw ExporterError.serializationFailed("Worksheet cell exceeds Excel's 32,767-character limit")
-            }
-            try Self.validateDimensions(rows: rows.count, columns: rows.map(\.count).max() ?? 0)
             let name = Self.uniqueSheetName(section, index: sheets.count + 1, used: &usedNames, nextSuffix: &nextNameSuffix)
-            do {
-                try projectionBudget.reserveGrid(rows: rows.count, columns: rows.map(\.count).max() ?? 0, name: name)
-                for row in rows { for value in row { try projectionBudget.reserveValue(value) } }
-            } catch {
-                throw ExporterError.serializationFailed("Workbook exceeds the supported 64 MiB projection budget")
+            let rows: [[String]]
+            if let csv = section.metadata["csv"], !csv.isEmpty {
+                try Self.preflightCSV(csv, name: name, budget: &projectionBudget)
+                rows = CSVConverter.parseCSV(csv)
+            } else {
+                rows = Self.rows(for: section)
+                guard rows.allSatisfy({ $0.allSatisfy { $0.utf16.count <= 32_767 } }) else {
+                    throw ExporterError.serializationFailed("Worksheet cell exceeds Excel's 32,767-character limit")
+                }
+                let columns = rows.lazy.map(\.count).max() ?? 0
+                try Self.validateDimensions(rows: rows.count, columns: columns)
+                do {
+                    try projectionBudget.reserveGrid(rows: rows.count, columns: columns, name: name)
+                    try projectionBudget.reserveWriterStorage(rows: rows.count, columns: columns)
+                    for row in rows { for value in row { try projectionBudget.reserveValue(value) } }
+                } catch {
+                    throw ExporterError.serializationFailed("Workbook exceeds the supported 64 MiB projection budget")
+                }
             }
             sheets.append((name, rows))
         }
@@ -69,6 +77,27 @@ public struct XLSXExporter: DocumentExporter {
         guard columns == 0 || rows <= 1_000_000 / columns else {
             throw ExporterError.serializationFailed("Worksheet exceeds the supported 1,000,000-cell projection budget")
         }
+    }
+
+    /// Validate and charge CSV while retaining only the current field, before parseCSV allocates rows.
+    static func preflightCSV(_ csv: String, name: String, budget: inout SpreadsheetProjectionBudget) throws {
+        var rows = 0, columns = 0, currentColumns = 0
+        do {
+            try CSVConverter.forEachField(csv) { value, endsRow in
+                guard value.utf16.count <= 32_767 else {
+                    throw ExporterError.serializationFailed("Worksheet cell exceeds Excel's 32,767-character limit")
+                }
+                currentColumns += 1
+                try validateDimensions(rows: rows + 1, columns: max(columns, currentColumns))
+                try budget.reserveValue(value)
+                if endsRow {
+                    rows += 1; columns = max(columns, currentColumns); currentColumns = 0
+                }
+            }
+            try budget.reserveGrid(rows: rows, columns: columns, name: name)
+            try budget.reserveWriterStorage(rows: rows, columns: columns)
+        } catch let error as ExporterError { throw error }
+        catch { throw ExporterError.serializationFailed("Workbook exceeds the supported 64 MiB projection budget") }
     }
 
     // MARK: - Rows
