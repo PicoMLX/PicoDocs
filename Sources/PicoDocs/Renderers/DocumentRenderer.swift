@@ -263,7 +263,7 @@ public enum DocumentRenderer {
             followsBlank = blank
             // A `[^id]: text` line inside a fenced code block is literal code, not
             // a definition — track the fence so it stays in the body.
-            if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+            if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") || (!inFence && literalListFenceStart(lines[i])) {
                 inFence.toggle()
                 fenceList = inFence ? lists.last : nil
                 bodyLines.append(lines[i])
@@ -279,7 +279,11 @@ public enum DocumentRenderer {
                     // End inline code context inside the item without a blank line,
                     // which would change continuation indentation or split the list.
                     bodyLines.append(String(repeating: " ", count: container.content) + MarkdownLiteral.listRestartBoundary)
-                } else if !bodyLines.isEmpty, bodyLines.last != "" { bodyLines.append("") }
+                } else if !bodyLines.isEmpty {
+                    // A root definition ends the preceding list even when the
+                    // following block has enough indentation to look like a continuation.
+                    bodyLines.append(MarkdownLiteral.listRestartBoundary)
+                }
                 var textLines = [first]
                 i += 1
                 while i < lines.count {                       // indented continuation lines
@@ -495,7 +499,7 @@ public enum DocumentRenderer {
                 if let item = literalListIndent(lines, index: i) { lists.append(item) }
             }
             followsBlank = line.isEmpty
-            if line.hasPrefix("```") {
+            if line.hasPrefix("```") || (!inCodeFence && literalListFenceStart(lines[i])) {
                 inCodeFence.toggle()
                 fenceList = inCodeFence ? lists.last : nil
                 i += 1
@@ -770,6 +774,13 @@ public enum DocumentRenderer {
         guard filled || confirmedBareMarker(lines, index: index) != nil else { return nil }
         let base = indentWidth(line)
         return (base, base + (filled ? markerWidth(trimmed) : trimmed.count + 1))
+    }
+
+    /// The block parser removes an item's marker before parsing its first block.
+    static func literalListFenceStart(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard listMarker(trimmed) != nil else { return false }
+        return trimmed.dropFirst(markerWidth(trimmed)).trimmingCharacters(in: .whitespaces).hasPrefix("```")
     }
 
     /// Shared boundaries for verbatim-source escaping and rendered inline blocks.

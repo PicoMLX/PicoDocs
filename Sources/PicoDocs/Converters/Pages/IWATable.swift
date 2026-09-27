@@ -417,9 +417,9 @@ enum IWATable {
             lists.counter = incrementDecimal(lists.counter)
             let tight = lists.lastList != nil && (restart == 0 || (restart == nil && style == lists.lastList))
             lists.orderedList = style
-            lists.lastList = style
-            lists.markerWidth = lists.counter.count + 2
             let representable = lists.counter.count <= 9
+            lists.lastList = representable ? style : nil
+            lists.markerWidth = representable ? lists.counter.count + 2 : 0
             return (lists.counter + (representable ? "." : "\\."), representable && tight)
         }
     }
@@ -612,10 +612,10 @@ enum IWATable {
 
     private static func escapeLinkLabel(_ text: String) -> String {
         var output = "", slashes = 0
-        for character in text {
-            if character == "\\" { output.append(character); slashes += 1; continue }
-            if "[]".contains(character), slashes.isMultiple(of: 2) { output.append("\\") }
-            output.append(character); slashes = 0
+        for character in text.unicodeScalars {
+            if character == "\\" { output.unicodeScalars.append(character); slashes += 1; continue }
+            if "[]".unicodeScalars.contains(character), slashes.isMultiple(of: 2) { output.append("\\") }
+            output.unicodeScalars.append(character); slashes = 0
         }
         return output
     }

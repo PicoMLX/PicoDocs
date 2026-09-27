@@ -68,7 +68,7 @@ enum MarkdownLiteral {
                 if let item = DocumentRenderer.literalListIndent(structuralLines, index: index) { lists.append(item) }
             }
             followsBlank = blank
-            if structure.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+            if structure.trimmingCharacters(in: .whitespaces).hasPrefix("```") || (!inFence && DocumentRenderer.literalListFenceStart(structure)) {
                 flushProse()
                 inFence.toggle()
                 fenceList = inFence ? lists.last : nil

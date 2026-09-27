@@ -265,6 +265,20 @@ public struct RTFConverter: DocumentConverter {
         }
         flushBytes()
         flushParagraph()
+        // Trim the source runs before classifying block/code boundaries, so the
+        // projection sees the same indentation as the emitted paragraph.
+        paragraphs = paragraphs.map { paragraph in
+            var trimmed = paragraph
+            for index in trimmed.indices {
+                trimmed[index].text = String(trimmed[index].text.drop { $0.isWhitespace })
+                if !trimmed[index].text.isEmpty { break }
+            }
+            for index in trimmed.indices.reversed() {
+                trimmed[index].text = String(trimmed[index].text.reversed().drop { $0.isWhitespace }.reversed())
+                if !trimmed[index].text.isEmpty { break }
+            }
+            return trimmed.filter { !$0.text.isEmpty }
+        }
         // Source offsets retain escape provenance. Classify block boundaries
         // from composed style runs, whose prefixes can change Markdown syntax.
         let source = paragraphs.map { $0.map(\.text).joined() }.joined(separator: "\n\n")
@@ -288,7 +302,7 @@ public struct RTFConverter: DocumentConverter {
                 }
                 escapedRun.text = String(decoding: units, as: UTF16.self)
                 return renderRun(escapedRun)
-            }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+            }.joined()
             offset += 2
             return rendered
         }.joined(separator: "\n\n")

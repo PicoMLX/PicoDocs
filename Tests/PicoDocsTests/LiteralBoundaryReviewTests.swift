@@ -4,6 +4,83 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func rootFootnoteExtractionPreservesTheListExit() async throws {
+        let source = "- x\n[^n]: note\n  ```\n\\*Z"
+        let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "literal.txt")
+        let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+        let code = try #require(html.getElementsByTag("code").first())
+        #expect(try code.text() == #"\*Z"#)
+        #expect(try html.getElementsByTag("li").first()?.getElementsByTag("code").isEmpty() == true)
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains(#"\*Z"#))
+    }
+
+    @Test func PagesLinkLabelsEscapeBracketScalarsWithCombiningMarks() async throws {
+        typealias B = PagesConverterTests
+        for mark in ["\u{0301}", "\u{FE0F}"] {
+            for label in ["a]" + mark + "b", "a[" + mark + "b", #"\]"# + mark, #"\\["# + mark] {
+                let run = B.lengthField(1, B.varintField(1, 0) + B.lengthField(2, B.varintField(1, 2)))
+                let storage = B.varintField(1, 0) + B.lengthField(3, Array(label.utf8)) + B.lengthField(11, run)
+                let stream = B.makeIWAStream(objects: [(1, 2001, storage, [2]), (2, 2032, B.lengthField(2, Array("https://example.com".utf8)), [])])
+                let result = try await PicoDocsEngine.convert(data: B.makeZip([("Index/Document.iwa", B.snappyFrame(stream))]), filename: "label.pages")
+                #expect(try DocumentRenderer.render(result, to: .plaintext) == label)
+                let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+                let link = try #require(html.getElementsByTag("a").first())
+                #expect(try link.attr("href") == "https://example.com"); #expect(try link.text() == label)
+            }
+        }
+    }
+
+    @Test func oversizedNativeMarkersDoNotOwnInlineTables() async throws {
+        for start in [UInt64(1_000_000_000), UInt64.max] {
+            let data = PagesConverterTests.makeListPagesFile(text: "a \u{FFFC} b\nc", style: .ordered, restarts: [(0, start)], tableCell: "Cell")
+            let result = try await PicoDocsEngine.convert(data: data, filename: "large-number.pages")
+            let lines = result.markdown().components(separatedBy: "\n")
+            #expect(lines.contains("b")); #expect(lines.contains("| Cell |"))
+            #expect(lines.contains { $0.hasPrefix(String(start) + #"\. a"#) })
+            let plain = try DocumentRenderer.render(result, to: .plaintext)
+            #expect(!plain.contains(String(repeating: " ", count: 12) + "b"))
+        }
+    }
+
+    @Test func RTFTrimmingAndEscapeProjectionShareFenceContext() async throws {
+        let rtf = #"{\rtf1\ansi - item\par   ```\par outside \\*}"#
+        let result = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "fence.rtf")
+        let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+        #expect(try html.getElementsByTag("code").first()?.text() == #"outside \*"#)
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains(#"outside \*"#))
+    }
+
+    @Test func literalListContentFencesKeepBackslashesAndDefinitions() async throws {
+        for marker in ["-", "1.", "12."] {
+            let indent = String(repeating: " ", count: marker.count + 1)
+            let source = marker + " ```\n" + indent + #"\*Z"# + "\n" + indent + "[^n]: literal\n" + indent + "```"
+            let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "list-code.txt")
+            let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+            let code = try #require(html.getElementsByTag("code").first())
+            #expect(try code.text().contains(#"\*Z"#)); #expect(try code.text().contains("[^n]: literal"))
+            for format in [ExportFileType.plaintext, .csv] {
+                let rendered = try DocumentRenderer.render(result, to: format)
+                #expect(rendered.contains(#"\*Z"#)); #expect(!rendered.contains(#"\\\*Z"#))
+                #expect(rendered.contains("[^n]: literal"))
+            }
+        }
+    }
+
+    @Test func inlineCodeDelimitersRecognizeTheirUnicodeScalars() async throws {
+        for mark in ["\u{0301}", "\u{FE0F}"] {
+            let content = mark + "x"
+            let inputs = [("code.md", "`" + content + "`"), ("code.html", "<code>" + content + "</code>")]
+            for (filename, source) in inputs {
+                let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: filename)
+                #expect(try DocumentRenderer.render(result, to: .plaintext) == content)
+                #expect(try DocumentRenderer.render(result, to: .csv).contains(content))
+                let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+                #expect(try html.getElementsByTag("code").first()?.text() == content)
+            }
+        }
+    }
+
+
     @Test func extractedListFootnotesKeepInlineBoundaries() async throws {
         for marker in ["-", "1."] {
             let indent = marker == "-" ? "  " : "   "
