@@ -8,6 +8,35 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func adjacentRTFFieldsWithTheSameTargetStaySeparate() throws {
+        let first = #"{\field{\*\fldinst HYPERLINK "https://x"}{\fldrslt one}}"#
+        let second = #"{\field{\*\fldinst HYPERLINK "https://x"}{\fldrslt two}}"#
+        let mixed = #"{\field{\*\fldinst HYPERLINK "https://x"}{\fldrslt {\b bold} plain}}"#
+        #expect(RTFConverter.markdown(fromRTF: "{\\rtf1 " + first + second + "}") == "[one](https://x)[two](https://x)")
+        #expect(RTFConverter.markdown(fromRTF: "{\\rtf1 " + first + mixed + "}") == "[one](https://x)[**bold** plain](https://x)")
+    }
+
+    @Test func duplicateMediaNamesRetainUniqueSuffixesWithoutRestartingSearch() throws {
+        let duplicate = (0..<10_000).map { DocumentSection(kind: .image, markdown: "", sourcePath: "dir\($0)/logo.png", metadata: ["base64": "AQID", "mimeType": "image/png"]) }
+        let collision = DocumentSection(kind: .image, markdown: "", sourcePath: "explicit/logo-2.png", metadata: ["base64": "BAUG", "mimeType": "image/png"])
+        let result = ConverterResult(sections: [.init(markdown: "![Last](dir9999/logo.png) ![Explicit](explicit/logo-2.png)"), collision] + duplicate)
+        let data = try PicoDocsEngine.write(result, to: .docx)
+        let archive = try #require(Archive(data: data, accessMode: .read))
+        let names = Set(archive.filter { $0.path.hasPrefix("word/media/") }.map(\.path))
+        #expect(names == ["word/media/logo-10001.png", "word/media/logo-2.png"])
+    }
+
+    @Test func worksheetBoundsScanRetainsAllCells() async throws {
+        let row = Array(repeating: "x", count: 200).joined(separator: ",")
+        let csv = Array(repeating: row, count: 200).joined(separator: "\n")
+        let result = ConverterResult(sections: [.init(kind: .sheet, markdown: "", metadata: ["csv": csv])])
+        let data = try PicoDocsEngine.write(result, to: .xlsx)
+        let recovered = try await PicoDocsEngine.convert(data: data, filename: "grid.xlsx")
+        let recoveredCSV = try #require(recovered.sections.first?.metadata["csv"])
+        #expect(CSVConverter.parseCSV(recoveredCSV) == CSVConverter.parseCSV(csv))
+    }
+
+
     @Test func emptyWorksheetsConsumeProjectionBudget() throws {
         var budget = SpreadsheetProjectionBudget(maximumBytes: 34)
         try budget.reserveGrid(rows: 0, columns: 0, name: "A")

@@ -43,7 +43,7 @@ public struct RTFConverter: DocumentConverter {
 
     // MARK: - Parser
 
-    private struct Run { var text: String; var bold: Bool; var italic: Bool; var link: String?; var code: Bool }
+    private struct Run { var text: String; var bold: Bool; var italic: Bool; var link: String?; var code: Bool; var field: Field? }
     private final class Field { var instruction = ""; var target: String? }
     private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool; var ucSkip: Int; var field: Field?; var instruction: Bool; var font: Int; var fontTable: Bool }
 
@@ -99,11 +99,11 @@ public struct RTFConverter: DocumentConverter {
             if instruction, let field { field.instruction += s; return }
             let code = field?.target != nil && monospacedFonts.contains(font)
             guard !ignore, !s.isEmpty else { return }
-            if var last = runs.last, last.bold == bold, last.italic == italic, last.link == field?.target, last.code == code {
+            if var last = runs.last, last.bold == bold, last.italic == italic, last.link == field?.target, last.code == code, last.field === field {
                 last.text += s
                 runs[runs.count - 1] = last
             } else {
-                runs.append(Run(text: s, bold: bold, italic: italic, link: field?.target, code: code))
+                runs.append(Run(text: s, bold: bold, italic: italic, link: field?.target, code: code, field: field))
             }
         }
 
@@ -127,8 +127,8 @@ public struct RTFConverter: DocumentConverter {
             }
             var rendered = "", index = 0
             while index < runs.count {
-                let start = index, link = runs[index].link
-                while index < runs.count, runs[index].link == link { index += 1 }
+                let start = index, link = runs[index].link, origin = runs[index].field
+                while index < runs.count, runs[index].link == link, runs[index].field === origin { index += 1 }
                 let text = runs[start..<index].map { renderRun($0) }.joined()
                 if let link {
                     let target = link.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E")

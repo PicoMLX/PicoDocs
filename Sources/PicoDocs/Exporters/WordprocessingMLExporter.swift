@@ -119,6 +119,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         var byPath: [String: [IndexedImage]] = [:]
         var byBasename: [String: [IndexedImage]] = [:]
         var usedFilenames: Set<String> = []
+        var nextFilenameSuffix: [String: Int] = [:]
         let budget = OfficeMediaDecodeBudget()
 
         for section in sections where section.kind == .image {
@@ -141,11 +142,13 @@ public struct WordprocessingMLExporter: DocumentExporter {
             let base = safeStem.isEmpty ? "image\(usedFilenames.count + 1)" : safeStem
             if ext.unicodeScalars.contains(where: invalidFilename.contains) { ext = OfficeMediaType.fileExtension(forMIME: mime ?? "") }
             var mediaFilename = "\(base).\(ext)"
-            var n = 2
+            let identity = mediaFilename.lowercased()
+            var n = nextFilenameSuffix[identity, default: 2]
             while usedFilenames.contains(mediaFilename.lowercased()) {
                 mediaFilename = "\(base)-\(n).\(ext)"
                 n += 1
             }
+            nextFilenameSuffix[identity] = n
             usedFilenames.insert(mediaFilename.lowercased())
 
             let image = IndexedImage(base64: base64, mediaFilename: mediaFilename, metadata: section.metadata, budget: budget)
