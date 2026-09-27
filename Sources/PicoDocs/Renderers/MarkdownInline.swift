@@ -91,11 +91,23 @@ enum MarkdownInlineParser {
             if chars[cursor] == "\\", cursor + 1 < chars.count { escapedPositions.insert(cursor + 1); cursor += 2 }
             else { cursor += 1 }
         }
-        var nextBracket: [Int: Int] = [:]
-        var bracketClose: Int?
-        for index in chars.indices.reversed() where !escapedPositions.contains(index) {
-            if chars[index] == "]" { bracketClose = index }
-            else if chars[index] == "[", let close = bracketClose { nextBracket[index] = close }
+        // Footnote candidates advance monotonically, so retain one closer
+        // instead of a dictionary entry per opener (dense or sparse).
+        var footnoteSearch = 0
+        var footnoteClose: Int?
+        func footnoteCloser(after opener: Int) -> Int? {
+            if let close = footnoteClose, close > opener { return close }
+            footnoteSearch = max(footnoteSearch, opener + 2)
+            while footnoteSearch < chars.count {
+                let index = footnoteSearch
+                footnoteSearch += 1
+                if chars[index] == "]", !escapedPositions.contains(index) {
+                    footnoteClose = index
+                    return index
+                }
+            }
+            footnoteClose = nil
+            return nil
         }
         // Pair destinations once; failed candidates never rescan a suffix.
         var parenCloses: [Int: Int] = [:], stack: [Int] = []
@@ -189,7 +201,7 @@ enum MarkdownInlineParser {
                 }
                 // Footnote reference: [^id]
                 if i + 1 < chars.count, chars[i + 1] == "^",
-                   let close = nextBracket[i] {
+                   let close = footnoteCloser(after: i) {
                     let id = String(chars[(i + 2)..<close])
                     if !id.isEmpty {
                         append(.footnoteReference(id))
@@ -313,9 +325,12 @@ enum MarkdownInlineParser {
         // An inner link deactivates the outer opener; the main scan will then
         // recognize that inner link and retain the outer punctuation literally.
         guard isImage || !containsLink(label) else { return nil }
+        let visibleLabel = label.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? [MarkdownInline.text(dest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Link" : dest)]
+            : label
         let node: MarkdownInline = isImage
             ? .image(alt: label.plainText, source: dest)
-            : .link(label: label, destination: dest)
+            : .link(label: visibleLabel, destination: dest)
         return (node, cursor + 1)   // past the ")"
     }
 

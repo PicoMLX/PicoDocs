@@ -9,6 +9,85 @@ import AppKit
 
 struct ExporterFollowupTests {
 
+    @Test func physicalWorksheetRowsShareTheWorkbookBudget() throws {
+        var budget = SpreadsheetProjectionBudget(maximumBytes: 256)
+        try budget.reservePhysicalRows(1)
+        try budget.reservePhysicalRows(1)
+        #expect(throws: PicoDocsError.parsingError) { try budget.reservePhysicalRows(1) }
+        var defaultBudget = SpreadsheetProjectionBudget()
+        #expect(throws: PicoDocsError.parsingError) { try defaultBudget.reservePhysicalRows(1_048_576) }
+    }
+
+    @Test func footnoteLookupHandlesDenseLiteralAndActualOpeners() {
+        let literal = String(repeating: "[", count: 100_000) + "]"
+        #expect(MarkdownInlineParser.parse(literal) == [.text(literal)])
+        let missing = String(repeating: "[^", count: 20_000)
+        #expect(MarkdownInlineParser.parse(missing) == [.text(missing)])
+        #expect(MarkdownInlineParser.parse("[^one] [^two]") == [.footnoteReference("one"), .text(" "), .footnoteReference("two")])
+        #expect(MarkdownInlineParser.parse(#"[^a\]b]"#) == [.footnoteReference(#"a\]b"#)])
+        #expect(MarkdownInlineParser.parse("[^] [^x]").plainText == "[^] [^x]")
+    }
+
+    @Test func repeatedDOCXDrawingsStopBeforeMarkupExpansion() throws {
+        var budget = WordprocessingMLExporter.DrawingBudget(maximumBytes: 1024 + 12 + 6)
+        #expect(throws: ExporterError.self) { try budget.reserve(filename: "a", alt: "&&") }
+        try budget.reserve(filename: "a", alt: "&")
+        #expect(throws: ExporterError.self) { try budget.reserve(filename: "", alt: "") }
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        let image = DocumentSection(kind: .image, markdown: "", sourcePath: "one.png", metadata: ["base64": png, "mimeType": "image/png"])
+        let input = ConverterResult(sections: [.init(markdown: String(repeating: "![x](one.png) ", count: 20_000)), image])
+        try OfficeDocumentBlocks.validateInput(input)
+        #expect(throws: ExporterError.self) { try PicoDocsEngine.write(input, to: .docx) }
+        let small = ConverterResult(sections: [.init(markdown: "![a](one.png) ![b](one.png)"), image])
+        let data = try PicoDocsEngine.write(small, to: .docx)
+        let document = try xml(data, "word/document.xml")
+        #expect(document.components(separatedBy: "<w:drawing>").count - 1 == 2)
+        #expect(try xml(data, "word/_rels/document.xml.rels").components(separatedBy: "/image").count - 1 == 1)
+    }
+
+    @Test func invisibleLinkLabelsHaveVisibleFallbackAcrossExporters() async throws {
+        for (source, expected) in [("[](https://example.test)", "https://example.test"), ("[ ](https://example.test)", "https://example.test"), ("[\t](https://example.test)", "https://example.test"), ("[]()", "Link")] {
+            #expect(MarkdownInlineParser.parse(source).plainText == expected)
+            let input = ConverterResult(sections: [.init(markdown: source)])
+            #expect(try xml(PicoDocsEngine.write(input, to: .xlsx), "xl/worksheets/sheet1.xml").contains(">" + expected + "</"))
+            #expect(try xml(PicoDocsEngine.write(input, to: .pptx), "ppt/slides/slide1.xml").contains(">" + expected + "</"))
+            for format in [ExportableFileType.docx, .rtf] {
+                let imported = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(input, to: format), filename: "link." + format.rawValue)
+                #expect(try DocumentRenderer.render(imported, to: .plaintext) == expected)
+            }
+        }
+        #expect(MarkdownInlineParser.parse("[  meaningful  ](url)").plainText == "  meaningful  ")
+    }
+
+    @Test func RTFListHardBreaksStayAtTheContentColumn() async throws {
+        for source in ["- first  \n  second", "100. first  \n     second", "100. Parent\n     - first  \n       second", "- Parent\n\n  first  \n  second"] {
+            var result = ConverterResult(sections: [.init(markdown: source)])
+            for _ in 0..<3 {
+                result = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(result, to: .rtf), filename: "list.rtf")
+                let html = try DocumentRenderer.render(result, to: .html)
+                #expect(try SwiftSoup.parse(html).select("li").array().contains { try $0.text().contains("second") })
+                #expect(!html.contains("</ul>\n<p>second") && !html.contains("</ol>\n<p>second"))
+                #expect(result.markdown().contains("first  \n"))
+            }
+        }
+    }
+
+    @Test func emptyWorksheetRowsStillValidateExcelCoordinates() async throws {
+        let seed = try PicoDocsEngine.write(markdown: "x", to: .xlsx)
+        for row in [1, 1_048_576, 1_048_577] {
+            let archive = try #require(Archive(data: seed, accessMode: .read))
+            var files: [(name: String, data: [UInt8])] = []
+            for entry in archive {
+                var bytes = Data(); _ = try archive.extract(entry) { bytes.append($0) }
+                if entry.path == "xl/worksheets/sheet1.xml" { bytes = Data((#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r=""# + String(row) + #""/></sheetData></worksheet>"#).utf8) }
+                files.append((entry.path, Array(bytes)))
+            }
+            let data = PagesConverterTests.makeZip(files)
+            if row > 1_048_576 { await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: data, filename: "empty.xlsx") } }
+            else { #expect(try await PicoDocsEngine.convert(data: data, filename: "empty.xlsx").sections.count == 1) }
+        }
+    }
+
     @Test func identitylessImagesHaveVisibleFallbackAcrossExporters() async throws {
         for source in ["![]()", "![ ]()", "![](< >)"] {
             #expect(MarkdownInlineParser.parse(source).plainText == "Image")

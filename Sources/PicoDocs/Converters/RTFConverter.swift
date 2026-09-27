@@ -135,7 +135,9 @@ public struct RTFConverter: DocumentConverter {
                 } else { rendered += text }
             }
             runs.removeAll(keepingCapacity: true)
-            if rendered.hasPrefix("|") { rendered = rendered.replacingOccurrences(of: "\u{2028}", with: "<br>") }
+            // Apple's writer serializes attributed hard breaks as U+2028.
+            // Keep table breaks canonical and prose/list breaks as Markdown.
+            rendered = rendered.replacingOccurrences(of: "\u{2028}", with: rendered.hasPrefix("|") ? "<br>" : "  \n")
             let trimmed = rendered.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 // Leading indentation carries nested list content columns.

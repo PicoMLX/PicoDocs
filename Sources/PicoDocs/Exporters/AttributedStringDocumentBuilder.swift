@@ -104,7 +104,7 @@ enum AttributedStringDocumentBuilder {
                 let marker = String(repeating: " ", count: indent + (item.continuation ? (widths[item.level] ?? visible.count) : 0)) + (item.continuation ? "" : visible)
                 if !item.continuation { widths[item.level] = visible.count }
                 output.append(NSAttributedString(string: marker, attributes: [.font: bodyFont()]))
-                output.append(inline(item.text, escapeLiterals: preserveBlockMarkers))
+                output.append(inline(item.text, escapeLiterals: preserveBlockMarkers, hardBreakIndent: preserveBlockMarkers ? String(repeating: " ", count: marker.count) : ""))
                 output.append(NSAttributedString(string: "\n"))
             }
 
@@ -161,13 +161,13 @@ enum AttributedStringDocumentBuilder {
     }
 
 
-    private static func inline(_ markdown: String, size: CGFloat = baseSize, bold: Bool = false, italic: Bool = false, escapeLiterals: Bool = false) -> NSAttributedString {
+    private static func inline(_ markdown: String, size: CGFloat = baseSize, bold: Bool = false, italic: Bool = false, escapeLiterals: Bool = false, hardBreakIndent: String = "") -> NSAttributedString {
         let result = NSMutableAttributedString()
-        render(MarkdownInlineParser.parse(markdown), into: result, size: size, bold: bold, italic: italic, link: nil, escapeLiterals: escapeLiterals)
+        render(MarkdownInlineParser.parse(markdown), into: result, size: size, bold: bold, italic: italic, link: nil, escapeLiterals: escapeLiterals, hardBreakIndent: hardBreakIndent)
         return result
     }
 
-    private static func render(_ nodes: [MarkdownInline], into output: NSMutableAttributedString, size: CGFloat, bold: Bool, italic: Bool, link: String?, escapeLiterals: Bool = false) {
+    private static func render(_ nodes: [MarkdownInline], into output: NSMutableAttributedString, size: CGFloat, bold: Bool, italic: Bool, link: String?, escapeLiterals: Bool = false, hardBreakIndent: String = "") {
         func escaped(_ text: String) -> String {
             // The reader already escapes hyperlink labels before adding Markdown.
             guard escapeLiterals, link == nil else { return text }
@@ -178,16 +178,16 @@ enum AttributedStringDocumentBuilder {
             case .text(let s):
                 output.append(NSAttributedString(string: escaped(s), attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
             case .lineBreak(let hard):
-                output.append(NSAttributedString(string: hard ? "\n" : " ", attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
+                output.append(NSAttributedString(string: hard ? (escapeLiterals ? "\u{2028}" : "\n") + hardBreakIndent : " ", attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
             case .code(let s):
                 let text = escapeLiterals && link == nil ? tableMarkup([.code(s)]) : s
                 output.append(NSAttributedString(string: text, attributes: attributes(size: size, bold: bold, italic: italic, monospace: true, link: link)))
             case .strong(let children):
-                render(children, into: output, size: size, bold: true, italic: italic, link: link, escapeLiterals: escapeLiterals)
+                render(children, into: output, size: size, bold: true, italic: italic, link: link, escapeLiterals: escapeLiterals, hardBreakIndent: hardBreakIndent)
             case .emphasis(let children):
-                render(children, into: output, size: size, bold: bold, italic: true, link: link, escapeLiterals: escapeLiterals)
+                render(children, into: output, size: size, bold: bold, italic: true, link: link, escapeLiterals: escapeLiterals, hardBreakIndent: hardBreakIndent)
             case .link(let label, let destination):
-                render(label, into: output, size: size, bold: bold, italic: italic, link: destination, escapeLiterals: escapeLiterals)
+                render(label, into: output, size: size, bold: bold, italic: italic, link: destination, escapeLiterals: escapeLiterals, hardBreakIndent: hardBreakIndent)
             case .image:
                 output.append(NSAttributedString(string: escaped(node.plainText), attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
             case .footnoteReference(let id):

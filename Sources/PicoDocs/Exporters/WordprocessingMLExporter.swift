@@ -202,6 +202,25 @@ public struct WordprocessingMLExporter: DocumentExporter {
         return ImageIndex(byPath: byPath, byBasename: byBasename)
     }
 
+    /// Reserve a conservative serialized size before escaping drawing strings.
+    /// The fixed markup is below 1 KiB, and attribute escaping expands at most
+    /// sixfold. A filename occurs twice; the description occurs once.
+    struct DrawingBudget {
+        private var remaining: Int
+        init(maximumBytes: Int = 16 * 1024 * 1024) { remaining = maximumBytes }
+        mutating func reserve(filename: String, alt: String) throws {
+            let names = filename.utf8.count, description = alt.utf8.count
+            guard remaining >= 1024, names <= (remaining - 1024) / 12 else {
+                throw ExporterError.serializationFailed("DOCX drawing markup exceeds its 16 MiB budget")
+            }
+            let fixed = 1024 + names * 12
+            guard description <= (remaining - fixed) / 6 else {
+                throw ExporterError.serializationFailed("DOCX drawing markup exceeds its 16 MiB budget")
+            }
+            remaining -= fixed + description * 6
+        }
+    }
+
     // MARK: - Builder
 
     /// Accumulates body XML, relationships, and media as blocks are appended.
@@ -224,6 +243,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         private var relCounter = 0
         private var numberingRelAdded = false
         private var drawingCounter = 0
+        private var drawingBudget = DrawingBudget()
         private var externalLinkRelationships: [String: String] = [:]
         private var emittedMediaRel: [String: String] = [:]   // media filename -> relID
         private var nextOrderedNumId = 2                       // 1 is reserved for bullets
@@ -439,6 +459,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         private func checkedImageRun(alt: String, source: String) throws -> String? {
             guard let image = try images.lookup(source), let data = try image.decodedData() else { return nil }
             let filename = image.mediaFilename
+            try drawingBudget.reserve(filename: filename, alt: alt)
             let ext = (filename as NSString).pathExtension.lowercased()
 
             // One media part + one relationship per distinct file; reuse for repeats.

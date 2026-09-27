@@ -10,6 +10,13 @@ struct SpreadsheetProjectionBudget {
         remainingSheets = maximumSheets
     }
 
+    /// Charge decoded physical row records and the duplicate-detection set,
+    /// even when a worksheet has no cells and produces no logical grid.
+    mutating func reservePhysicalRows(_ count: Int) throws {
+        guard count >= 0, count <= 1_048_576, count <= remaining / 128 else { throw PicoDocsError.parsingError }
+        remaining -= count * 128
+    }
+
     mutating func reserveGrid(rows: Int, columns: Int, name: String?) throws {
         // Bound per-sheet package parts, relationships, and section allocations,
         // including worksheets with no cells to charge against the byte budget.
