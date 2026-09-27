@@ -45,7 +45,7 @@ public struct CSVConverter: DocumentConverter {
     /// Serializes rows to canonical RFC 4180 CSV (quoting fields that contain a
     /// comma, quote, or newline), preserving cell values exactly.
     static func serializeCSV(_ rows: [[String]]) -> String {
-        rows.map { row in row.map(csvField).joined(separator: ",") }.joined(separator: "\n")
+        rows.map { row in row == [""] ? "\"\"" : row.map(csvField).joined(separator: ",") }.joined(separator: "\n")
     }
 
     private static func csvField(_ value: String) -> String {

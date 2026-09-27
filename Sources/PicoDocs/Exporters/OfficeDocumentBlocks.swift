@@ -25,6 +25,12 @@ enum OfficeDocumentBlocks {
                     }
                 }
                 if !rows.isEmpty { blocks.append(.table(rows)) }
+                else if csv.isEmpty {
+                    // Legacy carriers serialized a single empty cell as empty CSV.
+                    for block in MarkdownBlockParser.parse(section.markdown) {
+                        if case .table = block { blocks.append(block) }
+                    }
+                }
             } else { pending.append(section.markdown) }
         }
         flush()

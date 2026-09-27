@@ -30,8 +30,12 @@ public struct PPTXExporter: DocumentExporter {
         let count = max(slides.count, 1)
         let effectiveSlides = slides.isEmpty ? [Slide(title: "", body: [])] : slides
 
-        let fragments = MarkdownHeadingAnchors.slugs(effectiveSlides.map(\.title))
-        let fragmentSlides = Dictionary(uniqueKeysWithValues: fragments.enumerated().map { ($0.element, $0.offset + 1) })
+        let headings = effectiveSlides.enumerated().flatMap { index, slide in
+            let titles = (slide.title.isEmpty ? [] : [slide.title]) + slide.body.filter(\.isHeading).map(\.text)
+            return titles.map { (title: $0, slide: index + 1) }
+        }
+        let fragments = MarkdownHeadingAnchors.slugs(headings.map(\.title))
+        let fragmentSlides = Dictionary(uniqueKeysWithValues: zip(fragments, headings.map(\.slide)))
         var pkg = try OOXMLPackageWriter()
         try pkg.addCoreProperties(result)
         try pkg.addXML("[Content_Types].xml", OOXMLPackageWriter.withCoreContentType(Self.contentTypes(slideCount: count)))
@@ -60,6 +64,7 @@ public struct PPTXExporter: DocumentExporter {
         var number: Int = 1
         var level: Int = 0
         var inlines: [MarkdownInline]? = nil
+        var isHeading = false
 
         init(text: String, ordered: Bool? = nil, number: Int = 1, level: Int = 0, inlines: [MarkdownInline]? = nil) {
             self.text = text; self.ordered = ordered; self.number = number; self.level = level; self.inlines = inlines
@@ -131,7 +136,9 @@ public struct PPTXExporter: DocumentExporter {
         for block in blocks {
             switch block {
             case .heading(_, let text):
-                lines.append(Paragraph(markdown: text))
+                var paragraph = Paragraph(markdown: text)
+                paragraph.isHeading = true
+                lines.append(paragraph)
             case .paragraph(let text):
                 lines.append(Paragraph(markdown: text, normalizeLineBreaks: true))
             case .list(let list):

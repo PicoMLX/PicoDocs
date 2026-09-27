@@ -8,6 +8,68 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func emptyCSVCellSurvivesOfficeProjection() async throws {
+        let converted = try await PicoDocsEngine.convert(data: Data("\"\"".utf8), filename: "empty.csv")
+        let legacy = ConverterResult(sections: [.init(kind: .table, markdown: "|  |\n| --- |", metadata: ["csv": ""])])
+        for result in [converted, legacy] {
+            #expect(OfficeDocumentBlocks.parse(result).contains { if case .table(let rows) = $0 { return rows == [[""]] }; return false })
+            #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains("<w:tbl>"))
+        }
+        #expect(CSVConverter.parseCSV(CSVConverter.serializeCSV([[""]])) == [[""]])
+        #expect(OfficeDocumentBlocks.parse(ConverterResult(sections: [.init(kind: .table, markdown: "", metadata: ["csv": ""])] )).isEmpty)
+    }
+
+    @Test func slideBodyHeadingsReceiveJumpTargets() throws {
+        let source = "# Start\n[go](#details) [again](#details-1)\n# Other\n### Details\n# Last\n#### Details"
+        let pptx = try PicoDocsEngine.write(markdown: source, to: .pptx)
+        let rels = try xml(pptx, "ppt/slides/_rels/slide1.xml.rels")
+        #expect(rels.contains("Target=\"slide2.xml\""))
+        #expect(rels.contains("Target=\"slide3.xml\""))
+    }
+
+    @Test func tableLinkLabelsRetainHardBreaks() throws {
+        let result = ConverterResult(sections: [.init(markdown: "| [first<br>second](https://example.com) |\n| --- |")])
+        #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains("<w:br/>"))
+        #expect(try xml(PicoDocsEngine.write(result, to: .pptx), "ppt/slides/slide1.xml").contains("<a:br/>"))
+        #expect(try xml(PicoDocsEngine.write(result, to: .xlsx), "xl/worksheets/sheet1.xml").contains("first\nsecond"))
+        #if canImport(AppKit)
+        #expect(AttributedStringDocumentBuilder.attributedString(from: result).string.contains("first\nsecond"))
+        #endif
+        #expect(MarkdownInlineParser.parse("[`<br>`](url)", tableCell: true).plainText == "<br>")
+        #expect(MarkdownInlineParser.parse(#"[\<br>](url)"#, tableCell: true).plainText == "<br>")
+    }
+
+    @Test func underscoreRulesInterruptParagraphs() throws {
+        let blocks = MarkdownBlockParser.parse("paragraph\n___")
+        #expect(blocks.count == 2)
+        #expect(blocks.contains { if case .rule = $0 { return true }; return false })
+        #expect(try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: "paragraph\n___")]), to: .html).contains("<hr>"))
+    }
+
+    @Test func markerlessWordParagraphRemainsListContinuation() async throws {
+        let numbering = "<w:numbering xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:abstractNum w:abstractNumId=\"0\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:numFmt w:val=\"none\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num></w:numbering>"
+        func paragraph(_ text: String, _ level: Int) -> String { "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"\(level)\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>\(text)</w:t></w:r></w:p>" }
+        let document = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>" + paragraph("Parent", 0) + paragraph("Continuation", 1) + paragraph("Next", 0) + "</w:body></w:document>"
+        let data = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "list.docx")
+        let markdown = result.sections.map(\.markdown).joined(separator: "\n")
+        #expect(markdown.contains("1. Parent\n\n   Continuation\n2. Next"))
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("Continuation")); #expect(!html.contains("</ol>\n<p>Continuation"))
+        let pptx = try xml(PicoDocsEngine.write(result, to: .pptx), "ppt/slides/slide1.xml")
+        #expect(pptx.contains("<a:buNone/>")); #expect(pptx.contains("Continuation"))
+    }
+
+    @Test func escapedFootnoteIDsMatchReferencesAndDefinitions() throws {
+        let result = ConverterResult(sections: [.init(markdown: #"Claim[^a\*b]"# + "\n\n" + #"[^a\*b]: Note"#)])
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == "Claim[1]\n\n[1] Note")
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("href=\"#fn-a*b\"")); #expect(html.contains("id=\"fn-a*b\""))
+        let literal = ConverterResult(sections: [.init(markdown: #"\[^a\*b] `[^a\*b]`"# + "\n\n" + #"[^a\*b]: Note"#)])
+        #expect(!(try DocumentRenderer.render(literal, to: .html)).contains("<sup"))
+    }
+
+
     @Test func publicWorksheetNamesProjectIntoOfficeDocuments() throws {
         for csv: String? in [nil, "value"] {
             let result = ConverterResult(sections: [.init(kind: .sheet, markdown: "", sheetName: "Template", metadata: csv.map { ["csv": $0] } ?? [:])])

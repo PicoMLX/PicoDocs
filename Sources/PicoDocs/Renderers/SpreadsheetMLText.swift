@@ -12,9 +12,11 @@ enum SpreadsheetMLText {
         }.joined()
     }
 
+    private static let pattern = try! NSRegularExpression(pattern: "_x([0-9A-Fa-f]{4})_")
+
     static func decode(_ text: String) -> String {
+        guard text.contains("_x") else { return text }
         let ns = text as NSString
-        let pattern = try! NSRegularExpression(pattern: "_x([0-9A-Fa-f]{4})_")
         var units: [UInt16] = [], offset = 0
         for match in pattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
             units += ns.substring(with: NSRange(location: offset, length: match.range.location - offset)).utf16

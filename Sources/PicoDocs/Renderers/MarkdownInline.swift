@@ -129,7 +129,7 @@ enum MarkdownInlineParser {
 
             // Image: ![alt](dest)
             if c == "!", i + 1 < chars.count, chars[i + 1] == "[",
-               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: labelCloses[i + 1], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth) {
+               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: labelCloses[i + 1], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth, tableCell: tableCell) {
                 append(parsed.node)
                 i = parsed.next
                 continue
@@ -137,7 +137,7 @@ enum MarkdownInlineParser {
 
             if c == "[" {
                 // Link: [label](dest)
-                if let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: labelCloses[i], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth) {
+                if let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: labelCloses[i], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth, tableCell: tableCell) {
                     append(parsed.node)
                     i = parsed.next
                     continue
@@ -188,7 +188,7 @@ enum MarkdownInlineParser {
     /// link, the `!` for an image). Supports CommonMark angle-bracket destinations
     /// `(<url with spaces>)` that `WordConverter` emits. Returns the node and the
     /// index just past the closing `)`, or nil if the syntax doesn't match.
-    private static func parseLinkOrImage(_ chars: [Character], from: Int, isImage: Bool, labelEnd: Int?, parenCloses: [Int: Int], nextAngle: [Int?], depth: Int) -> (node: MarkdownInline, next: Int)? {
+    private static func parseLinkOrImage(_ chars: [Character], from: Int, isImage: Bool, labelEnd: Int?, parenCloses: [Int: Int], nextAngle: [Int?], depth: Int, tableCell: Bool) -> (node: MarkdownInline, next: Int)? {
         let bracket = isImage ? from + 1 : from
         guard bracket < chars.count, chars[bracket] == "[" else { return nil }
         // Find the label's closing `]`, skipping backslash-escaped delimiters:
@@ -234,7 +234,7 @@ enum MarkdownInlineParser {
         }
         guard cursor < chars.count, chars[cursor] == ")" else { return nil }
         let labelText = String(chars[(bracket + 1)..<labelEnd])
-        let label = parse(labelText, depth: depth + 1)
+        let label = parse(labelText, depth: depth + 1, tableCell: tableCell)
         func containsLink(_ nodes: [MarkdownInline]) -> Bool {
             nodes.contains { node in
                 switch node {

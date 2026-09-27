@@ -140,14 +140,15 @@ public struct WordConverter: DocumentConverter {
             case "w:p":
                 if let markdown = renderParagraph(element, relationships: relationships, numbering: numbering), !markdown.isEmpty {
                     let marker = MarkdownBlockParser.listMarker(markdown.trimmingCharacters(in: .whitespaces))
-                    let identity = marker == nil ? nil : numbering?.lastParagraphList
-                    let joins = identity.map { $0.level > 0 || $0.instance == rootListInstance } ?? (marker != nil && marker == previousList)
+                    let continuation = numbering?.lastParagraphIsContinuation == true
+                    let identity = marker == nil && !continuation ? nil : numbering?.lastParagraphList
+                    let joins = identity.map { continuation ? $0.instance == rootListInstance : ($0.level > 0 || $0.instance == rootListInstance) } ?? (marker != nil && marker == previousList)
                     if joins, previousList != nil, !blocks.isEmpty {
-                        blocks[blocks.count - 1] += "\n" + markdown
+                        blocks[blocks.count - 1] += (continuation ? "\n\n" : "\n") + markdown
                     } else { blocks.append(markdown) }
-                    previousList = marker
+                    if !continuation { previousList = marker }
                     if let identity, identity.level == 0 { rootListInstance = identity.instance }
-                    if marker == nil { rootListInstance = nil }
+                    if marker == nil && !continuation { rootListInstance = nil }
                 }
             case "w:tbl":
                 previousList = nil

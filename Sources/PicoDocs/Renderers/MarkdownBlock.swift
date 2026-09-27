@@ -32,6 +32,8 @@ enum MarkdownBlock: Equatable {
 /// (`parseTableRow`, `isTableSeparatorRow`, …) are `internal` because the
 /// renderer's CSV path and the exporters reuse them.
 enum MarkdownBlockParser {
+    private static func isRule(_ text: String) -> Bool { ["---", "***", "___"].contains(text) }
+
 
     static func normalizedLineEndings(_ text: String) -> String {
         text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
@@ -61,7 +63,7 @@ enum MarkdownBlockParser {
                 continue
             }
 
-            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+            if isRule(trimmed) {
                 blocks.append(.rule); i += 1; continue
             }
 
@@ -108,7 +110,7 @@ enum MarkdownBlockParser {
             while i < lines.count {
                 let candidate = lines[i].trimmingCharacters(in: .whitespaces)
                 if isBlank(lines[i]) || fence(candidate) != nil || candidate.hasPrefix("|")
-                    || candidate.hasPrefix(">") || candidate == "---" || candidate == "***"
+                    || candidate.hasPrefix(">") || isRule(candidate)
                     || headingMatch(candidate) != nil || listMarker(candidate) != nil {
                     break
                 }
