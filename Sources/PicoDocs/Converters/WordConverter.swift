@@ -408,17 +408,16 @@ public struct WordConverter: DocumentConverter {
     }
 
     private static func escapeCanonicalLabel(_ text: String) -> String {
-        var output = "", index = text.startIndex
-        while index < text.endIndex {
-            let next = text.index(after: index)
-            if text[index] == "\\", next < text.endIndex {
-                output.append(text[index]); output.append(text[next]); index = text.index(after: next)
-            } else {
-                if text[index] == "[" || text[index] == "]" { output.append("\\") }
-                output.append(text[index]); index = next
+        // Code content is literal: label escapes belong only to the surrounding Markdown.
+        MarkdownTableCell.mapCodeSpans(text, code: { $0 }) { plain in
+            var output = "", escaped = false
+            for scalar in plain.unicodeScalars {
+                if !escaped, scalar == "[" || scalar == "]" { output.append("\\") }
+                output.unicodeScalars.append(scalar)
+                if escaped { escaped = false } else { escaped = scalar == "\\" }
             }
+            return output
         }
-        return output
     }
 
     private static func escapeLinkLabel(_ text: String) -> String {

@@ -156,7 +156,7 @@ public enum PicoDocsEngine {
                 reference = generated
             }
             guard let reference else { continue }
-            let alt = MarkdownBlockParser.normalizedLineEndings(section.title ?? (reference as NSString).lastPathComponent).replacingOccurrences(of: "\n", with: " ")
+            let alt = MarkdownBlockParser.normalizedLineEndings(section.title.flatMap { $0.isEmpty ? nil : $0 } ?? (reference as NSString).lastPathComponent).replacingOccurrences(of: "\n", with: " ")
             refs[index] = DocumentSection(
                 kind: .body,
                 markdown: "![\(Self.escapeMarkdown(alt, "\\`*_{}[]<>"))](<\(Self.escapeMarkdown(reference, "\\<>"))>)",

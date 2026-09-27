@@ -8,6 +8,91 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func invalidExactImageDoesNotFallBackToOtherDirectory() throws {
+        let images: [DocumentSection] = [
+            .init(kind: .image, markdown: "", sourcePath: "a/logo.png", metadata: ["base64": "invalid", "mimeType": "image/png"]),
+            .init(kind: .image, markdown: "", sourcePath: "b/logo.png", metadata: ["base64": "AQID", "mimeType": "image/png"])
+        ]
+        let exact = try PicoDocsEngine.write(ConverterResult(sections: [.init(markdown: "![Missing](a/logo.png)")] + images), to: .docx)
+        let archive = try #require(Archive(data: exact, accessMode: .read))
+        #expect(!archive.contains { $0.path.hasPrefix("word/media/") })
+        #expect(try xml(exact, "word/document.xml").contains("Missing"))
+        let bare = try PicoDocsEngine.write(ConverterResult(sections: [.init(markdown: "![Found](logo.png)")] + images), to: .docx)
+        #expect(try #require(Archive(data: bare, accessMode: .read)).contains { $0.path.hasPrefix("word/media/") })
+    }
+
+    @Test func emptyImageTitleUsesFilenameInTextOnlyOfficeProjections() throws {
+        let result = ConverterResult(sections: [.init(title: "", kind: .image, markdown: "", sourcePath: "photo.png", metadata: ["base64": "AQID", "mimeType": "image/png"])])
+        for (format, path) in [(ExportableFileType.xlsx, "xl/worksheets/sheet1.xml"), (.pptx, "ppt/slides/slide1.xml")] {
+            #expect(try xml(PicoDocsEngine.write(result, to: format), path).contains("photo.png"))
+        }
+    }
+
+    @Test func XLSXPreservesHorizontalRuleRows() async throws {
+        for source in ["---", "Before\n\n---\n\nAfter"] {
+            let data = try PicoDocsEngine.write(markdown: source, to: .xlsx)
+            let read = try await PicoDocsEngine.convert(data: data, filename: "rules.xlsx")
+            let csv = try #require(read.sections.first?.metadata["csv"])
+            #expect(CSVConverter.parseCSV(csv) == (source == "---" ? [["---"]] : [["Before"], ["---"], ["After"]]))
+        }
+    }
+
+    @Test func emptySheetsHaveACumulativeCountLimit() throws {
+        var budget = SpreadsheetProjectionBudget(maximumSheets: 2)
+        try budget.reserveGrid(rows: 0, columns: 0, name: "A")
+        try budget.reserveGrid(rows: 0, columns: 0, name: "B")
+        #expect(throws: PicoDocsError.parsingError) { try budget.reserveGrid(rows: 0, columns: 0, name: "C") }
+        let result = ConverterResult(sections: Array(repeating: .init(kind: .sheet, markdown: ""), count: 4097))
+        #expect(throws: ExporterError.self) { try PicoDocsEngine.write(result, to: .xlsx) }
+    }
+
+    @Test func linkedDOCXCodePreservesLiteralBracketsAndBackslashes() async throws {
+        for source in ["[`[x]`](https://example.test)", #"[before `[\x]` after](https://example.test)"#, #"[**`[x]`**](https://example.test)"#] {
+            var result = ConverterResult(sections: [.init(markdown: source)])
+            for _ in 0..<2 {
+                result = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(result, to: .docx), filename: "code.docx")
+                #expect(result.markdown() == source)
+            }
+        }
+    }
+
+    @Test func OfficeMetadataIsBudgetedBeforeEscaping() throws {
+        let large = String(repeating: "&", count: 10 * 1024 * 1024)
+        for result in [ConverterResult(title: large, sections: [.init(markdown: "Body")]), ConverterResult(author: large, sections: [.init(markdown: "Body")])] {
+            for format in [ExportableFileType.docx, .xlsx, .pptx, .rtf] {
+                #expect(throws: ExporterError.self) { try PicoDocsEngine.write(result, to: format) }
+            }
+        }
+        let small = ConverterResult(title: "A & B", author: "C < D", sections: [.init(markdown: "Body")])
+        for format in [ExportableFileType.docx, .xlsx, .pptx] {
+            let properties = try xml(PicoDocsEngine.write(small, to: format), "docProps/core.xml")
+            #expect(properties.contains("A &amp; B")); #expect(properties.contains("C &lt; D"))
+        }
+    }
+
+    @Test func manyPPTXSoftBreaksNormalizeWithoutRepeatedPrefixCopies() throws {
+        let count = 100_000
+        let source = Array(repeating: "x", count: count).joined(separator: "\n")
+        let slide = try xml(PicoDocsEngine.write(markdown: source, to: .pptx), "ppt/slides/slide1.xml")
+        #expect(slide.contains(Array(repeating: "x", count: count).joined(separator: " ")))
+    }
+
+    @Test func importedDenseEmptyGridsFitTheWriterStorageBudget() async throws {
+        let seed = try PicoDocsEngine.write(markdown: "x", to: .xlsx)
+        let archive = try #require(Archive(data: seed, accessMode: .read))
+        var files: [String: Data] = [:]
+        for entry in archive {
+            var bytes = Data()
+            _ = try archive.extract(entry) { bytes.append($0) }
+            files[entry.path] = bytes
+        }
+        // One sparse coordinate still requires a 1,000 by 1,000 dense projection.
+        files["xl/worksheets/sheet1.xml"] = Data(#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1000"><c r="ALL1000" t="inlineStr"><is><t></t></is></c></row></sheetData></worksheet>"#.utf8)
+        let data = try PagesConverterTests.makeZip(files.map { (name: $0.key, data: Array($0.value)) })
+        await #expect(throws: PicoDocsError.parsingError) { try await PicoDocsEngine.convert(data: data, filename: "dense.xlsx") }
+    }
+
+
     @Test func generatedWordPartsEnforceReaderCompatibleLimits() throws {
         var package = try OOXMLPackageWriter()
         for (path, limit) in [("word/document.xml", 32 * 1024 * 1024), ("word/numbering.xml", 8 * 1024 * 1024), ("word/_rels/document.xml.rels", 32 * 1024 * 1024)] {

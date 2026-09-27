@@ -198,6 +198,10 @@ public struct PPTXExporter: DocumentExporter {
 
     private static func normalizedBreaks(_ nodes: [MarkdownInline]) -> [MarkdownInline] {
         var result: [MarkdownInline] = []
+        var textBuffer = ""
+        func flushText() {
+            if !textBuffer.isEmpty { result.append(.text(textBuffer)); textBuffer = "" }
+        }
         for node in nodes {
             let normalized: MarkdownInline
             switch node {
@@ -207,10 +211,10 @@ public struct PPTXExporter: DocumentExporter {
             case .link(let label, let destination): normalized = .link(label: normalizedBreaks(label), destination: destination)
             default: normalized = node
             }
-            if case .text(let text) = normalized, case .text(let previous)? = result.last {
-                result[result.count - 1] = .text(previous + text)
-            } else { result.append(normalized) }
+            if case .text(let text) = normalized { textBuffer.append(contentsOf: text) }
+            else { flushText(); result.append(normalized) }
         }
+        flushText()
         return result
     }
 

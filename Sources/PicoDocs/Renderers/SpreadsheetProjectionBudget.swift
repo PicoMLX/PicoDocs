@@ -3,10 +3,18 @@ import Foundation
 /// Shared reader/writer budget for decoded cells and both text projections.
 struct SpreadsheetProjectionBudget {
     private var remaining: Int
+    private var remainingSheets: Int
 
-    init(maximumBytes: Int = 64 * 1024 * 1024) { remaining = maximumBytes }
+    init(maximumBytes: Int = 64 * 1024 * 1024, maximumSheets: Int = 4096) {
+        remaining = maximumBytes
+        remainingSheets = maximumSheets
+    }
 
     mutating func reserveGrid(rows: Int, columns: Int, name: String?) throws {
+        // Bound per-sheet package parts, relationships, and section allocations,
+        // including worksheets with no cells to charge against the byte budget.
+        guard remainingSheets > 0 else { throw PicoDocsError.parsingError }
+        remainingSheets -= 1
         // Even an empty worksheet retains a section, names and package metadata.
         let overhead = (name?.utf8.count ?? 0) + 16
         guard overhead <= remaining else { throw PicoDocsError.parsingError }

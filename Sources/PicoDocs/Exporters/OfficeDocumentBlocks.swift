@@ -14,6 +14,12 @@ enum OfficeDocumentBlocks {
             guard bytes <= remaining else { throw ExporterError.serializationFailed("Office projection exceeds the supported 64 MiB budget") }
             remaining -= bytes
         }
+        for value in [result.title, result.author].compactMap({ $0 }) {
+            guard value.utf8.count <= remaining / 7 else {
+                throw ExporterError.serializationFailed("Office metadata exceeds the supported byte budget")
+            }
+            try charge(value.utf8.count * 7)
+        }
         for section in result.sections where section.kind != .image {
             if let title = section.title { try charge(title.utf8.count * 7) }
             if let csv = section.metadata["csv"], !csv.isEmpty {

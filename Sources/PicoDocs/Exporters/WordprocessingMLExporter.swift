@@ -129,8 +129,8 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 return (match, false)
             }
             if let exact = byPath[source] {
-                let result = try unique(exact)
-                if result.ambiguous || result.image != nil { return result.image }
+                // A registered full path is authoritative, even if its payload is invalid.
+                return try unique(exact).image
             }
             return try unique(byBasename[WordprocessingMLExporter.portableBasename(source)] ?? []).image
         }

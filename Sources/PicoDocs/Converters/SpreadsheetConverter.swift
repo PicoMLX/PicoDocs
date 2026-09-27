@@ -73,6 +73,8 @@ public struct SpreadsheetConverter: DocumentConverter {
         // Reserve both serialized projections plus the decoded cell storage before
         // expanding repeated shared strings. The budget is shared by all sheets.
         try projectionBudget.reserveGrid(rows: rowCount, columns: columnCount, name: sheetName)
+        // Imported grids must fit the same retained storage used when re-exported.
+        try projectionBudget.reserveWriterStorage(rows: rowCount, columns: columnCount)
         var grid: [Int: [String]] = [:]
         for row in rows {
             let rowIndex = Int(clamping: row.reference)

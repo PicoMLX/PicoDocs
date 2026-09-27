@@ -140,7 +140,7 @@ public struct XLSXExporter: DocumentExporter {
             case .blockquote(let lines):
                 for line in lines { rows.append([plain(line)]) }
             case .rule:
-                continue
+                rows.append(["---"])
             }
         }
         return rows
