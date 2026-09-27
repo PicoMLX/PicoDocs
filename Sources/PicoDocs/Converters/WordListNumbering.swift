@@ -353,11 +353,10 @@ final class WordListNumbering {
             return cardinal
         }
         if format == "ordinal" {
-            let lastTwo = abs(value % 100)
-            let suffix: String
-            if (11...13).contains(lastTwo) { suffix = "th" }
-            else { suffix = [1: "st", 2: "nd", 3: "rd"][abs(value % 10)] ?? "th" }
-            return String(value) + suffix
+            let formatter = NumberFormatter()
+            formatter.locale = Locale(identifier: language)
+            formatter.numberStyle = .ordinal
+            return formatter.string(from: NSNumber(value: value)) ?? String(value)
         }
         if format == "decimalEnclosedCircle", (1...20).contains(value) {
             return String(UnicodeScalar(0x245F + value)!)

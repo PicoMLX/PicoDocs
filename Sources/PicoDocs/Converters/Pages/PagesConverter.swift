@@ -100,14 +100,14 @@ public struct PagesConverter: DocumentConverter {
                 // Render headings even on the fallback path; degrade to plain text
                 // extraction only if the style-aware renderer yields nothing.
                 let rendered = IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams)
-                bodyText = rendered.isEmpty ? IWAArchive.text(in: documentStream) : rendered
+                bodyText = rendered.isEmpty ? MarkdownLiteral.escapeBackslashes(IWAArchive.text(in: documentStream)) : rendered
             } else {
                 var firstText = ""
                 for entry in streams.sorted(by: { $0.name < $1.name }) {
                     let extracted = IWAArchive.text(in: entry.stream)
                     if !extracted.isEmpty { firstText = extracted; break }
                 }
-                bodyText = firstText
+                bodyText = MarkdownLiteral.escapeBackslashes(firstText)
             }
             let cleaned = Self.normalize(bodyText)
             if !cleaned.isEmpty {

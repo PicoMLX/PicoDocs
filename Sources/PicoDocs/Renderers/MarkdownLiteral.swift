@@ -4,7 +4,7 @@ import Foundation
 enum MarkdownLiteral {
     /// Verbatim converters predate canonical Markdown escaping. Protect their
     /// literal backslashes before the renderer decodes generated escapes.
-    static func escapeBackslashes(_ text: String) -> String {
+    static func escapeBackslashes(_ text: String, separateParagraphLines: Bool = false) -> String {
         var inFence = false
         var prose = ""
         var output = ""
@@ -32,6 +32,7 @@ enum MarkdownLiteral {
             } else {
                 prose += line
                 if index < lines.count - 1 { prose += "\n" }
+                if separateParagraphLines { flushProse() }
             }
         }
         flushProse()
@@ -62,8 +63,10 @@ enum MarkdownLiteral {
 
     /// Count added backslashes while retaining source
     /// UTF-16 indices, so styled runs can share whole-document code context.
-    static func backslashEscapeCounts(_ text: String) -> [Int] {
-        let source = Array(text.utf16), escaped = Array(escapeBackslashes(text).utf16)
+    static func backslashEscapeCounts(_ text: String, paragraphSeparators: Set<UInt16> = []) -> [Int] {
+        let source = Array(text.utf16)
+        let context = String(decoding: source.map { paragraphSeparators.contains($0) ? 0x0A : $0 }, as: UTF16.self)
+        let escaped = Array(escapeBackslashes(context, separateParagraphLines: !paragraphSeparators.isEmpty).utf16)
         var counts = Array(repeating: 0, count: source.count)
         var i = 0, j = 0
         while i < source.count {
