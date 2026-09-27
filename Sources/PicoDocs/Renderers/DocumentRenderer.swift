@@ -275,7 +275,11 @@ public enum DocumentRenderer {
             if !inFence, let (id, first) = parseFootnoteDefinition(dropLeadingSpaces(lines[i], max: 3)) {
                 // Preserve prose boundaries without splitting an enclosing list.
                 let inList = lists.last.map { indentWidth(lines[i]) >= $0.content } ?? false
-                if !inList, !bodyLines.isEmpty, bodyLines.last != "" { bodyLines.append("") }
+                if inList, let container = lists.last {
+                    // End inline code context inside the item without a blank line,
+                    // which would change continuation indentation or split the list.
+                    bodyLines.append(String(repeating: " ", count: container.content) + MarkdownLiteral.listRestartBoundary)
+                } else if !bodyLines.isEmpty, bodyLines.last != "" { bodyLines.append("") }
                 var textLines = [first]
                 i += 1
                 while i < lines.count {                       // indented continuation lines

@@ -4,6 +4,54 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func extractedListFootnotesKeepInlineBoundaries() async throws {
+        for marker in ["-", "1."] {
+            let indent = marker == "-" ? "  " : "   "
+            let source = marker + " `open\n" + indent + "[^x]: note\n  close \\* `end\n" + (marker == "-" ? "- next" : "2. next")
+            let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "literal.txt")
+            let plain = try DocumentRenderer.render(result, to: .plaintext)
+            #expect(plain.contains(#"close \* `end"#))
+            #expect(!plain.contains(#"\\\*"#))
+            let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+            #expect(try html.getElementsByTag("code").isEmpty())
+            #expect(try html.getElementsByTag(marker == "-" ? "ul" : "ol").count == 1)
+            #expect(try html.getElementsByTag("li").count == 2)
+        }
+    }
+
+    @Test func literalRestartMarkerSurvivesSourceConverters() async throws {
+        let marker = MarkdownLiteral.listRestartBoundary
+        for source in [marker, "before\n" + marker + "\nafter", "  " + marker + "  "] {
+            let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "literal.txt")
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(marker))
+            #expect(try DocumentRenderer.render(result, to: .csv).contains(marker))
+            let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+            #expect(try html.text().contains(marker))
+        }
+        let rtf = "{\\rtf1\\ansi \\b <\\b0 !-- PicoDocs:list-restart -->}"
+        let inputs = [("literal.rtf", Data(rtf.utf8)), ("literal.pages", PagesConverterTests.makePagesFile(paragraphs: [marker]))]
+        for (filename, data) in inputs {
+            let result = try await PicoDocsEngine.convert(data: data, filename: filename)
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(marker))
+        }
+        let fenced = "```\n" + marker + "\n```"
+        #expect(MarkdownLiteral.escapeBackslashes(fenced) == fenced)
+    }
+
+    @Test func restartMarkerEscapesRetainSectionAndRunOffsets() throws {
+        let marker = MarkdownLiteral.listRestartBoundary
+        let source = "😀\n  " + marker + "\n\\*"
+        let projection = MarkdownLiteral.escapeProjection(source, boundaries: [5, 6])
+        #expect(projection.before == [5])
+        let sections: [DocumentSection] = [.init(markdown: "intro"), .init(markdown: source)]
+        let escaped = MarkdownLiteral.escapeSectionBackslashes(sections)
+        #expect(escaped[0].markdown == "intro")
+        #expect(escaped[1].markdown == MarkdownLiteral.escapeBackslashes(source))
+        let plain = try DocumentRenderer.render(ConverterResult(sections: escaped), to: .plaintext)
+        #expect(plain.contains(marker)); #expect(plain.contains(#"\*"#))
+    }
+
+
     @Test func nativePunctuationEscapesOperateOnUnicodeScalars() async throws {
         for mark in ["\u{0301}", "\u{FE0F}"] {
             let source = "*" + mark + "x*" + mark

@@ -77,6 +77,12 @@ enum MarkdownLiteral {
             } else if inFence {
                 output += line
                 if index < lines.count - 1 { output += "\n" }
+            } else if line.trimmingCharacters(in: .whitespaces) == listRestartBoundary {
+                // Literal imports must not accidentally create an internal block boundary.
+                flushProse()
+                let content = line.drop { $0 == " " || $0 == "\t" }
+                output += String(line[..<content.startIndex]) + "\\" + content
+                if index < lines.count - 1 { output += "\n" }
             } else if structure.trimmingCharacters(in: .whitespaces).isEmpty {
                 // Inline spans stop at paragraph boundaries; fences retain state.
                 flushProse()
@@ -122,6 +128,11 @@ enum MarkdownLiteral {
     /// Count added backslashes while retaining source
     /// UTF-16 indices, so styled runs can share whole-document code context.
     static func backslashEscapeCounts(_ text: String, paragraphSeparators: Set<UInt16> = [], softSeparators: Set<UInt16> = [], structuralText: String? = nil) -> [Int] {
+        escapeProjection(text, boundaries: [], paragraphSeparators: paragraphSeparators, softSeparators: softSeparators, structuralText: structuralText).after
+    }
+
+    /// Keep inserted escapes beside their source character across style and link runs.
+    static func escapeProjection(_ text: String, boundaries: Set<Int>, paragraphSeparators: Set<UInt16> = [], softSeparators: Set<UInt16> = [], structuralText: String? = nil) -> (after: [Int], before: Set<Int>) {
         let source = Array(text.utf16)
         // Replacing each separator with one LF preserves UTF-16 source offsets.
         let separators = paragraphSeparators.union(softSeparators)
@@ -134,7 +145,11 @@ enum MarkdownLiteral {
         let escaped = Array(escapeBackslashes(context, paragraphEndLines: paragraphEndLines, structuralText: structuralText).utf16)
         var counts = Array(repeating: 0, count: source.count)
         var i = 0, j = 0
+        var before: Set<Int> = []
         while i < source.count {
+            if source[i] != 0x5C, j < escaped.count, escaped[j] == 0x5C {
+                before.insert(i); j += 1
+            }
             if source[i] == 0x5C {
                 let start = i, escapedStart = j
                 while i < source.count, source[i] == 0x5C { i += 1 }
@@ -148,15 +163,7 @@ enum MarkdownLiteral {
                 }
             } else { i += 1; j += 1 }
         }
-        return counts
-    }
-
-    /// Keep the punctuation escape next to its source character when style or
-    /// link delimiters will be inserted between it and the preceding slash.
-    static func escapeProjection(_ text: String, boundaries: Set<Int>, paragraphSeparators: Set<UInt16> = [], softSeparators: Set<UInt16> = [], structuralText: String? = nil) -> (after: [Int], before: Set<Int>) {
-        var after = backslashEscapeCounts(text, paragraphSeparators: paragraphSeparators, softSeparators: softSeparators, structuralText: structuralText)
-        let source = Array(text.utf16)
-        var before: Set<Int> = []
+        var after = counts
         for offset in boundaries where offset > 0 && offset < source.count {
             if source[offset - 1] == 0x5C, after[offset - 1] >= 2 {
                 after[offset - 1] -= 1
@@ -170,15 +177,16 @@ enum MarkdownLiteral {
     /// section provenance and already-generated table/image Markdown.
     static func escapeSectionBackslashes(_ sections: [DocumentSection]) -> [DocumentSection] {
         var result = sections
-        let counts = backslashEscapeCounts(sections.filter { $0.kind != .image }.map(\.markdown).joined(separator: "\n\n"))
+        let projection = escapeProjection(sections.filter { $0.kind != .image }.map(\.markdown).joined(separator: "\n\n"), boundaries: [])
         var offset = 0
         for index in result.indices where result[index].kind != .image {
             let source = Array(result[index].markdown.utf16)
             if result[index].kind != .table {
                 var units: [UInt16] = []
                 for (local, unit) in source.enumerated() {
+                    if projection.before.contains(offset + local) { units.append(0x5C) }
                     units.append(unit)
-                    units += Array(repeating: 0x5C, count: counts[offset + local])
+                    units += Array(repeating: 0x5C, count: projection.after[offset + local])
                 }
                 result[index].markdown = String(decoding: units, as: UTF16.self)
             }
