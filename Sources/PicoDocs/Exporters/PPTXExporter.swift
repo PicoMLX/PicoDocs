@@ -99,6 +99,7 @@ public struct PPTXExporter: DocumentExporter {
                 if groups.first?.isEmpty == true { groups[0] = unnumbered }
                 else { groups.insert(unnumbered, at: 0) }
             }
+            guard groups.count <= 10_000 else { throw ExporterError.serializationFailed("Slide count exceeds the supported deck size") }
             return groups.map { sections in
                 Slide(title: sections.first(where: { $0.kind == .slide })?.title ?? "",
                       body: sections.flatMap { section in
@@ -119,11 +120,16 @@ public struct PPTXExporter: DocumentExporter {
         var titleInlines: [MarkdownInline]?
         var body: [Paragraph] = []
         var started = false
-        func flush() { if started { slides.append(Slide(title: title, body: body, titleInlines: titleInlines)) } }
+        func flush() throws {
+            if started {
+                guard slides.count < 10_000 else { throw ExporterError.serializationFailed("Slide count exceeds the supported deck size") }
+                slides.append(Slide(title: title, body: body, titleInlines: titleInlines))
+            }
+        }
 
         for block in OfficeDocumentBlocks.parse(result) {
             if case .heading(let level, let text) = block, level <= 2 {
-                flush()
+                try flush()
                 // The title placeholder shows visible text, not Markdown syntax
                 // (`# **Q4** results` -> "Q4 results"), matching the body lines.
                 titleInlines = MarkdownInlineParser.parse(text)
@@ -135,7 +141,7 @@ public struct PPTXExporter: DocumentExporter {
                 body += bodyLines([block])
             }
         }
-        flush()
+        try flush()
         return slides
     }
 

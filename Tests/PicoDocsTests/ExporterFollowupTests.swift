@@ -8,6 +8,15 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func PPTXDeckLimitAppliesToMarkdownAndUnnumberedSlides() throws {
+        let markdown = ConverterResult(sections: [.init(markdown: String(repeating: "# Slide\n\n", count: 10_001))])
+        let unnumbered = ConverterResult(sections: Array(repeating: DocumentSection(kind: .slide, markdown: "Slide"), count: 10_001))
+        let mixed = ConverterResult(sections: [DocumentSection(kind: .slide, markdown: "Last", slideNumber: 10_000), DocumentSection(kind: .slide, markdown: "Unnumbered content")])
+        for result in [markdown, unnumbered, mixed] {
+            #expect(throws: ExporterError.self) { try PicoDocsEngine.write(result, to: .pptx) }
+        }
+    }
+
     #if canImport(AppKit)
     @Test func separateRTFQuoteBlocksStaySeparate() async throws {
         let data = try PicoDocsEngine.write(markdown: "> First\n\n> Second", to: .rtf)
