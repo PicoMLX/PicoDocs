@@ -3,6 +3,45 @@ import Testing
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func footnoteCodeSpansContinueAcrossIndentedBlankParagraphs() async throws {
+        for indent in ["    ", "\t"] {
+            for blank in ["\n", "\n\n", "    \n"] {
+                let source = "See[^x]\n[^x]: `open\n" + blank + indent + #"a\*b `close"#
+                let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "continued-note.txt")
+                for format in [ExportFileType.html, .plaintext] {
+                    let rendered = try DocumentRenderer.render(result, to: format)
+                    #expect(rendered.contains(#"a\*b"#))
+                    #expect(!rendered.contains(#"a\\\*b"#))
+                }
+            }
+            let source = "See[^x]\n[^x]: `open\n\n" + indent + "# " + #"a\*b `close"#
+            let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "continued-heading-note.txt")
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(#"a\*b"#))
+        }
+        let source = "See[^x]\n[^x]: `open\n\noutside " + #"a\*b `close"#
+        let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "ended-note.txt")
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains(#"outside a\*b `close"#))
+    }
+
+    @Test func PagesSoftBreaksClassifyStructuralBoundariesWithoutSplittingPlainCode() async throws {
+        for separator in ["\u{2028}", "\u{000B}", "\u{000C}"] {
+            for marker in ["# heading ", "> quote ", "- item ", "1. item ", "| cell "] {
+                let text = "`open" + separator + marker + #"a\*b `close"#
+                let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makePagesFile(paragraphs: [text]), filename: "soft-structure.pages")
+                for format in [ExportFileType.html, .plaintext] {
+                    #expect(try DocumentRenderer.render(result, to: format).contains(#"a\*b `close"#))
+                }
+            }
+            let text = "`open" + separator + #"a\*b `close"#
+            let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makePagesFile(paragraphs: [text]), filename: "soft-code.pages")
+            for format in [ExportFileType.html, .plaintext] {
+                let rendered = try DocumentRenderer.render(result, to: format)
+                #expect(rendered.contains(#"a\*b"#))
+                #expect(!rendered.contains(#"a\\\*b"#))
+            }
+        }
+    }
+
     @Test func sourceFootnoteInlineContextStopsAtItsUnindentedEnd() async throws {
         for indent in ["", "   "] {
             let source = "See[^x]\n" + indent + "[^x]: `open\noutside " + #"\* `close"#

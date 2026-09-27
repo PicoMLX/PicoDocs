@@ -252,7 +252,7 @@ enum IWATable {
             if units[index] != 0xFFFC && !isStrippedControl(units[index]) { offsets.append(index) }
         }
         let visible = String(decoding: offsets.map { units[$0] }, as: UTF16.self)
-        let projection = MarkdownLiteral.escapeProjection(visible, boundaries: visibleBoundaries, paragraphSeparators: [0x0A, 0x0D, 0x2029])
+        let projection = MarkdownLiteral.escapeProjection(visible, boundaries: visibleBoundaries, paragraphSeparators: [0x0A, 0x0D, 0x2029], softSeparators: [0x2028, 0x0B, 0x0C])
         var after = Array(repeating: 0, count: units.count), before: Set<Int> = []
         for (index, source) in offsets.enumerated() {
             after[source] = projection.after[index]
