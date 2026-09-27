@@ -69,6 +69,8 @@ public struct PowerPointConverter: DocumentConverter {
             try charge(section.markdown); try charge(section.title); try charge(section.sourcePath)
             for (key, value) in section.metadata where key != "base64" { try charge(key); try charge(value) }
         }
+        let properties = Self.coreProperties(archive)
+        try charge(properties.title ?? info.filename); try charge(properties.author)
         let slidePaths = try Self.slidePaths(presentation, archive: archive, presentationPath: presentationPath)
         // Reserve all external image destinations first, including later slides,
         // so embedded references cannot claim an external occurrence's src.
@@ -82,15 +84,17 @@ public struct PowerPointConverter: DocumentConverter {
         }
         let images = ImageCollector(reservedReferences: externalReferences)
         var parts = PartCache(archive: archive)
+        parts.styles.register(presentation)
         for (index, slidePath) in slidePaths.enumerated() {
             try Task.checkCancellation()
             guard let slide = Self.xml(archive, path: slidePath), slide.children().first()?.tagName().lowercased() == "p:sld" else { try archive.check(); throw PicoDocsError.fileCorrupted }
             let relationships = Self.relationships(archive, forPart: slidePath)
             var context = SlideContext(archive: archive, partPath: slidePath, relationships: relationships, images: images)
-            let renderBudget = RenderBudget(maximumBytes: remainingRenderedBytes, archive: archive)
+            let renderBudget = RenderBudget(maximumBytes: remainingRenderedBytes - slidePath.utf8.count, archive: archive)
             context.renderBudget = renderBudget
             context.defaultTextStyle = defaultTextStyle
             context.placeholders = parts.placeholders
+            context.styles = StyleChildCache(shared: parts.styles)
             // Layout and master supply inherited list formatting for placeholders.
             let layoutPath = Self.relatedPart(of: slidePath, type: "/slideLayout", relationships: relationships, archive: archive)
             context.layout = layoutPath.flatMap { parts.document($0, root: "p:sldlayout") }
@@ -102,7 +106,11 @@ public struct PowerPointConverter: DocumentConverter {
             let slideBlocks = (rendered.title.map { [renderBudget.join(["## ", $0])] } ?? []) + rendered.blocks
             let slideText = renderBudget.join(slideBlocks, separator: "\n\n")
             try archive.check()
-            let notesBudget = RenderBudget(maximumBytes: max(0, remainingRenderedBytes - slideText.utf8.count), archive: archive)
+            // Notes survive twice: in Markdown and in metadata. Reserve both copies,
+            // their heading/key/separator, and the already retained section fields.
+            let fixedBytes = slideText.utf8.count + (context.plainTitle?.utf8.count ?? 0) + slidePath.utf8.count
+            let notesOverhead = "### Notes\n\n".utf8.count + "notes".utf8.count + (slideText.isEmpty ? 0 : 2)
+            let notesBudget = RenderBudget(maximumBytes: max(0, remainingRenderedBytes - fixedBytes - notesOverhead) / 2, archive: archive)
             let notes = Self.notes(forSlide: slidePath, relationships: relationships, archive: archive, parts: &parts, renderBudget: notesBudget)
 
             var blocks: [String] = []
@@ -128,8 +136,6 @@ public struct PowerPointConverter: DocumentConverter {
         try archive.check()
         guard sections.contains(where: { $0.kind != .image }) else { throw PicoDocsError.emptyDocument }
 
-        let properties = Self.coreProperties(archive)
-        try charge(properties.title ?? info.filename); try charge(properties.author)
         try archive.check()
         return ConverterResult(
             title: properties.title ?? info.filename,
@@ -174,7 +180,7 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// Speaker notes for a slide, from its notes-slide part's body placeholder.
     static func notes(forSlide slidePath: String, relationships: [String: Relationship], archive: PowerPointPackage, parts: inout PartCache, renderBudget: RenderBudget? = nil) -> String? {
-        let noteRelations = relationships.values.filter { $0.isType("/notesSlide") }
+        let noteRelations = relationshipsOfType("/notesSlide", archive: archive, part: slidePath, map: relationships)
         guard noteRelations.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         guard let relation = noteRelations.first else { return nil }
         guard !relation.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
@@ -188,12 +194,12 @@ public struct PowerPointConverter: DocumentConverter {
                                    images: ImageCollector(), embedsImages: false)
         context.renderBudget = renderBudget
         let notesRels = Self.relationships(archive, forPart: notesPath)
-        let backlinks = notesRels.values.filter { $0.isType("/slide") }
+        let backlinks = relationshipsOfType("/slide", archive: archive, part: notesPath, map: notesRels)
         guard backlinks.count == 1, let backlink = backlinks.first, !backlink.external,
               WordConverter.resolvePartPath(backlink.target, relativeTo: directory(of: notesPath)) == slidePath else {
             archive.fail(PicoDocsError.fileCorrupted); return nil
         }
-        let masters = notesRels.values.filter { $0.isType("/notesMaster") }
+        let masters = relationshipsOfType("/notesMaster", archive: archive, part: notesPath, map: notesRels)
         guard masters.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         if let master = masters.first {
             guard !master.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
@@ -201,6 +207,7 @@ public struct PowerPointConverter: DocumentConverter {
             guard let document = parts.document(path, root: "p:notesmaster") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
             context.master = document
             context.placeholders = parts.placeholders
+            context.styles = StyleChildCache(shared: parts.styles)
         }
         var paragraphs: [String] = []
         func appendNotes(in container: Element, inheritedLink: String? = nil) {
@@ -299,7 +306,7 @@ public struct PowerPointConverter: DocumentConverter {
         var renderedBlockBytes = 0
         mutating func appendBlock(_ text: String, to blocks: inout [String]) {
             if let renderBudget {
-                guard renderBudget.admit(text.utf8.count + (blocks.isEmpty ? 0 : 2), retained: &renderedBlockBytes) else { return }
+                guard renderBudget.admit(text.utf8.count + (blocks.isEmpty && plainTitle == nil ? 0 : 2), retained: &renderedBlockBytes) else { return }
             }
             blocks.append(text)
         }
@@ -312,6 +319,7 @@ public struct PowerPointConverter: DocumentConverter {
         var master: Document?
         var defaultTextStyle: Element?
         var placeholders = PlaceholderCache()
+        var styles = StyleChildCache()
     }
 
     /// Parses each shared part (layouts, masters) once per deck.
@@ -319,6 +327,7 @@ public struct PowerPointConverter: DocumentConverter {
         let archive: PowerPointPackage
         private var documents: [String: Document?] = [:]
         let placeholders = PlaceholderCache()
+        let styles = StyleChildCache()
         private let budget: PowerPointXML.Budget
 
         init(archive: PowerPointPackage, budget: PowerPointXML.Budget = .init()) {
@@ -330,7 +339,7 @@ public struct PowerPointConverter: DocumentConverter {
             if cache, let cached = documents[path] { parsed = cached }
             else {
                 parsed = PowerPointConverter.xml(archive, path: path, budget: cache ? budget : nil)
-                if cache { documents[path] = parsed }
+                if cache { documents[path] = parsed; if let parsed { styles.register(parsed) } }
             }
             guard let parsed, parsed.children().first()?.tagName().lowercased() == root else {
                 archive.fail(PicoDocsError.fileCorrupted)
@@ -349,7 +358,7 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// The part a relationship of `type` (e.g. "/slideLayout") points to.
     static func relatedPart(of part: String, type: String, relationships: [String: Relationship], archive: PowerPointPackage) -> String? {
-        let matches = relationships.values.filter { $0.isType(type) }
+        let matches = relationshipsOfType(type, archive: archive, part: part, map: relationships)
         guard matches.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         guard let relation = matches.first else { return nil }
         guard !relation.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
@@ -420,7 +429,7 @@ public struct PowerPointConverter: DocumentConverter {
                     let text = normalizedWhitespace(context.renderBudget?.join(paragraphs, separator: " ") ?? paragraphs.joined(separator: " "))
                     if title == nil, !text.isEmpty {
                         title = text
-                        let titleBudget = context.renderBudget.map { RenderBudget(maximumBytes: $0.maximumBytes - text.utf8.count - context.renderedBlockBytes, archive: context.archive) }
+                        let titleBudget = context.renderBudget.map { RenderBudget(maximumBytes: $0.maximumBytes - text.utf8.count - 3 - (blocks.isEmpty ? 0 : 2) - context.renderedBlockBytes, archive: context.archive) }
                         let plainParagraphs = selectedParagraphs(in: body).map { paragraph in
                             let fragments = selectedChildren(in: paragraph).map { node in
                                 if node.tagName().lowercased() == "a:br" { return " " }
@@ -430,6 +439,10 @@ public struct PowerPointConverter: DocumentConverter {
                             return titleBudget?.join(fragments) ?? fragments.joined()
                         }
                         context.plainTitle = normalizedWhitespace(titleBudget?.join(plainParagraphs, separator: " ") ?? plainParagraphs.joined(separator: " "))
+                        if let budget = context.renderBudget {
+                            let bytes = 3 + text.utf8.count + (context.plainTitle?.utf8.count ?? 0) + (blocks.isEmpty ? 0 : 2)
+                            guard budget.admit(bytes, retained: &context.renderedBlockBytes) else { return }
+                        }
                         continue
                     }
                     if !text.isEmpty { context.appendBlock(text, to: &blocks) }
@@ -530,15 +543,19 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// The bullet a paragraph-properties element (`a:pPr`, `a:lvlNpPr`) sets, or
     /// nil when it doesn't say (and the next level of inheritance decides).
-    static func bullet(in properties: Element?) -> Bullet? {
+    static func bullet(in properties: Element?, cache: StyleChildCache? = nil) -> Bullet? {
         guard let properties else { return nil }
-        if selectedChild(of: properties, named: "a:bunone") != nil { return .plain }
-        if let number = selectedChild(of: properties, named: "a:buautonum") {
+        func lookup(_ name: String) -> Element? {
+            if let cache { return cache.child(of: properties, named: name) }
+            return selectedChild(of: properties, named: name)
+        }
+        if lookup("a:bunone") != nil { return .plain }
+        if let number = lookup("a:buautonum") {
             let raw = (try? number.attr("startAt")) ?? ""
             let scheme = (try? number.attr("type")) ?? ""
             return .number(startAt: raw.isEmpty ? 1 : (Int(raw) ?? 0), scheme: scheme.isEmpty ? "arabicPeriod" : scheme)
         }
-        if selectedChild(of: properties, named: "a:buchar") != nil || selectedChild(of: properties, named: "a:bublip") != nil {
+        if lookup("a:buchar") != nil || lookup("a:bublip") != nil {
             return .bullet
         }
         return nil
@@ -568,13 +585,13 @@ public struct PowerPointConverter: DocumentConverter {
             if let master = context.master {
                 sources.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap(listStyle))
                 let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
-                sources.append(masterTextStyle(master, named: style))
+                sources.append(masterTextStyle(master, named: style, cache: context.styles))
             }
         }
         sources.append(context.defaultTextStyle)
         return (0..<9).map { level in
             for source in sources {
-                if let source, let bullet = bullet(in: selectedChild(of: source, named: "a:lvl\(level + 1)ppr")) ?? bullet(in: selectedChild(of: source, named: "a:defppr")) {
+                if let source, let bullet = bullet(in: context.styles.child(of: source, named: "a:lvl\(level + 1)ppr"), cache: context.styles) ?? bullet(in: context.styles.child(of: source, named: "a:defppr"), cache: context.styles) {
                     return bullet
                 }
             }
@@ -594,28 +611,52 @@ public struct PowerPointConverter: DocumentConverter {
             if let master = context.master {
                 styles.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap(listStyle))
                 let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
-                styles.append(masterTextStyle(master, named: style))
+                styles.append(masterTextStyle(master, named: style, cache: context.styles))
             }
         }
         styles.append(context.defaultTextStyle)
         return (0..<9).map { level in
             styles.flatMap { source -> [Element] in
                 guard let source else { return [] }
-                return [selectedChild(of: source, named: "a:lvl\(level + 1)ppr"), selectedChild(of: source, named: "a:defppr")]
-                    .compactMap { $0.flatMap { selectedChild(of: $0, named: "a:defrpr") } }
+                return [context.styles.child(of: source, named: "a:lvl\(level + 1)ppr"), context.styles.child(of: source, named: "a:defppr")]
+                    .compactMap { $0.flatMap { context.styles.child(of: $0, named: "a:defrpr") } }
             }
         }
     }
 
-    private static func masterTextStyle(_ master: Document, named name: String) -> Element? {
+    private static func masterTextStyle(_ master: Document, named name: String, cache: StyleChildCache) -> Element? {
         guard let root = master.children().first() else { return nil }
-        let container = root.tagName().lowercased() == "p:notesmaster" ? root : selectedChild(of: root, named: "p:txstyles")
-        return container.flatMap { selectedChild(of: $0, named: name.lowercased()) }
+        let container = root.tagName().lowercased() == "p:notesmaster" ? root : cache.child(of: root, named: "p:txstyles")
+        return container.flatMap { cache.child(of: $0, named: name.lowercased()) }
     }
 
-    /// The placeholder shape in a layout/master matching a slide placeholder: by
-    /// `idx` when both have one, else by type (a typeless placeholder is "obj",
-    /// which a master provides as "body").
+    /// Index shared style containers once while keeping transient slide styles local.
+    final class StyleChildCache {
+        private struct Index { let owner: Element; let children: [String: Element] }
+        private var indexes: [ObjectIdentifier: Index] = [:]
+        private(set) var buildCount = 0
+        private let shared: StyleChildCache?
+        private var documents: [ObjectIdentifier: Document] = [:]
+        init(shared: StyleChildCache? = nil) { self.shared = shared }
+        func register(_ document: Document) { documents[ObjectIdentifier(document)] = document }
+        func child(of parent: Element, named name: String) -> Element? {
+            if let shared, let document = parent.ownerDocument(), shared.documents[ObjectIdentifier(document)] != nil {
+                return shared.child(of: parent, named: name)
+            }
+            let key = ObjectIdentifier(parent)
+            if indexes[key] == nil {
+                var children: [String: Element] = [:]
+                for child in selectedChildren(in: parent) {
+                    let name = child.tagName().lowercased()
+                    if children[name] == nil { children[name] = child }
+                }
+                indexes[key] = Index(owner: parent, children: children)
+                buildCount += 1
+            }
+            return indexes[key]?.children[name]
+        }
+    }
+
     final class PlaceholderCache {
         private struct Index { var byID: [String: Element] = [:]; var byType: [String: Element] = [:] }
         private var indexes: [ObjectIdentifier: Index] = [:]
@@ -804,7 +845,9 @@ public struct PowerPointConverter: DocumentConverter {
             switch node.tagName().lowercased() {
             case "a:r", "a:fld":
                 let properties = selectedChild(of: node, named: "a:rpr")
-                let text = escapeMarkdown(selectedChild(of: node, named: "a:t").map(wholeText) ?? "", budget: budget)
+                let textNode = selectedChild(of: node, named: "a:t")
+                let escaped = escapeMarkdown(textNode.map(wholeText) ?? "", budget: budget)
+                let text = preservesSpace(textNode) ? encodeWhitespace(escaped, budget: budget) : escaped
                 guard !text.isEmpty else { continue }
                 if let budget, !budget.admit(text.utf8.count, retained: &retainedRunBytes) { return "" }
                 let click = properties.flatMap { selectedChild(of: $0, named: "a:hlinkclick") }
@@ -826,7 +869,16 @@ public struct PowerPointConverter: DocumentConverter {
             var label = ""
             while index < runs.count, runs[index].link == link {
                 let run = runs[index]
-                let wrapperBytes = run.bold && run.italic ? 6 : run.bold ? 4 : run.italic ? 2 : 0
+                let perLine = run.bold && run.italic ? 6 : run.bold ? 4 : run.italic ? 2 : 0
+                var wrapperBytes = 0, hasContent = false
+                if perLine > 0 {
+                    for scalar in run.text.unicodeScalars {
+                        if scalar == "\n" { hasContent = false }
+                        else if !hasContent, !CharacterSet.whitespaces.contains(scalar) {
+                            wrapperBytes += perLine; hasContent = true
+                        }
+                    }
+                }
                 if let budget, !budget.fits(run.text.utf8.count + wrapperBytes) { return "" }
                 let fragment = emphasized(run.text, bold: run.bold, italic: run.italic)
                 if let budget { guard budget.append(fragment, to: &label) else { return "" } }
@@ -849,7 +901,16 @@ public struct PowerPointConverter: DocumentConverter {
     /// Wraps text in Markdown emphasis, keeping surrounding whitespace outside the
     /// markers (`** x**` isn't emphasis).
     private static func emphasized(_ text: String, bold: Bool, italic: Bool) -> String {
-        guard bold || italic, !text.contains("\n") else { return text }
+        guard bold || italic else { return text }
+        if text.contains("\n") {
+            var output = "", start = text.startIndex
+            for index in text.unicodeScalars.indices where text.unicodeScalars[index] == "\n" {
+                output += emphasized(String(text[start..<index]), bold: bold, italic: italic) + "\n"
+                start = text.unicodeScalars.index(after: index)
+            }
+            output += emphasized(String(text[start...]), bold: bold, italic: italic)
+            return output
+        }
         let core = text.trimmingCharacters(in: .whitespaces)
         guard !core.isEmpty else { return text }
         let leading = String(text.prefix { $0.unicodeScalars.allSatisfy(CharacterSet.whitespaces.contains) })
@@ -865,21 +926,50 @@ public struct PowerPointConverter: DocumentConverter {
         return value == "1" || value == "true"
     }
 
+    private static func preservesSpace(_ node: Element?) -> Bool {
+        var current = node
+        while let element = current {
+            if let value = try? element.attr("xml:space"), !value.isEmpty { return value == "preserve" }
+            current = element.parent()
+        }
+        return false
+    }
+
+    private static func encodeWhitespace(_ text: String, budget: RenderBudget?) -> String {
+        var bytes = text.utf8.count
+        for scalar in text.unicodeScalars where CharacterSet.whitespaces.contains(scalar) {
+            let growth = String(scalar.value).utf8.count + 3 - String(scalar).utf8.count
+            if let budget, !budget.admit(growth, retained: &bytes) { return "" }
+        }
+        var output = ""
+        for scalar in text.unicodeScalars {
+            if CharacterSet.whitespaces.contains(scalar) { output += "&#\(scalar.value);" }
+            else { output.unicodeScalars.append(scalar) }
+        }
+        return output
+    }
+
     private static func escapeMarkdown(_ text: String, budget: RenderBudget? = nil) -> String {
         if let budget {
             var bytes = text.utf8.count
             guard budget.fits(bytes) else { return "" }
-            for character in text where #"\`*_{}[]<>"#.contains(character) {
+            for character in text where #"\`*_{}[]<>&"#.contains(character) {
                 guard budget.admit(1, retained: &bytes) else { return "" }
             }
         }
         var out = ""
         for character in text {
-            if #"\`*_{}[]<>"#.contains(character) { out.append("\\") }
+            if #"\`*_{}[]<>&"#.contains(character) { out.append("\\") }
             out.append(character)
         }
         return out
     }
+
+    private static let blockEscapes: [(NSRegularExpression, String)] = [
+        (#"^(\s*)(#{1,6}|[-+]|\|)(?=\s|$)"#, #"$1\\$2"#),
+        (#"^(\s*)([0-9]+)([.)])(?=\s|$)"#, #"$1$2\\$3"#),
+        (#"^(\s*)\|"#, #"$1\\|"#)
+    ].map { (try! NSRegularExpression(pattern: $0.0), $0.1) }
 
     static func escapeBlockMarkers(_ text: String, budget: RenderBudget? = nil) -> String {
         var output = ""
@@ -903,9 +993,15 @@ public struct PowerPointConverter: DocumentConverter {
                 output += line.replacingOccurrences(of: "-", with: "\\-")
                 return
             }
-            output += line.replacingOccurrences(of: #"^(\s*)(#{1,6}|[-+]|\|)(?=\s|$)"#, with: #"$1\\$2"#, options: .regularExpression)
-                .replacingOccurrences(of: #"^(\s*)([0-9]+)([.)])(?=\s|$)"#, with: #"$1$2\\$3"#, options: .regularExpression)
-                .replacingOccurrences(of: #"^(\s*)\|"#, with: #"$1\\|"#, options: .regularExpression)
+            var escaped = line
+            for (regex, replacement) in blockEscapes {
+                let range = NSRange(location: 0, length: (escaped as NSString).length)
+                if regex.firstMatch(in: escaped, range: range) != nil {
+                    if let budget, !budget.fits(output.utf8.count + escaped.utf8.count + 1) { return }
+                    escaped = regex.stringByReplacingMatches(in: escaped, range: range, withTemplate: replacement)
+                }
+            }
+            output += escaped
         }
         var start = text.startIndex
         for index in text.unicodeScalars.indices where text.unicodeScalars[index] == "\n" {
@@ -999,14 +1095,14 @@ public struct PowerPointConverter: DocumentConverter {
                     let styles = [style, context.defaultTextStyle].compactMap { $0 }
                     let inherited = (0..<9).map { level -> Bullet? in
                         for style in styles {
-                            if let value = bullet(in: selectedChild(of: style, named: "a:lvl\(level + 1)ppr")) ?? bullet(in: selectedChild(of: style, named: "a:defppr")) { return value }
+                            if let value = bullet(in: context.styles.child(of: style, named: "a:lvl\(level + 1)ppr"), cache: context.styles) ?? bullet(in: context.styles.child(of: style, named: "a:defppr"), cache: context.styles) { return value }
                         }
                         return nil
                     }
                     context.runDefaults = (0..<9).map { level in
                         styles.flatMap { style in
-                            [selectedChild(of: style, named: "a:lvl\(level + 1)ppr"), selectedChild(of: style, named: "a:defppr")]
-                                .compactMap { $0.flatMap { selectedChild(of: $0, named: "a:defrpr") } }
+                            [context.styles.child(of: style, named: "a:lvl\(level + 1)ppr"), context.styles.child(of: style, named: "a:defppr")]
+                                .compactMap { $0.flatMap { context.styles.child(of: $0, named: "a:defrpr") } }
                         }
                     }
                     let paragraphs = renderParagraphs(body, inherited: inherited, context: &context)
@@ -1207,6 +1303,19 @@ public struct PowerPointConverter: DocumentConverter {
             return type == "http://schemas.openxmlformats.org/officeDocument/2006/relationships" + suffix
                 || type == "http://purl.oclc.org/ooxml/officeDocument/relationships" + suffix
         }
+    }
+
+    static func relationshipsOfType(_ suffix: String, archive: PowerPointPackage, part: String, map: [String: Relationship]) -> [Relationship] {
+        if archive.relationshipTypeIndexes[part] == nil {
+            archive.relationshipTypeIndexes[part] = Dictionary(grouping: map.values, by: \.type)
+            archive.relationshipIndexBuildCount += 1
+        }
+        let index = archive.relationshipTypeIndexes[part] ?? [:]
+        if suffix == "/metadata/core-properties" {
+            return index["http://schemas.openxmlformats.org/package/2006/relationships" + suffix] ?? []
+        }
+        return (index["http://schemas.openxmlformats.org/officeDocument/2006/relationships" + suffix] ?? [])
+            + (index["http://purl.oclc.org/ooxml/officeDocument/relationships" + suffix] ?? [])
     }
 
     /// A part's relationships (`<dir>/_rels/<file>.rels`), keyed by id.

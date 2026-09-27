@@ -5,6 +5,81 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func titleAndNotesReserveAllRetainedCopies() async throws {
+        typealias B = PowerPointConverterTests
+        let note = "<p:notes \(B.namespaces)><p:cSld><p:spTree>" + B.shape(placeholder: nil, paragraphs: ["<a:p><a:r><a:t>Speaker notes</a:t></a:r></a:p>"]) + "</p:spTree></p:cSld></p:notes>"
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title") + B.shape(placeholder: nil, paragraphs: ["<a:p><a:r><a:t>Body</a:t></a:r></a:p>"]), relationships: [("notes", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide", "../notesSlides/n.xml")])], extraParts: [("ppt/notesSlides/n.xml", Array(note.utf8))])
+        let info = StreamInfo(detectedFormat: .pptx)
+        let result = try await PowerPointConverter().convert(data, info: info)
+        var bytes = (result.title?.utf8.count ?? 0) + (result.author?.utf8.count ?? 0)
+        for section in result.sections {
+            bytes += section.markdown.utf8.count + (section.title?.utf8.count ?? 0) + (section.sourcePath?.utf8.count ?? 0)
+            for (key, value) in section.metadata { bytes += key.utf8.count + value.utf8.count }
+        }
+        #expect(try await PowerPointConverter(maximumRenderedBytes: bytes).convert(data, info: info).markdown() == result.markdown())
+        await #expect(throws: PicoDocsError.fileCorrupted) { try await PowerPointConverter(maximumRenderedBytes: bytes - 1).convert(data, info: info) }
+        let archive = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
+        var context = PowerPointConverter.SlideContext(archive: archive, partPath: "ppt/slides/s.xml", relationships: [:], images: .init())
+        context.renderBudget = .init(maximumBytes: 16, archive: archive) // title: 3+5+5; body: 2+4
+        let slide = try #require(PowerPointConverter.xml(archive, path: "ppt/slides/s.xml"))
+        let rendered = PowerPointConverter.renderSlide(slide, context: &context)
+        #expect(rendered.title == "Title"); #expect(rendered.blocks.isEmpty)
+        #expect(context.renderedBlockBytes == 13); #expect(archive.failure != nil)
+    }
+
+    @Test func blockMarkerGrowthIsAdmittedBeforeReplacement() throws {
+        typealias B = PowerPointConverterTests
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title"))])
+        for source in ["# heading", "- bullet", "+ bullet", "|cell", "1. item", "1) item", "|\u{0301}cell"] {
+            let archive = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
+            let exact = PowerPointConverter.RenderBudget(maximumBytes: source.utf8.count + 1, archive: archive)
+            #expect(PowerPointConverter.escapeBlockMarkers(source, budget: exact).utf8.count == source.utf8.count + 1)
+            #expect(!exact.failed)
+            let short = PowerPointConverter.RenderBudget(maximumBytes: source.utf8.count, archive: archive)
+            #expect(PowerPointConverter.escapeBlockMarkers(source, budget: short).isEmpty); #expect(short.failed)
+        }
+    }
+
+    @Test func relationshipAndSharedStyleIndexesAreBuiltOnce() throws {
+        typealias B = PowerPointConverterTests
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title"))])
+        let archive = PowerPointPackage(archive: try #require(Archive(data: data, accessMode: .read)))
+        var map: [String: PowerPointConverter.Relationship] = [:]
+        for index in 0..<1000 { map["id\(index)"] = .init(type: "urn:unrelated", target: "a.xml") }
+        map["layout"] = .init(type: "http://purl.oclc.org/ooxml/officeDocument/relationships/slideLayout", target: "layout.xml")
+        for _ in 0..<1000 { #expect(PowerPointConverter.relatedPart(of: "ppt/slides/s.xml", type: "/slideLayout", relationships: map, archive: archive) == "ppt/slides/layout.xml") }
+        #expect(archive.relationshipIndexBuildCount == 1)
+        let xml = try SwiftSoup.parse("<p:defaultTextStyle>" + String(repeating: "<a:unused/>", count: 1000) + "<a:lvl1pPr><a:defRPr b='1'/></a:lvl1pPr></p:defaultTextStyle>", "", SwiftSoup.Parser.xmlParser())
+        let root = try #require(xml.children().first())
+        let shared = PowerPointConverter.StyleChildCache(); shared.register(xml)
+        for _ in 0..<100 {
+            let local = PowerPointConverter.StyleChildCache(shared: shared)
+            for level in 1...9 { _ = local.child(of: root, named: "a:lvl\(level)ppr") }
+            #expect(local.buildCount == 0)
+        }
+        #expect(shared.buildCount == 1)
+    }
+
+    @Test func significantWhitespaceAndMultilineEmphasisSurviveProjection() async throws {
+        typealias B = PowerPointConverterTests
+        for (attributes, marker) in [("b='1'", "**"), ("i='1'", "*"), ("b='1' i='1'", "***")] {
+            let run = "<a:p><a:r><a:rPr \(attributes)/><a:t>first\nsecond</a:t></a:r></a:p>"
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: B.shape(placeholder: nil, paragraphs: [run]))])
+            let result = try await PowerPointConverter().convert(data, info: StreamInfo(detectedFormat: .pptx))
+            #expect(result.markdown() == marker + "first" + marker + "  \n" + marker + "second" + marker)
+            #expect(try DocumentRenderer.render(result, to: .html).contains(marker == "**" ? "<strong>second</strong>" : "<em>second</em>"))
+        }
+        let raw = " \t\u{00A0} text \t\u{2003}"
+        let run = "<a:p><a:r><a:t xml:space='preserve'>" + raw + "</a:t></a:r></a:p>"
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.shape(placeholder: nil, paragraphs: [run]))])
+        let result = try await PowerPointConverter().convert(data, info: StreamInfo(detectedFormat: .pptx))
+        #expect(result.markdown().hasPrefix("&#32;&#9;&#160;"))
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == raw)
+        #expect(try DocumentRenderer.render(result, to: .html).contains("&#8195;"))
+        let literal = ConverterResult(sections: [.init(markdown: #"\&#32; `&#32;`"#)])
+        #expect(try DocumentRenderer.render(literal, to: .plaintext) == "&#32; &#32;")
+    }
+
     @Test func renderBudgetRejectsExpansionBeforeRetainingRuns() throws {
         typealias B = PowerPointConverterTests
         let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title"))])

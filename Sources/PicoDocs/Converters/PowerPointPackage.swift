@@ -15,6 +15,9 @@ final class PowerPointPackage {
     var contentTypes: [String: String]?
     var relationshipMaps: [String: [String: PowerPointConverter.Relationship]] = [:]
 
+    var relationshipTypeIndexes: [String: [String: [PowerPointConverter.Relationship]]] = [:]
+    var relationshipIndexBuildCount = 0
+
     init(archive: Archive, entryLimit: Int = 64 * 1024 * 1024, totalLimit: Int = 256 * 1024 * 1024, maximumEntries: Int = 16_384, maximumNameBytes: Int = 8 * 1024 * 1024, maximumRelationships: Int = 65_536, maximumRelationshipBytes: Int = 16 * 1024 * 1024) {
         self.archive = archive
         self.entryLimit = entryLimit

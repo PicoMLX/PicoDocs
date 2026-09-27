@@ -66,7 +66,7 @@ public enum DocumentRenderer {
                 out.append(rows.map { $0.map { MarkdownTableCell.inlineText($0) { stripInline($0, footnoteNumbers: numbers) } }.joined(separator: "\t") }.joined(separator: "\n"))
             }
         }
-        var text = out.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = out.joined(separator: "\n\n")
         // Append numbered definitions for referenced notes (parseBlocks would
         // otherwise leak them as plain text); references were numbered above.
         let referenced = referencedNotes(notes, numbers)
@@ -687,6 +687,7 @@ public enum DocumentRenderer {
             }
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: tag)
         }
+        result = restoreWhitespaceReferences(result, html: true)
         result = restoreEscapes(result, html: true)
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
@@ -741,6 +742,7 @@ public enum DocumentRenderer {
         for (index, link) in links.enumerated() {
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: applyEmphasisStrip(link.label))
         }
+        result = restoreWhitespaceReferences(result, html: false)
         result = restoreEscapes(result, html: false)
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: span)
@@ -766,12 +768,30 @@ public enum DocumentRenderer {
             if scalar == "\u{E006}" {
                 output += "\u{E006}\u{E006}"; index = next
             } else if scalar == "\\", next < scalars.endIndex,
-                      #"\`*_{}[]<>()#+-.!|"#.unicodeScalars.contains(scalars[next]) {
+                      #"\`*_{}[]<>()#+-.!|&"#.unicodeScalars.contains(scalars[next]) {
                 output.unicodeScalars.append("\u{E006}")
                 output.unicodeScalars.append(UnicodeScalar(0xE100 + scalars[next].value)!)
                 index = scalars.index(after: next)
             } else { output.unicodeScalars.append(scalar); index = next }
         }
+        return output
+    }
+
+    // Decode the numeric whitespace emitted for significant OOXML spacing only
+    // after Markdown syntax is processed; escaped ampersands and code stay literal.
+    private static let whitespaceReference = try! NSRegularExpression(pattern: #"&#([0-9]{1,7});"#)
+    private static let htmlWhitespaceReference = try! NSRegularExpression(pattern: #"&amp;#([0-9]{1,7});"#)
+    private static func restoreWhitespaceReferences(_ text: String, html: Bool) -> String {
+        let source = text as NSString
+        var output = "", last = 0
+        (html ? htmlWhitespaceReference : whitespaceReference).enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, _ in
+            guard let match, let value = UInt32(source.substring(with: match.range(at: 1))),
+                  let scalar = UnicodeScalar(value), CharacterSet.whitespaces.contains(scalar) else { return }
+            output += source.substring(with: NSRange(location: last, length: match.range.location - last))
+            output += html ? "&#\(value);" : String(scalar)
+            last = match.range.location + match.range.length
+        }
+        output += source.substring(from: last)
         return output
     }
 
