@@ -258,10 +258,32 @@ enum IWATable {
     /// Escape the rendered stream, then project insertions back to storage indices.
     private static func visibleEscapeProjection(_ text: String, boundaries: Set<Int>, hardBoundaries: Set<Int> = []) -> (after: [Int], before: Set<Int>) {
         let units = Array(text.utf16)
-        var offsets: [Int] = [], visibleBoundaries: Set<Int> = []
+        var offsets: [Int] = []
         for index in units.indices {
-            if boundaries.contains(index) { visibleBoundaries.insert(offsets.count) }
             if hardBoundaries.contains(index) || (units[index] != 0xFFFC && !isStrippedControl(units[index])) { offsets.append(index) }
+        }
+        // renderInline trims each paragraph/attachment fragment. Remove exactly
+        // those edge units from escape context, retaining their original offsets.
+        var trimmedOffsets: [Int] = [], start = 0
+        func isWhitespace(_ offset: Int) -> Bool {
+            UnicodeScalar(Int(units[offset])).map { CharacterSet.whitespacesAndNewlines.contains($0) } ?? false
+        }
+        func appendParagraph(_ range: Range<Int>) {
+            var lower = range.lowerBound, upper = range.upperBound
+            while lower < upper, isWhitespace(offsets[lower]) { lower += 1 }
+            while upper > lower, isWhitespace(offsets[upper - 1]) { upper -= 1 }
+            trimmedOffsets.append(contentsOf: offsets[lower..<upper])
+        }
+        for index in offsets.indices where hardBoundaries.contains(offsets[index]) || isParagraphSeparator(units[offsets[index]]) {
+            appendParagraph(start..<index)
+            trimmedOffsets.append(offsets[index]); start = index + 1
+        }
+        appendParagraph(start..<offsets.count)
+        offsets = trimmedOffsets
+        var visibleBoundaries: Set<Int> = [], visibleIndex = 0
+        for index in units.indices {
+            if boundaries.contains(index) { visibleBoundaries.insert(visibleIndex) }
+            if visibleIndex < offsets.count, offsets[visibleIndex] == index { visibleIndex += 1 }
         }
         let visible = String(decoding: offsets.map { hardBoundaries.contains($0) ? 0x0A : units[$0] }, as: UTF16.self)
         let projection = MarkdownLiteral.escapeProjection(visible, boundaries: visibleBoundaries, paragraphSeparators: [0x0A, 0x0D, 0x2029], softSeparators: [0x2028, 0x0B, 0x0C])

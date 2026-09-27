@@ -4,6 +4,37 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func PagesTrimmingUsesTheEmittedFenceContext() async throws {
+        for separator in ["\n", "\r", "\u{2029}"] {
+            let source = ["- item", "  ```", #"outside \*"#].joined(separator: separator)
+            let data = PagesConverterTests.makeListPagesFile(text: source, style: .bullet, restarts: [], heading: false)
+            // The unstyled storage path uses the same UTF-16 escape projection.
+            typealias B = PagesConverterTests
+            let storage = B.varintField(1, 0) + B.lengthField(3, Array(source.utf8))
+            let stream = B.makeIWAStream(objects: [(1, 2001, storage, [])])
+            let plainData = B.makeZip([("Index/Document.iwa", B.snappyFrame(stream))])
+            let result = try await PicoDocsEngine.convert(data: plainData, filename: "trim.pages")
+            let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+            #expect(try html.getElementsByTag("code").first()?.text() == #"outside \*"#)
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(#"outside \*"#))
+            // Native list rendering remains accepted with the same literal source.
+            _ = try await PicoDocsEngine.convert(data: data, filename: "list.pages")
+        }
+    }
+
+    @Test func spreadsheetEscapesPunctuationScalarsWithCombiningMarks() async throws {
+        for mark in ["\u{0301}", "\u{FE0F}"] {
+            let source = "*" + mark + "x*" + mark
+            let sheet = "<worksheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'><sheetData><row r='1'><c r='A1' t='inlineStr'><is><t>\(source)</t></is></c></row></sheetData></worksheet>"
+            let result = try await PicoDocsEngine.convert(data: ConverterTests.xlsx(sheetXML: sheet), filename: "unicode.xlsx")
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                let rendered = try DocumentRenderer.render(result, to: format)
+                #expect(rendered.contains(source)); #expect(!rendered.contains("<em>"))
+            }
+        }
+    }
+
+
     @Test func rootFootnoteExtractionPreservesTheListExit() async throws {
         let source = "- x\n[^n]: note\n  ```\n\\*Z"
         let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "literal.txt")

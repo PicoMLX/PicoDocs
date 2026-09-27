@@ -13,6 +13,32 @@ import Testing
 
 @Suite("Tier A converters")
 struct ConverterTests {
+    static func xlsx(sheetXML: String) -> Data {
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>\
+        </Relationships>
+        """
+        let workbook = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">\
+        <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>
+        """
+        let workbookRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>\
+        </Relationships>
+        """
+        return PagesConverterTests.makeZip([
+            (name: "_rels/.rels", data: Array(rels.utf8)),
+            (name: "xl/workbook.xml", data: Array(workbook.utf8)),
+            (name: "xl/_rels/workbook.xml.rels", data: Array(workbookRels.utf8)),
+            (name: "xl/worksheets/sheet1.xml", data: Array(sheetXML.utf8)),
+        ])
+    }
+
 
     @Test("DOCX converts to Markdown with heading and body text")
     func docx() async throws {
