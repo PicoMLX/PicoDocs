@@ -29,7 +29,9 @@ enum MarkdownTableCell {
             // Outside code, an escaped first tick is literal; the remaining
             // ticks can open their own span. Inside code, the full run remains
             // a possible closer because backslashes have no escape semantics.
-            if length > 1, let close = next[length - 1] {
+            var slashStart = start
+            while slashStart > 0, chars[slashStart - 1] == "\\" { slashStart -= 1 }
+            if length > 1, (start - slashStart) % 2 == 1, let close = next[length - 1] {
                 closers[start + 1] = (close, length - 1)
             }
             next[length] = start

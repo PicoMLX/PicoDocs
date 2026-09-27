@@ -42,7 +42,8 @@ public struct PlainTextConverter: DocumentConverter {
         }
         // Explicit Markdown is already canonical; other text sources carry
         // literal backslashes that must survive the renderer's escape decoder.
-        // Existing interpretation of other Markdown punctuation is unchanged.
+        // Other punctuation follows the shared Markdown grammar, including list
+        // markers, thematic breaks, headings, and code fences.
         let ext = (info.fileExtension ?? info.filename.map { ($0 as NSString).pathExtension } ?? "").lowercased()
         let mime = info.mimeType?.split(separator: ";").first?.trimmingCharacters(in: .whitespaces).lowercased()
         let isMarkdown = ["md", "markdown", "mdown", "mkd", "mkdn"].contains(ext)

@@ -247,7 +247,15 @@ public enum DocumentRenderer {
         var notes: [(id: String, text: String)] = []
         var i = 0
         var inFence = false
+        var lists: [(base: Int, content: Int)] = []
+        var followsBlank = false
         while i < lines.count {
+            let blank = lines[i].trimmingCharacters(in: .whitespaces).isEmpty
+            if !inFence, !blank {
+                while let last = lists.last, !literalListContains(lines[i], base: last.base, content: last.content, afterBlank: followsBlank) { lists.removeLast() }
+                if let item = literalListIndent(lines, index: i) { lists.append(item) }
+            }
+            followsBlank = blank
             // A `[^id]: text` line inside a fenced code block is literal code, not
             // a definition — track the fence so it stays in the body.
             if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
@@ -259,8 +267,9 @@ public enum DocumentRenderer {
             // Allow up to 3 leading spaces before a definition (Markdown block
             // indentation); 4+ spaces is an indented code block, left in the body.
             if !inFence, let (id, first) = parseFootnoteDefinition(dropLeadingSpaces(lines[i], max: 3)) {
-                // A removed block definition must still separate body paragraphs.
-                if !bodyLines.isEmpty, bodyLines.last != "" { bodyLines.append("") }
+                // Preserve prose boundaries without splitting an enclosing list.
+                let inList = lists.last.map { indentWidth(lines[i]) >= $0.content } ?? false
+                if !inList, !bodyLines.isEmpty, bodyLines.last != "" { bodyLines.append("") }
                 var textLines = [first]
                 i += 1
                 while i < lines.count {                       // indented continuation lines
@@ -291,8 +300,17 @@ public enum DocumentRenderer {
     /// Parses a CommonMark footnote definition line `[^id]: text`, returning the
     /// id and first-line text (nil if the line isn't a definition).
     private static func parseFootnoteDefinition(_ line: String) -> (id: String, text: String)? {
-        guard line.hasPrefix("[^"), let close = line.firstIndex(of: "]") else { return nil }
+        guard line.hasPrefix("[^") else { return nil }
         let idStart = line.index(line.startIndex, offsetBy: 2)
+        var close = idStart
+        while close < line.endIndex {
+            if line[close] == "\\" {
+                close = line.index(after: close)
+                if close < line.endIndex { close = line.index(after: close) }
+            } else if line[close] == "]" { break }
+            else { close = line.index(after: close) }
+        }
+        guard close < line.endIndex else { return nil }
         guard idStart < close else { return nil }
         let id = decodedFootnoteID(String(line[idStart..<close]))
         let afterClose = line.index(after: close)

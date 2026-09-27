@@ -4,6 +4,78 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func unmatchedTickRunsStayWholeWithoutAnEscape() throws {
+        for source in ["``x`", "```x``", "\\\\``x`"] {
+            let result = ConverterResult(sections: [.init(markdown: "prefix " + source)])
+            let expected = source.hasPrefix("\\\\") ? String(source.dropFirst()) : source
+            #expect(try DocumentRenderer.render(result, to: .plaintext) == "prefix " + expected)
+            #expect(!(try DocumentRenderer.render(result, to: .html)).contains("<code>"))
+        }
+    }
+
+    @Test func generatedLinkDestinationEscapesAlreadyDecodeOnce() async throws {
+        for value in [#"foo\bar"#, #"foo\\bar"#, #"foo\(bar)"#] {
+            let result = try await PicoDocsEngine.convert(data: Data("<p><a href=\"\(value)\">Link</a></p>".utf8), filename: "slashes.html")
+            let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+            #expect(try html.getElementsByTag("a").first()?.attr("href") == value)
+            #expect(try DocumentRenderer.render(result, to: .plaintext) == "Link")
+        }
+    }
+
+    @Test func literalSourceBackslashesProtectScalarPunctuation() async throws {
+        for mark in ["\u{0301}", "\u{FE0F}"] {
+            let source = "\\*" + mark + "x*" + mark
+            let text = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "combining.txt")
+            let sections = ConverterResult(sections: MarkdownLiteral.escapeSectionBackslashes([.init(markdown: source)]))
+            for result in [text, sections] {
+                #expect(try DocumentRenderer.render(result, to: .plaintext) == source)
+                #expect(try DocumentRenderer.render(result, to: .csv) == source)
+                #expect(!(try DocumentRenderer.render(result, to: .html)).contains("<em>"))
+            }
+        }
+    }
+
+    @Test func removingIndentedFootnotesKeepsTheEnclosingList() throws {
+        for marker in ["-", "1."] {
+            let indent = String(repeating: " ", count: marker.count + 1)
+            let result = ConverterResult(sections: [.init(markdown: marker + " a[^x]\n" + indent + "[^x]: note\n" + marker + " b")])
+            let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+            let lists = try html.getElementsByTag(marker == "-" ? "ul" : "ol")
+            let bodyList = try #require(lists.first())
+            #expect(bodyList.children().count == 2)
+            #expect(try bodyList.text().contains("b"))
+            #expect(try html.getElementsByClass("footnotes").first()?.text().contains("note") == true)
+        }
+    }
+
+    @Test func escapedFootnoteClosersMatchReferencesAndDefinitions() throws {
+        for label in [#"a\]b"#, #"a\\\]b"#, #"a\\"#] {
+            let result = ConverterResult(sections: [.init(markdown: "Body[^" + label + "]\n\n[^" + label + "]: note")])
+            let text = try DocumentRenderer.render(result, to: .plaintext)
+            #expect(text.contains("Body[1]")); #expect(text.contains("[1] note"))
+            #expect(!text.contains("[^"))
+        }
+    }
+
+    @Test func textImportsKeepTheSharedMarkdownBlockGrammar() async throws {
+        for (source, tag) in [("text\n___", "hr"), ("1.\n   literal", "ol")] {
+            let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "blocks.txt")
+            let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+            #expect(try !html.getElementsByTag(tag).isEmpty())
+        }
+    }
+
+    @Test func RTFStylePrefixesDetermineInlineContextBoundaries() async throws {
+        let rtf = #"{\rtf1\ansi `open\line \b # \\* `close\b0 }"#
+        let result = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "composed.rtf")
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            let rendered = try DocumentRenderer.render(result, to: format)
+            #expect(rendered.contains(#"\*"#)); #expect(!rendered.contains(#"\\\*"#))
+        }
+        #expect(try DocumentRenderer.render(result, to: .html).contains("<code>"))
+    }
+
+
     @Test func escapedTicksCanPrecedeIndependentCodeDelimiters() async throws {
         let html = "<p>`<code>x</code></p>"
         let result = try await PicoDocsEngine.convert(data: Data(html.utf8), filename: "ticks.html")

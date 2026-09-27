@@ -4,7 +4,7 @@ import Foundation
 enum MarkdownLiteral {
     /// Verbatim converters predate canonical Markdown escaping. Protect their
     /// literal backslashes before the renderer decodes generated escapes.
-    static func escapeBackslashes(_ text: String, paragraphEndLines: Set<Int> = []) -> String {
+    static func escapeBackslashes(_ text: String, paragraphEndLines: Set<Int> = [], structuralText: String? = nil) -> String {
         var inFence = false
         var fenceList: (base: Int, content: Int)?
         var inNote = false
@@ -19,40 +19,43 @@ enum MarkdownLiteral {
             prose = ""
         }
         let lines = text.components(separatedBy: "\n")
+        let renderedLines = structuralText?.components(separatedBy: "\n") ?? lines
+        let structuralLines = renderedLines.count == lines.count ? renderedLines : lines
         var followedByNoteContinuation = Array(repeating: false, count: lines.count)
         var nextIsIndented = false
         for index in lines.indices.reversed() {
             followedByNoteContinuation[index] = nextIsIndented
-            if !lines[index].trimmingCharacters(in: .whitespaces).isEmpty {
-                nextIsIndented = lines[index].hasPrefix("    ") || lines[index].hasPrefix("\t")
+            if !structuralLines[index].trimmingCharacters(in: .whitespaces).isEmpty {
+                nextIsIndented = structuralLines[index].hasPrefix("    ") || structuralLines[index].hasPrefix("\t")
             }
         }
         for (index, line) in lines.enumerated() {
-            let blank = line.trimmingCharacters(in: .whitespaces).isEmpty
+            let structure = structuralLines[index]
+            let blank = structure.trimmingCharacters(in: .whitespaces).isEmpty
             if inFence, let container = fenceList, !blank,
-               !DocumentRenderer.literalListContains(line, base: container.base, content: container.content) {
+               !DocumentRenderer.literalListContains(structure, base: container.base, content: container.content) {
                 inFence = false; fenceList = nil
             }
             // Footnote extraction joins continued paragraphs into one inline value.
-            if !inFence, inNote, line.hasPrefix("    ") || line.hasPrefix("\t") || (blank && followedByNoteContinuation[index]) {
+            if !inFence, inNote, structure.hasPrefix("    ") || structure.hasPrefix("\t") || (blank && followedByNoteContinuation[index]) {
                 prose += line
                 if index < lines.count - 1 { prose += "\n" }
                 continue
             }
             if !inFence, !blank {
-                if inNote, !line.hasPrefix("    "), !line.hasPrefix("\t") {
+                if inNote, !structure.hasPrefix("    "), !structure.hasPrefix("\t") {
                     flushProse(); inNote = false
                 }
-                if DocumentRenderer.literalFootnoteDefinition(line) { inNote = true }
+                if DocumentRenderer.literalFootnoteDefinition(structure) { inNote = true }
                 var exitedList = false
-                while let last = lists.last, !DocumentRenderer.literalListContains(line, base: last.base, content: last.content, afterBlank: followsBlank) {
+                while let last = lists.last, !DocumentRenderer.literalListContains(structure, base: last.base, content: last.content, afterBlank: followsBlank) {
                     lists.removeLast(); exitedList = true
                 }
                 if exitedList { flushProse() }
-                if let item = DocumentRenderer.literalListIndent(lines, index: index) { lists.append(item) }
+                if let item = DocumentRenderer.literalListIndent(structuralLines, index: index) { lists.append(item) }
             }
             followsBlank = blank
-            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+            if structure.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
                 flushProse()
                 inFence.toggle()
                 fenceList = inFence ? lists.last : nil
@@ -61,12 +64,12 @@ enum MarkdownLiteral {
             } else if inFence {
                 output += line
                 if index < lines.count - 1 { output += "\n" }
-            } else if line.trimmingCharacters(in: .whitespaces).isEmpty {
+            } else if structure.trimmingCharacters(in: .whitespaces).isEmpty {
                 // Inline spans stop at paragraph boundaries; fences retain state.
                 flushProse()
                 output += line
                 if index < lines.count - 1 { output += "\n" }
-            } else if line.trimmingCharacters(in: .whitespaces).hasPrefix("|") {
+            } else if structure.trimmingCharacters(in: .whitespaces).hasPrefix("|") {
                 flushProse()
                 var cell = "", escaped = false
                 func flushCell() {
@@ -81,8 +84,8 @@ enum MarkdownLiteral {
                 flushCell()
                 if index < lines.count - 1 { output += "\n" }
             } else {
-                let boundary = DocumentRenderer.literalBlockBoundary(line)
-                if boundary.starts || DocumentRenderer.literalListIndent(lines, index: index) != nil { flushProse() }
+                let boundary = DocumentRenderer.literalBlockBoundary(structure)
+                if boundary.starts || DocumentRenderer.literalListIndent(structuralLines, index: index) != nil { flushProse() }
                 prose += line
                 if index < lines.count - 1 { prose += "\n" }
                 if boundary.ends || paragraphEndLines.contains(index) { flushProse() }
@@ -94,18 +97,18 @@ enum MarkdownLiteral {
 
     private static func escapeProseBackslashes(_ text: String) -> String {
         var output = "", slashes = 0
-        for character in text {
+        for character in text.unicodeScalars {
             if character == "\\" { slashes += 1; continue }
-            let keepsEscape = slashes % 2 == 1 && #"`*_{}[]<>()#+-.!|"#.contains(character)
+            let keepsEscape = slashes % 2 == 1 && #"`*_{}[]<>()#+-.!|"#.unicodeScalars.contains(character)
             output += String(repeating: "\\", count: slashes * 2 + (keepsEscape ? 1 : 0))
-            output.append(character); slashes = 0
+            output.unicodeScalars.append(character); slashes = 0
         }
         return output + String(repeating: "\\", count: slashes * 2)
     }
 
     /// Count added backslashes while retaining source
     /// UTF-16 indices, so styled runs can share whole-document code context.
-    static func backslashEscapeCounts(_ text: String, paragraphSeparators: Set<UInt16> = [], softSeparators: Set<UInt16> = []) -> [Int] {
+    static func backslashEscapeCounts(_ text: String, paragraphSeparators: Set<UInt16> = [], softSeparators: Set<UInt16> = [], structuralText: String? = nil) -> [Int] {
         let source = Array(text.utf16)
         // Replacing each separator with one LF preserves UTF-16 source offsets.
         let separators = paragraphSeparators.union(softSeparators)
@@ -115,7 +118,7 @@ enum MarkdownLiteral {
             line += 1
         }
         let context = String(decoding: source.map { separators.contains($0) ? 0x0A : $0 }, as: UTF16.self)
-        let escaped = Array(escapeBackslashes(context, paragraphEndLines: paragraphEndLines).utf16)
+        let escaped = Array(escapeBackslashes(context, paragraphEndLines: paragraphEndLines, structuralText: structuralText).utf16)
         var counts = Array(repeating: 0, count: source.count)
         var i = 0, j = 0
         while i < source.count {
@@ -137,8 +140,8 @@ enum MarkdownLiteral {
 
     /// Keep the punctuation escape next to its source character when style or
     /// link delimiters will be inserted between it and the preceding slash.
-    static func escapeProjection(_ text: String, boundaries: Set<Int>, paragraphSeparators: Set<UInt16> = [], softSeparators: Set<UInt16> = []) -> (after: [Int], before: Set<Int>) {
-        var after = backslashEscapeCounts(text, paragraphSeparators: paragraphSeparators, softSeparators: softSeparators)
+    static func escapeProjection(_ text: String, boundaries: Set<Int>, paragraphSeparators: Set<UInt16> = [], softSeparators: Set<UInt16> = [], structuralText: String? = nil) -> (after: [Int], before: Set<Int>) {
+        var after = backslashEscapeCounts(text, paragraphSeparators: paragraphSeparators, softSeparators: softSeparators, structuralText: structuralText)
         let source = Array(text.utf16)
         var before: Set<Int> = []
         for offset in boundaries where offset > 0 && offset < source.count {

@@ -265,15 +265,16 @@ public struct RTFConverter: DocumentConverter {
         }
         flushBytes()
         flushParagraph()
-        // Compute escaping from source text before inserting style delimiters,
-        // retaining code context across runs and paragraph boundaries.
+        // Source offsets retain escape provenance. Classify block boundaries
+        // from composed style runs, whose prefixes can change Markdown syntax.
         let source = paragraphs.map { $0.map(\.text).joined() }.joined(separator: "\n\n")
         var boundaries: Set<Int> = [], position = 0
         for paragraph in paragraphs {
             for run in paragraph { boundaries.insert(position); position += run.text.utf16.count }
             position += 2
         }
-        let escapes = MarkdownLiteral.escapeProjection(source, boundaries: boundaries)
+        let structure = paragraphs.map { $0.map(renderRun).joined() }.joined(separator: "\n\n")
+        let escapes = MarkdownLiteral.escapeProjection(source, boundaries: boundaries, structuralText: structure)
         var offset = 0
         return paragraphs.map { paragraph in
             let rendered = paragraph.map { run in
