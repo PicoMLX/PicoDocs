@@ -5,6 +5,57 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func emptyMarkdownItemsAndLiteralPowerPointMarkers() async throws {
+        typealias B = PowerPointConverterTests
+        for marker in ["-", "*", "+", "1."] {
+            let html = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: marker)]), to: .html)
+            #expect(html.contains("<li></li>"))
+            let shape = B.shape(placeholder: nil, paragraphs: ["<a:p><a:r><a:t>\(marker)</a:t></a:r></a:p>"])
+            let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: shape)]), filename: "markers.pptx")
+            #expect(try DocumentRenderer.render(result, to: .plaintext) == marker)
+            #expect(try !DocumentRenderer.render(result, to: .html).contains("<li>"))
+        }
+    }
+
+    @Test func leadingTablePipesKeepOneColumn() async throws {
+        typealias B = PowerPointConverterTests
+        for value in ["|value", "| value", #"\|value"#, #"\\| value"#, "a|b"] {
+            let table = "<p:graphicFrame><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>\(value)</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></p:graphicFrame>"
+            let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: table)]), filename: "pipes.pptx")
+            let html = try DocumentRenderer.render(result, to: .html)
+            #expect(html.contains("<th>\(value)</th>"))
+            #expect(html.components(separatedBy: "<th>").count == 2)
+            #expect(try DocumentRenderer.render(result, to: .plaintext) == value)
+            #expect(try DocumentRenderer.render(result, to: .csv).trimmingCharacters(in: .whitespacesAndNewlines) == value)
+        }
+    }
+
+    @Test func optionalCorePropertiesValidatePresentParts() async throws {
+        typealias B = PowerPointConverterTests
+        for core: String? in [nil, "<broken>", "<other/>", #"<x:coreProperties xmlns:x="urn:wrong"/>"#,
+            #"<x:coreProperties xmlns:x="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:d="http://purl.org/dc/elements/1.1/"><d:title>Title</d:title></x:coreProperties>"#] {
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Slide"))], extraParts: core.map { [("docProps/core.xml", Array($0.utf8))] } ?? [])
+            if core == nil || core!.contains("<d:title>") {
+                let result = try await PicoDocsEngine.convert(data: data, filename: "core.pptx")
+                if core != nil { #expect(result.title == "Title") }
+            } else {
+                await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: data, filename: "core.pptx") }
+            }
+        }
+    }
+
+    @Test func contentTypesAcceptEveryTokenPunctuation() async throws {
+        typealias B = PowerPointConverterTests
+        for punctuation in "!#$%&'*+-.^_`|~" {
+            let mime = "application/x\(punctuation)custom"
+            let escaped = mime.replacingOccurrences(of: "&", with: "&amp;")
+            let manifest = "<Types><Default Extension=\"custom\" ContentType=\"\(escaped)\"/></Types>"
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Slide"))], extraParts: [("[Content_Types].xml", Array(manifest.utf8))])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "types.pptx")
+            #expect(result.markdown().contains("Slide"))
+        }
+    }
+
     @Test func extraSlideIDsAreRejectedAlongsideAValidDirectList() throws {
         typealias B = PowerPointConverterTests
         let deck = B.deck(slides:[.init(file:"s.xml",shapes:B.titleShape("Slide"))])

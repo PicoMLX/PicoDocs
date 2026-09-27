@@ -57,6 +57,17 @@ enum MarkdownTableCell {
             .replacingOccurrences(of: "|", with: "\\|")
     }
 
+    /// Add only the missing pipe escapes to already escaped Markdown.
+    static func escapeCanonicalPipes(_ text: String) -> String {
+        var output = "", slashes = 0
+        for character in text {
+            if character == "|", slashes.isMultiple(of: 2) { output.append("\\") }
+            output.append(character)
+            slashes = character == "\\" ? slashes + 1 : 0
+        }
+        return output
+    }
+
     /// Decode canonical breaks without interpreting an escaped literal marker.
     static func decodeBreaks(_ text: String) -> String {
         var brackets = 0, destinationDepth = 0

@@ -68,6 +68,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships": "r",
         "http://schemas.openxmlformats.org/markup-compatibility/2006": "mc",
         "http://purl.org/dc/elements/1.1/": "dc",
+        "http://schemas.openxmlformats.org/package/2006/metadata/core-properties": "cp",
         "http://purl.oclc.org/ooxml/presentationml/main": "p",
         "http://purl.oclc.org/ooxml/drawingml/main": "a",
         "http://purl.oclc.org/ooxml/officeDocument/relationships": "r",

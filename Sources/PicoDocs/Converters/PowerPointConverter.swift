@@ -159,7 +159,12 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// Title and author from `docProps/core.xml`.
     static func coreProperties(_ archive: PowerPointPackage) -> (title: String?, author: String?) {
-        guard let core = xml(archive, path: "docProps/core.xml") else { return (nil, nil) }
+        guard archive.archive["docProps/core.xml"] != nil else { return (nil, nil) }
+        guard let core = xml(archive, path: "docProps/core.xml"),
+              core.children().first()?.tagName().lowercased() == "cp:coreproperties" else {
+            archive.fail(PicoDocsError.fileCorrupted)
+            return (nil, nil)
+        }
         func value(_ tag: String) -> String? {
             let text = (try? core.getElementsByTag(tag).first()?.text())?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -720,7 +725,7 @@ public struct PowerPointConverter: DocumentConverter {
                     }
                     text = renderParagraphs(body, inherited: inherited, context: &context).joined(separator: "\n")
                 }
-                cells.append(text.replacingOccurrences(of: "|", with: "\\|").replacingOccurrences(of: "\n", with: "<br>"))
+                cells.append(MarkdownTableCell.escapeCanonicalPipes(text).replacingOccurrences(of: "\n", with: "<br>"))
             }
             if !cells.isEmpty { rows.append(cells) }
         }
@@ -813,7 +818,7 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     private static func validatedMIME(_ value: String?) -> String? {
-        guard let value, value.range(of: #"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$"#, options: .regularExpression) != nil else { return nil }
+        guard let value, value.range(of: #"\A[A-Za-z0-9!#$%&'*+.^_`|~-]+/[A-Za-z0-9!#$%&'*+.^_`|~-]+\z"#, options: .regularExpression) != nil else { return nil }
         return value
     }
 
