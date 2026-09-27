@@ -43,9 +43,9 @@ public struct WordConverter: DocumentConverter {
         let observe: (Element, String) -> Void = { heading, text in
             headings.append(heading); titles.append(MarkdownInlineParser.parse(text).plainText)
         }
-        _ = try Self.renderBlocks(in: body, relationships: relationships, numbering: previewNumbering, headingObserver: observe)
+        try Self.collectHeadings(in: body, relationships: relationships, numbering: previewNumbering, observe: observe)
         for textBox in try body.getElementsByTag("w:txbxContent") where Self.shouldRenderTextBox(textBox) {
-            _ = try Self.renderBlocks(in: textBox, relationships: relationships, numbering: previewNumbering, headingObserver: observe)
+            try Self.collectHeadings(in: textBox, relationships: relationships, numbering: previewNumbering, observe: observe)
         }
         for (heading, slug) in zip(headings, MarkdownHeadingAnchors.slugs(titles)) {
             for bookmark in try heading.getElementsByTag("w:bookmarkStart").array() {
@@ -55,10 +55,11 @@ public struct WordConverter: DocumentConverter {
         }
         let numbering = WordListNumbering(archive: archive)
         if let failure = numbering.failure { throw failure }
-        var blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering)
+        let tableBudget = TableBudget()
+        var blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering, tableBudget: tableBudget)
         // Text boxes (shapes with text) store their content in `w:txbxContent`
         // outside the normal block flow; extract it and append as body blocks.
-        blocks += try Self.extractTextBoxes(from: body, relationships: relationships, numbering: numbering)
+        blocks += try Self.extractTextBoxes(from: body, relationships: relationships, numbering: numbering, tableBudget: tableBudget)
         var markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Footnote/endnote text lives in separate parts; append the referenced
@@ -111,12 +112,44 @@ public struct WordConverter: DocumentConverter {
         return ConverterResult(title: info.filename, sections: sections)
     }
 
+    /// Collect only heading text; advance list counters from metadata without
+    /// rendering ordinary paragraphs or allocating projected tables.
+    static func collectHeadings(in container: Element, relationships: [String: String], numbering: WordListNumbering?, observe: @escaping (Element, String) -> Void) throws {
+        func advance(_ paragraph: Element) {
+            let properties = paragraph.children().first { $0.tagName().lowercased() == "w:ppr" }
+            let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
+            let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
+            _ = numbering?.prefix(numPr: numPr, style: style)
+        }
+        var pending = Array(container.children().array().reversed())
+        while let element = pending.popLast() {
+            try Task.checkCancellation()
+            switch element.tagName().lowercased() {
+            case "w:p":
+                let properties = element.children().first { $0.tagName().lowercased() == "w:ppr" }
+                let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
+                if headingLevel(forStyle: style) != nil {
+                    _ = renderParagraph(element, relationships: relationships, numbering: numbering, headingObserver: observe)
+                } else if style != "PicoCodeBlock" { advance(element) }
+            case "w:tbl":
+                for row in element.children().array() where row.tagName().lowercased() == "w:tr" {
+                    for cell in row.children().array() where cell.tagName().lowercased() == "w:tc" {
+                        for paragraph in try cell.getElementsByTag("w:p") where !isInsideTextBox(paragraph, before: cell) { advance(paragraph) }
+                    }
+                }
+            case "w:sdt":
+                if let content = element.children().first(where: { $0.tagName().lowercased() == "w:sdtcontent" }) { pending.append(contentsOf: content.children().array().reversed()) }
+            default: break
+            }
+        }
+    }
+
     // MARK: - Blocks
 
     /// Renders the block-level children of a container (the body, or a content
     /// control's content) to Markdown blocks, recursing into `w:sdt` content
     /// controls (forms/templates wrap paragraphs and tables in them).
-    static func renderBlocks(in container: Element, relationships: [String: String], numbering: WordListNumbering? = nil, headingObserver: ((Element, String) -> Void)? = nil) throws -> [String] {
+    static func renderBlocks(in container: Element, relationships: [String: String], numbering: WordListNumbering? = nil, headingObserver: ((Element, String) -> Void)? = nil, tableBudget: TableBudget = TableBudget()) throws -> [String] {
         var blocks: [String] = []
         var previousList: MarkdownBlockParser.ListKind?
         var rootListInstance: String?
@@ -139,7 +172,7 @@ public struct WordConverter: DocumentConverter {
                 }
             case "w:tbl":
                 previousList = nil
-                let table = try renderTable(element, relationships: relationships, numbering: numbering)
+                let table = try renderTable(element, relationships: relationships, numbering: numbering, budget: tableBudget)
                 if !table.isEmpty { blocks.append(table) }
             case "w:sdt":
                 if let content = element.children().first(where: { $0.tagName().lowercased() == "w:sdtcontent" }) {
@@ -157,13 +190,13 @@ public struct WordConverter: DocumentConverter {
     /// blocks. Honors markup-compatibility (`mc:AlternateContent`) semantics by
     /// rendering only one branch per AlternateContent, so a text box isn't
     /// duplicated across `mc:Choice`/`mc:Fallback` (or multiple choices).
-    static func extractTextBoxes(from body: Element, relationships: [String: String], numbering: WordListNumbering? = nil) throws -> [String] {
+    static func extractTextBoxes(from body: Element, relationships: [String: String], numbering: WordListNumbering? = nil, tableBudget: TableBudget = TableBudget()) throws -> [String] {
         var blocks: [String] = []
         // Iterate the Elements sequence directly (no intermediate array copy).
         guard let textBoxes = try? body.getElementsByTag("w:txbxContent") else { return blocks }
         for txbx in textBoxes {
             if !shouldRenderTextBox(txbx) { continue }
-            blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships, numbering: numbering))
+            blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships, numbering: numbering, tableBudget: tableBudget))
         }
         return blocks
     }
@@ -456,7 +489,40 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Tables
 
-    static func renderTable(_ table: Element, relationships: [String: String], numbering: WordListNumbering? = nil) throws -> String {
+    final class TableBudget {
+        private var remainingCells: Int
+        private var remainingBytes: Int
+        init(maximumCells: Int = 1_000_000, maximumBytes: Int = 64 * 1024 * 1024) {
+            remainingCells = maximumCells; remainingBytes = maximumBytes
+        }
+        func reserve(rows: Int, columns: Int) throws {
+            guard rows >= 0, columns > 0, rows <= remainingCells / columns else { throw PicoDocsError.fileCorrupted }
+            let cells = rows * columns
+            let bytes = cells * 40 + rows * 32 + columns * 8
+            guard bytes <= remainingBytes else { throw PicoDocsError.fileCorrupted }
+            remainingCells -= cells; remainingBytes -= bytes
+        }
+        func reserveText(_ text: String) throws {
+            guard text.utf8.count < remainingBytes / 8 else { throw PicoDocsError.fileCorrupted }
+            remainingBytes -= (text.utf8.count + 1) * 8
+        }
+    }
+
+    static func renderTable(_ table: Element, relationships: [String: String], numbering: WordListNumbering? = nil, budget: TableBudget = TableBudget()) throws -> String {
+        // Reserve the padded grid across the whole conversion before allocating
+        // any span placeholders or serialized Markdown for this table.
+        var rowCount = 0, columnCount = 0
+        for row in table.children().array() where row.tagName().lowercased() == "w:tr" {
+            var columns = 0
+            for cell in row.children().array() where cell.tagName().lowercased() == "w:tc" {
+                let span = try gridSpan(of: cell)
+                guard columns <= 16_384 - span else { throw PicoDocsError.fileCorrupted }
+                columns += span
+            }
+            if columns > 0 { rowCount += 1; columnCount = max(columnCount, columns) }
+        }
+        guard columnCount > 0 else { return "" }
+        try budget.reserve(rows: rowCount, columns: columnCount)
         var rows: [[String]] = []
         var widestRow = 0
         for tr in table.children().array() where tr.tagName().lowercased() == "w:tr" {
@@ -480,7 +546,10 @@ public struct WordConverter: DocumentConverter {
                     let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
                     let prefix = numbering?.prefix(numPr: numPr, style: style)
                     let t = (prefix ?? "") + renderInline(paragraph, relationships: relationships, hardBreak: "\n").trimmingCharacters(in: .whitespaces)
-                    if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
+                    if !t.isEmpty {
+                        try budget.reserveText(t)
+                        cellText += (cellText.isEmpty ? "" : "\n") + t
+                    }
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
                 cells.append(MarkdownTableCell.escapeDelimiters(cellText)

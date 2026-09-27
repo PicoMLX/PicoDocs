@@ -334,18 +334,19 @@ public struct RTFConverter: DocumentConverter {
     private static func hyperlinkTarget(_ instruction: String) -> String? {
         let ns = instruction as NSString
         let tokens = fieldTokenPattern.matches(in: instruction, range: NSRange(location: 0, length: ns.length)).map { match in
-            ns.substring(with: match.range(at: match.range(at: 1).location == NSNotFound ? 2 : 1))
+            let quoted = match.range(at: 1).location != NSNotFound
+            return (text: ns.substring(with: match.range(at: quoted ? 1 : 2)), quoted: quoted)
         }
-        guard tokens.first?.uppercased() == "HYPERLINK" else { return nil }
+        guard tokens.first?.text.uppercased() == "HYPERLINK" else { return nil }
         var target: String?, bookmark: String?, index = 1
         while index < tokens.count {
-            let token = tokens[index]
+            let entry = tokens[index], token = entry.text
             index += 1
-            if token == "\\l" || token == "\\o" || token == "\\t" {
+            if !entry.quoted, token == "\\l" || token == "\\o" || token == "\\t" {
                 guard index < tokens.count else { return nil }
-                if token == "\\l" { bookmark = tokens[index] }
+                if token == "\\l" { bookmark = tokens[index].text }
                 index += 1
-            } else if token.hasPrefix("\\") { continue }
+            } else if !entry.quoted, token.hasPrefix("\\") { continue }
             else if target == nil { target = token }
         }
         if let bookmark, !bookmark.isEmpty {

@@ -116,8 +116,9 @@ public struct WordprocessingMLExporter: DocumentExporter {
     private final class ImageIndex {
         let byPath: [String: [IndexedImage]]
         let byBasename: [String: [IndexedImage]]
-        private var ambiguousPaths: Set<String> = []
-        private var ambiguousBasenames: Set<String> = []
+        private enum Resolution { case found(IndexedImage), missing }
+        private var resolvedPaths: [String: Resolution] = [:]
+        private var resolvedBasenames: [String: Resolution] = [:]
         init(byPath: [String: [IndexedImage]], byBasename: [String: [IndexedImage]]) {
             self.byPath = byPath; self.byBasename = byBasename
         }
@@ -134,18 +135,29 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 }
                 return (match, false)
             }
-            if let exact = byPath[source] {
-                // A registered full path is authoritative, even if its payload is invalid.
-                guard !ambiguousPaths.contains(source) else { return nil }
-                let result = try unique(exact)
-                if result.ambiguous { ambiguousPaths.insert(source) }
-                return result.image
+            func image(_ resolution: Resolution) -> IndexedImage? {
+                if case .found(let value) = resolution { return value }
+                return nil
             }
+            if let exact = byPath[source] {
+                // Exact registration is authoritative, including external URIs.
+                if let cached = resolvedPaths[source] { return image(cached) }
+                let result = try unique(exact).image
+                resolvedPaths[source] = result.map(Resolution.found) ?? .missing
+                return result
+            }
+            // Only local/package paths may use a basename alias. Preserve the
+            // legacy Windows drive-path handling while rejecting URI schemes.
+            let path = source.trimmingCharacters(in: .whitespacesAndNewlines)
+            let drive = path.range(of: #"^[A-Za-z]:[\\/]"#, options: .regularExpression) != nil
+            let scheme = path.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*:"#, options: .regularExpression) != nil
+            guard !path.hasPrefix("//"), !path.hasPrefix("\\\\"), !scheme || drive else { return nil }
             let basename = WordprocessingMLExporter.portableBasename(source)
-            guard !ambiguousBasenames.contains(basename) else { return nil }
-            let result = try unique(byBasename[basename] ?? [])
-            if result.ambiguous { ambiguousBasenames.insert(basename) }
-            return result.image
+            guard let candidates = byBasename[basename] else { return nil }
+            if let cached = resolvedBasenames[basename] { return image(cached) }
+            let result = try unique(candidates).image
+            resolvedBasenames[basename] = result.map(Resolution.found) ?? .missing
+            return result
         }
     }
 

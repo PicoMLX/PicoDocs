@@ -65,6 +65,7 @@ public struct SpreadsheetConverter: DocumentConverter {
             rowCount = max(rowCount, Int(clamping: row.reference))
             var seenColumns: Set<Int> = []
             for cell in row.cells {
+                guard cell.reference.row == row.reference else { throw PicoDocsError.fileCorrupted }
                 let column = origin.distance(to: cell.reference.column)
                 // Bound the set before insertion and reject physical duplicates,
                 // including empty cells that consume no decoded-value budget.

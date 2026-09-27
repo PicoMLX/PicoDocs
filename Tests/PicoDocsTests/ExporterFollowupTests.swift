@@ -9,6 +9,93 @@ import AppKit
 
 struct ExporterFollowupTests {
 
+    @Test func denseInlineSyntaxIsChargedBeforeOfficeParsing() throws {
+        let input = ConverterResult(sections: [.init(markdown: String(repeating: "**x** ", count: 1_000_000))])
+        #expect(throws: ExporterError.self) { try OfficeDocumentBlocks.validateInput(input) }
+        let plain = ConverterResult(sections: [.init(markdown: String(repeating: "text ", count: 1_000_000))])
+        try OfficeDocumentBlocks.validateInput(plain)
+        for format in [ExportableFileType.docx, .pptx, .rtf, .xlsx] {
+            #expect(throws: ExporterError.self) { try PicoDocsEngine.write(input, to: format) }
+        }
+    }
+
+    @Test func repeatedImageResolutionHandlesInvalidAndUniqueCandidates() throws {
+        let invalid = DocumentSection(kind: .image, markdown: "", sourcePath: "local/logo.png", metadata: ["base64": "invalid", "mimeType": "image/png"])
+        let valid = DocumentSection(kind: .image, markdown: "", sourcePath: "local/logo.png", metadata: ["base64": "AQID", "mimeType": "image/png"])
+        for includeValid in [false, true] {
+            for source in ["local/logo.png", "logo.png"] {
+                let markdown = String(repeating: "![Alt](" + source + ") ", count: 200)
+                let result = ConverterResult(sections: [.init(markdown: markdown)] + Array(repeating: invalid, count: 1000) + (includeValid ? [valid] : []))
+                let document = try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml")
+                #expect(document.components(separatedBy: "<w:drawing>").count - 1 == (includeValid ? 200 : 0))
+                if !includeValid { #expect(document.contains(">Alt</w:t>")) }
+            }
+        }
+    }
+
+    @Test func WordTablesShareGridAndTextBudgets() async throws {
+        let tableXML = #"<w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val="3"/></w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+        let table = try #require(SwiftSoup.parse(tableXML, "", SwiftSoup.Parser.xmlParser()).children().first())
+        let budget = WordConverter.TableBudget(maximumCells: 5)
+        #expect(!(try WordConverter.renderTable(table, relationships: [:], budget: budget)).isEmpty)
+        #expect(throws: PicoDocsError.fileCorrupted) { try WordConverter.renderTable(table, relationships: [:], budget: budget) }
+        let textBudget = WordConverter.TableBudget(maximumBytes: 16)
+        try textBudget.reserveText("x")
+        #expect(throws: PicoDocsError.fileCorrupted) { try textBudget.reserveText("x") }
+        let row = #"<w:tr><w:tc><w:tcPr><w:gridSpan w:val="16384"/></w:tcPr><w:p/></w:tc></w:tr>"#
+        let largeTable = "<w:tbl>" + String(repeating: row, count: 31) + "</w:tbl>"
+        for second in [largeTable, "<w:p><w:r><w:txbxContent>" + largeTable + "</w:txbxContent></w:r></w:p>"] {
+            let doc = "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:body>" + largeTable + second + "</w:body></w:document>"
+            let data = PagesConverterTests.makeZip([("word/document.xml", Array(doc.utf8))])
+            await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: data, filename: "tables.docx") }
+        }
+    }
+
+    @Test func headingDiscoverySkipsTableProjection() throws {
+        let input = #"<w:body><w:p><w:r><w:t>ordinary</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val="1000000000"/></w:tcPr><w:p><w:r><w:t>ignored</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sdt><w:sdtContent><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p></w:sdtContent></w:sdt></w:body>"#
+        let body = try #require(SwiftSoup.parse(input, "", SwiftSoup.Parser.xmlParser()).getElementsByTag("w:body").first())
+        var titles: [String] = []
+        try WordConverter.collectHeadings(in: body, relationships: [:], numbering: nil) { _, title in titles.append(title) }
+        #expect(titles == ["Title"])
+        #expect(throws: PicoDocsError.fileCorrupted) { try WordConverter.renderBlocks(in: body, relationships: [:]) }
+    }
+
+    @Test func quotedRTFNetworkTargetsRemainLinks() {
+        let rtf = #"{\rtf1{\field{\*\fldinst HYPERLINK "\\\\server\\share"}{\fldrslt Files}}}"#
+        let markdown = RTFConverter.markdown(fromRTF: rtf)
+        #expect(MarkdownInlineParser.parse(markdown) == [.link(label: [.text("Files")], destination: #"\\server\share"#)])
+    }
+
+    @Test func worksheetCellCoordinatesMustMatchTheirRow() async throws {
+        let seed = try PicoDocsEngine.write(markdown: "x", to: .xlsx)
+        for coordinate in ["A1", "A2", "A1048577"] {
+            let archive = try #require(Archive(data: seed, accessMode: .read))
+            var files: [(name: String, data: [UInt8])] = []
+            for entry in archive {
+                var bytes = Data(); _ = try archive.extract(entry) { bytes.append($0) }
+                if entry.path == "xl/worksheets/sheet1.xml" { bytes = Data((#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r=""# + coordinate + #"" t="inlineStr"><is><t>value</t></is></c></row></sheetData></worksheet>"#).utf8) }
+                files.append((entry.path, Array(bytes)))
+            }
+            let data = PagesConverterTests.makeZip(files)
+            if coordinate != "A1" { await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: data, filename: "mismatch.xlsx") } }
+            else { #expect(try await PicoDocsEngine.convert(data: data, filename: "valid.xlsx").markdown().contains("value")) }
+        }
+    }
+
+    @Test func externalImagesDoNotAliasLocalBasenames() throws {
+        let image = DocumentSection(kind: .image, markdown: "", sourcePath: "local/logo.png", metadata: ["base64": "AQID", "mimeType": "image/png"])
+        for source in ["https://example.test/assets/logo.png", "http://example.test/logo.png", "//example.test/logo.png", "data:image/png;base64,logo.png", "custom:logo.png", "logo.png", "folder/logo.png", #"C:\assets\logo.png"#] {
+            let local = ["logo.png", "folder/logo.png", #"C:\assets\logo.png"#].contains(source)
+            let escaped = source.replacingOccurrences(of: "\\", with: "\\\\")
+            let data = try PicoDocsEngine.write(ConverterResult(sections: [.init(markdown: "![Remote](" + escaped + ")"), image]), to: .docx)
+            let document = try xml(data, "word/document.xml")
+            #expect(document.contains("<w:drawing>") == local)
+            if !local { #expect(document.contains(">Remote</w:t>")) }
+        }
+        let exact = DocumentSection(kind: .image, markdown: "", sourcePath: "https://example.test/logo.png", metadata: ["base64": "AQID", "mimeType": "image/png"])
+        #expect(try xml(PicoDocsEngine.write(ConverterResult(sections: [.init(markdown: "![Explicit](https://example.test/logo.png)"), exact]), to: .docx), "word/document.xml").contains("<w:drawing>"))
+    }
+
     @Test func physicalWorksheetRowsShareTheWorkbookBudget() throws {
         var budget = SpreadsheetProjectionBudget(maximumBytes: 256)
         try budget.reservePhysicalRows(1)

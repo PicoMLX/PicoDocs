@@ -60,6 +60,10 @@ enum OfficeDocumentBlocks {
                     let value = scalar.value
                     let bytes = value <= 0x7F ? 1 : value <= 0x7FF ? 2 : value <= 0xFFFF ? 3 : 4
                     try charge(bytes * 7)
+                    // Potential inline delimiters can each produce a node/run,
+                    // even when the paragraph occupies only one source line.
+                    // Charge conservatively before constructing the inline IR.
+                    if "*_[]`<>".unicodeScalars.contains(scalar) { try charge(64) }
                     if scalar == "\n" || scalar == "\r" { hasContent = false; tableLine = false; continue }
                     if !hasContent, !CharacterSet.whitespaces.contains(scalar) {
                         hasContent = true; tableLine = scalar == "|"
