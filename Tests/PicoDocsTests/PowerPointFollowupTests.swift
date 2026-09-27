@@ -5,6 +5,37 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func strictGraphicPayloadURIsRetainTablesAndOLEPreviews() async throws {
+        typealias B = PowerPointConverterTests
+        let picture = #"<p:pic><p:nvPicPr><p:cNvPr name="Preview"/></p:nvPicPr><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic>"#
+        let table = "<a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Table cell</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl>"
+        for (uri, payload) in [("http://purl.oclc.org/ooxml/drawingml/table", table), ("http://purl.oclc.org/ooxml/presentationml/ole", "<p:oleObj>" + picture + "</p:oleObj>")] {
+            let frame = "<p:graphicFrame xmlns:p='http://purl.oclc.org/ooxml/presentationml/main' xmlns:a='http://purl.oclc.org/ooxml/drawingml/main'><a:graphic><a:graphicData uri='\(uri)'>\(payload)</a:graphicData></a:graphic></p:graphicFrame>"
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title") + frame, relationships: [("image", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "../media/preview.png")])], extraParts: [("ppt/media/preview.png", [1,2,3])])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "strict.pptx")
+            #expect(result.markdown().contains(uri.hasSuffix("/table") ? "Table cell" : "Preview"))
+            #expect(result.sections.contains { $0.kind == .image } == uri.hasSuffix("/ole"))
+        }
+    }
+
+    @Test func recognizedGraphicPayloadsEnforceRequiredExtensions() async throws {
+        typealias B = PowerPointConverterTests
+        for uri in ["http://schemas.openxmlformats.org/drawingml/2006/table", "http://purl.oclc.org/ooxml/drawingml/table", "http://schemas.openxmlformats.org/presentationml/2006/ole", "http://purl.oclc.org/ooxml/presentationml/ole", "urn:opaque"] {
+            for ignorable in [false, true] {
+                let ignored = ignorable ? " mc:Ignorable='u'" : ""
+                let payload = uri.hasSuffix("/table") ? "<a:tbl/>" : "<p:oleObj/>"
+                let frame = "<p:graphicFrame><a:graphic><a:graphicData xmlns:u='urn:unsupported'\(ignored) uri='\(uri)'><u:required/>\(payload)</a:graphicData></a:graphic></p:graphicFrame>"
+                let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title") + frame)])
+                if ignorable || uri == "urn:opaque" {
+                    #expect(try await PicoDocsEngine.convert(data: data, filename: "extension.pptx").markdown().contains("Title"))
+                } else {
+                    await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: data, filename: "extension.pptx") }
+                }
+            }
+        }
+    }
+
+
     @Test func opaqueGraphicDataCannotExposeAnOLEPreview() async throws {
         typealias B = PowerPointConverterTests
         let picture = #"<p:pic><p:nvPicPr><p:cNvPr name="Preview"/></p:nvPicPr><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic>"#

@@ -421,18 +421,20 @@ public struct PowerPointConverter: DocumentConverter {
         } ?? branches.first { $0.tagName().lowercased() == "mc:fallback" }
     }
 
+    private static func graphicPayloadTag(uri: String) -> String? {
+        switch uri {
+        case "http://schemas.openxmlformats.org/drawingml/2006/table", "http://purl.oclc.org/ooxml/drawingml/table": return "a:tbl"
+        case "http://schemas.openxmlformats.org/presentationml/2006/ole", "http://purl.oclc.org/ooxml/presentationml/ole": return "p:oleobj"
+        default: return nil
+        }
+    }
+
     static func selectedDescendant(in element: Element, named name: String) -> Element? {
         guard !Task.isCancelled else { return nil }
         guard !["p:ext", "a:ext"].contains(element.tagName().lowercased()) else { return nil }
         guard !element.tagName().lowercased().hasPrefix("extension"), !element.tagName().lowercased().hasPrefix("requiredextension") else { return nil }
-        if element.tagName().lowercased() == "a:graphicdata" {
-            let requiredURI: String?
-            switch name {
-            case "a:tbl": requiredURI = "http://schemas.openxmlformats.org/drawingml/2006/table"
-            case "p:oleobj": requiredURI = "http://schemas.openxmlformats.org/presentationml/2006/ole"
-            default: requiredURI = nil
-            }
-            if let requiredURI, (try? element.attr("uri")) != requiredURI { return nil }
+        if element.tagName().lowercased() == "a:graphicdata", name == "a:tbl" || name == "p:oleobj" {
+            guard graphicPayloadTag(uri: (try? element.attr("uri")) ?? "") == name else { return nil }
         }
         if element.tagName().lowercased() == name { return element }
         if element.tagName().lowercased() == "mc:alternatecontent" {
@@ -1141,7 +1143,8 @@ public struct PowerPointConverter: DocumentConverter {
             if tag == "mc:alternatecontent" {
                 if let selected = selectedAlternateBranch(element) { pending.append((selected, allowsUnknown)) }
             } else {
-                let childAllowsUnknown = tag == "a:graphicdata" || ((tag == "mc:choice" || tag == "mc:fallback") && allowsUnknown)
+                let opaqueGraphicPayload = tag == "a:graphicdata" && graphicPayloadTag(uri: (try? element.attr("uri")) ?? "") == nil
+                let childAllowsUnknown = opaqueGraphicPayload || ((tag == "mc:choice" || tag == "mc:fallback") && allowsUnknown)
                 pending += element.children().array().map { ($0, childAllowsUnknown) }
             }
         }
