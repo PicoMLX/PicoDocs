@@ -116,9 +116,12 @@ struct MarkdownList: Equatable {
         let body = items.map { item in
             let value = item.number.map { $0 == expected ? "" : " value=\"\($0)\"" } ?? ""
             if let number = item.number { expected = min(number, Int.max - 1) + 1 }
+            let loose = item.content.filter { if case .text = $0 { return true }; return false }.count > 1
             let content = item.content.map { content in
                 switch content {
-                case .text(let text): return inline(text).replacingOccurrences(of: "\n", with: " ")
+                case .text(let text):
+                    let rendered = inline(text).replacingOccurrences(of: "\n", with: " ")
+                    return loose ? "<p>" + rendered + "</p>" : rendered
                 case .list(let child): return child.html(inline: inline)
                 }
             }.joined(separator: "\n")

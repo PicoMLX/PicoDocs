@@ -62,7 +62,7 @@ public struct WordConverter: DocumentConverter {
         //
         // NOTE: these are CommonMark footnote markers in the canonical Markdown;
         // DocumentRenderer also renders them for the HTML and plaintext exports.
-        let notes = Self.parseNotes(archive)
+        let notes = Self.parseNotes(archive, bookmarks: relationships.filter { $0.key.hasPrefix("#") })
         let definitions = Self.referencedNoteIDs(in: body).compactMap { id in
             notes[id].map { text in
                 // Indent continuation lines (from a manual w:br inside the note) so
@@ -143,12 +143,12 @@ public struct WordConverter: DocumentConverter {
                     let marker = MarkdownBlockParser.listMarker(markdown.trimmingCharacters(in: .whitespaces))
                     let continuation = numbering?.lastParagraphIsContinuation == true
                     let identity = marker == nil && !continuation ? nil : numbering?.lastParagraphList
-                    let joins = identity.map { continuation ? $0.instance == rootListInstance : ($0.level > 0 || $0.instance == rootListInstance) } ?? (marker != nil && marker == previousList)
+                    let joins = identity.map { continuation ? ($0.instance == rootListInstance || numbering?.lastParagraphIsExportedContinuation == true) : ($0.level > 0 || $0.instance == rootListInstance) } ?? (marker != nil && marker == previousList)
                     if joins, previousList != nil, !blocks.isEmpty {
                         blocks[blocks.count - 1] += (continuation ? "\n\n" : "\n") + markdown
                     } else { blocks.append(markdown) }
                     if !continuation { previousList = marker }
-                    if let identity, identity.level == 0 { rootListInstance = identity.instance }
+                    if !continuation, let identity, identity.level == 0 { rootListInstance = identity.instance }
                     if marker == nil && !continuation { rootListInstance = nil }
                 }
             case "w:tbl":
@@ -533,7 +533,7 @@ public struct WordConverter: DocumentConverter {
     /// Parses footnote and endnote text (stored in separate parts) into a map
     /// keyed by reference id (`fn<id>` / `en<id>`), skipping the auto separator
     /// and continuation notes.
-    static func parseNotes(_ archive: Archive) -> [String: String] {
+    static func parseNotes(_ archive: Archive, bookmarks: [String: String] = [:]) -> [String: String] {
         var notes: [String: String] = [:]
         // Resolve each note part from its document relationship Target (falling
         // back to the standard name), then render it against that part's own
@@ -543,7 +543,7 @@ public struct WordConverter: DocumentConverter {
             ("/endnotes", "word/endnotes.xml", "w:endnote", "en"),
         ] {
             let part = relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
-            let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part))
+            let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part)).merging(bookmarks) { _, canonical in canonical }
             for (key, value) in parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships) {
                 notes[key] = value
             }
@@ -704,7 +704,7 @@ public struct WordConverter: DocumentConverter {
             guard budget.seen.insert(mediaPath).inserted else { continue }
             try Task.checkCancellation()
             guard let entry = archive[mediaPath] else { continue }
-            guard budget.remainingImages > 0, entry.uncompressedSize <= UInt64(budget.remainingBytes) else { throw PicoDocsError.parsingError }
+            guard budget.remainingImages > 0, entry.uncompressedSize <= UInt64(budget.remainingBytes) else { continue }
 
             guard let bytes = readEntry(archive, path: mediaPath, maxBytes: min(32 * 1024 * 1024, budget.remainingBytes)), !bytes.isEmpty else { continue }
             budget.remainingBytes -= bytes.count

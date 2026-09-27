@@ -41,7 +41,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         try pkg.addXML("word/document.xml", Self.documentXML(body: builder.body))
         try pkg.addXML("word/_rels/document.xml.rels", Self.documentRels(builder.relationships))
         if builder.usedNumbering {
-            try pkg.addXML("word/numbering.xml", Self.numberingXML(usedBullet: builder.usedBullet, orderedNumIds: builder.orderedNumIds))
+            try pkg.addXML("word/numbering.xml", Self.numberingXML(usedBullet: builder.usedBullet, orderedNumIds: builder.orderedNumIds, continuationNumID: builder.continuationNumID))
         }
         for media in builder.media {
             try pkg.addData("word/media/\(media.filename)", media.data)
@@ -78,10 +78,19 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
     /// A distinct embedded image: its bytes and the unique media part filename it
     /// will be written under (`word/media/<mediaFilename>`).
-    private struct IndexedImage {
-        let data: Data
+    private final class IndexedImage {
+        let base64: String
         let mediaFilename: String
         let metadata: [String: String]
+        private var attemptedDecode = false
+        private var cachedData: Data?
+        init(base64: String, mediaFilename: String, metadata: [String: String]) {
+            self.base64 = base64; self.mediaFilename = mediaFilename; self.metadata = metadata
+        }
+        func decodedData() -> Data? {
+            if !attemptedDecode { cachedData = Data(base64Encoded: base64); attemptedDecode = true }
+            return cachedData
+        }
     }
 
     /// Resolves an inline image reference to an embedded carrier. Keyed by full
@@ -89,12 +98,13 @@ public struct WordprocessingMLExporter: DocumentExporter {
     /// two carriers that share a basename (`charts/logo.png` vs `headers/logo.png`)
     /// stay distinct instead of one overwriting the other.
     private struct ImageIndex {
-        let byPath: [String: IndexedImage]
-        let byBasename: [String: IndexedImage]
+        let byPath: [String: [IndexedImage]]
+        let byBasename: [String: [IndexedImage]]
 
         func lookup(_ source: String) -> IndexedImage? {
-            if let image = byPath[source] { return image }
-            return byBasename[WordprocessingMLExporter.portableBasename(source)]
+            if let image = byPath[source]?.last(where: { $0.decodedData() != nil }) { return image }
+            let candidates = byBasename[WordprocessingMLExporter.portableBasename(source)]?.filter { $0.decodedData() != nil } ?? []
+            return candidates.count == 1 ? candidates[0] : nil
         }
     }
 
@@ -103,14 +113,12 @@ public struct WordprocessingMLExporter: DocumentExporter {
     }
 
     private static func imageIndex(_ sections: [DocumentSection]) -> ImageIndex {
-        var byPath: [String: IndexedImage] = [:]
-        var byBasename: [String: IndexedImage] = [:]
-        var basenameCounts: [String: Int] = [:]
+        var byPath: [String: [IndexedImage]] = [:]
+        var byBasename: [String: [IndexedImage]] = [:]
         var usedFilenames: Set<String> = []
 
         for section in sections where section.kind == .image {
-            guard let base64 = section.metadata["base64"], !base64.isEmpty,
-                  let data = Data(base64Encoded: base64) else { continue }
+            guard let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
 
             // The carrier's display name (basename of the source path, else title).
             let name = [section.sourcePath, section.title].compactMap { $0 }.first { !$0.isEmpty }.map(portableBasename)
@@ -136,18 +144,13 @@ public struct WordprocessingMLExporter: DocumentExporter {
             }
             usedFilenames.insert(mediaFilename.lowercased())
 
-            let image = IndexedImage(data: data, mediaFilename: mediaFilename, metadata: section.metadata)
+            let image = IndexedImage(base64: base64, mediaFilename: mediaFilename, metadata: section.metadata)
             if let identity = [section.sourcePath, section.title].compactMap({ $0 }).first(where: { !$0.isEmpty }) {
-                byPath[identity] = image
+                byPath[identity, default: []].append(image)
             }
             if let name, !name.isEmpty {
-                basenameCounts[name, default: 0] += 1
-                byBasename[name] = image
+                byBasename[name, default: []].append(image)
             }
-        }
-        // Drop ambiguous basenames; those references must use the full path.
-        for (name, count) in basenameCounts where count > 1 {
-            byBasename.removeValue(forKey: name)
         }
         return ImageIndex(byPath: byPath, byBasename: byBasename)
     }
@@ -163,6 +166,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         private(set) var media: [(filename: String, data: Data)] = []
         private(set) var mediaExtensions: Set<String> = []
         private(set) var usedBullet = false
+        private(set) var continuationNumID: Int?
         private(set) var orderedNumIds: [(id: Int, level: Int, start: Int)] = []
 
         /// Numbering is needed when any list (bullet or ordered) was emitted.
@@ -255,9 +259,13 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 for (index, content) in item.content.enumerated() {
                     switch content {
                     case .text(let text):
+                        if index > 0, continuationNumID == nil {
+                            continuationNumID = nextOrderedNumId
+                            nextOrderedNumId += 1
+                        }
                         let pPr = index == 0
                             ? "<w:pPr><w:numPr><w:ilvl w:val=\"\(level)\"/><w:numId w:val=\"\(numId)\"/></w:numPr></w:pPr>"
-                            : "<w:pPr><w:ind w:left=\"\((level + 1) * 720)\"/></w:pPr>"
+                            : "<w:pPr><w:pStyle w:val=\"PicoListContinuation\"/><w:numPr><w:ilvl w:val=\"\(level)\"/><w:numId w:val=\"\(continuationNumID!)\"/></w:numPr><w:ind w:left=\"\((level + 1) * 720)\"/></w:pPr>"
                         body += paragraph(pPr: pPr, content: inlineRuns(text))
                     case .list(let child): appendList(child, level: level + 1)
                     }
@@ -340,7 +348,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         ///   `WordConverter.imageAltText` reads first, so meaningful alt text survives
         ///   the round-trip instead of collapsing to the filename.
         private func imageRun(alt: String, source: String) -> String? {
-            guard let image = images.lookup(source) else { return nil }
+            guard let image = images.lookup(source), let data = image.decodedData() else { return nil }
             let filename = image.mediaFilename
             let ext = (filename as NSString).pathExtension.lowercased()
 
@@ -350,7 +358,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 relID = existing
             } else {
                 mediaExtensions.insert(ext)
-                media.append((filename, image.data))
+                media.append((filename, data))
                 relID = nextRelID()
                 relationships.append(Relationship(
                     id: relID,
@@ -367,7 +375,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             let name = OOXMLPackageWriter.escapeAttribute(filename)
             let descr = alt.isEmpty ? "" : " descr=\"\(OOXMLPackageWriter.escapeAttribute(alt))\""
             // Fit the intrinsic aspect ratio inside the existing 5 × 3.75-inch box.
-            let (cx, cy) = WordprocessingMLExporter.imageExtents(image.data, metadata: image.metadata)
+            let (cx, cy) = WordprocessingMLExporter.imageExtents(data, metadata: image.metadata)
             return """
             <w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">\
             <wp:extent cx="\(cx)" cy="\(cy)"/>\
@@ -496,6 +504,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         for level in 1...6 {
             styles += "<w:style w:type=\"paragraph\" w:styleId=\"Heading\(level)\"><w:name w:val=\"heading \(level)\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:keepNext/><w:spacing w:before=\"240\" w:after=\"120\"/><w:outlineLvl w:val=\"\(level - 1)\"/></w:pPr><w:rPr><w:b/><w:sz w:val=\"\(40 - level * 2)\"/></w:rPr></w:style>"
         }
+        styles += "<w:style w:type=\"paragraph\" w:styleId=\"PicoListContinuation\"><w:name w:val=\"List Continuation\"/><w:basedOn w:val=\"Normal\"/></w:style>"
         styles += "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:ind w:left=\"720\" w:right=\"720\"/></w:pPr><w:rPr><w:i/></w:rPr></w:style>"
         styles += "<w:style w:type=\"paragraph\" w:styleId=\"PicoCodeBlock\"><w:name w:val=\"Code Block\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr><w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/></w:rPr></w:style>"
         styles += "<w:style w:type=\"character\" w:styleId=\"PicoCode\"><w:name w:val=\"Inline Code\"/><w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/></w:rPr></w:style>"
@@ -506,7 +515,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
     /// to a single shared instance (`numId` 1); every ordered list gets its own
     /// `numId` over a shared decimal abstract definition, each with a `startOverride`
     /// of 1 so Word restarts separate lists instead of continuing the count.
-    private static func numberingXML(usedBullet: Bool, orderedNumIds: [(id: Int, level: Int, start: Int)]) -> String {
+    private static func numberingXML(usedBullet: Bool, orderedNumIds: [(id: Int, level: Int, start: Int)], continuationNumID: Int?) -> String {
         func levels(ordered: Bool) -> String {
             (0..<9).map { level in
                 "<w:lvl w:ilvl=\"\(level)\"><w:start w:val=\"1\"/><w:numFmt w:val=\"\(ordered ? "decimal" : "bullet")\"/><w:lvlText w:val=\"\(ordered ? "%\(level + 1)." : "•")\"/><w:pPr><w:ind w:left=\"\((level + 1) * 720)\" w:hanging=\"360\"/></w:pPr></w:lvl>"
@@ -519,6 +528,13 @@ public struct WordprocessingMLExporter: DocumentExporter {
             for instance in orderedNumIds {
                 instances += "<w:num w:numId=\"\(instance.id)\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"\(instance.level)\"><w:startOverride w:val=\"\(instance.start)\"/></w:lvlOverride></w:num>"
             }
+        }
+        if let continuationNumID {
+            let markerless = (0..<9).map { level in
+                "<w:lvl w:ilvl=\"\(level)\"><w:numFmt w:val=\"none\"/><w:lvlText w:val=\"\"/><w:pPr><w:ind w:left=\"\((level + 1) * 720)\"/></w:pPr></w:lvl>"
+            }.joined()
+            definitions += "<w:abstractNum w:abstractNumId=\"2\">\(markerless)</w:abstractNum>"
+            instances += "<w:num w:numId=\"\(continuationNumID)\"><w:abstractNumId w:val=\"2\"/></w:num>"
         }
         return OOXMLPackageWriter.xmlDeclaration + "<w:numbering xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\(definitions)\(instances)</w:numbering>"
     }

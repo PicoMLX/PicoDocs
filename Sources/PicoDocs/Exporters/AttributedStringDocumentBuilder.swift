@@ -47,12 +47,12 @@ enum AttributedStringDocumentBuilder {
         }
     }
 
-    static func attributedString(from result: ConverterResult) -> NSAttributedString {
+    static func attributedString(from result: ConverterResult, preserveHeadingMarkers: Bool = false) -> NSAttributedString {
         let result = PicoDocsEngine.withSynthesizedImageReferences(result)
         let output = NSMutableAttributedString()
         let blocks = OfficeDocumentBlocks.parse(result)
         for (index, block) in blocks.enumerated() {
-            append(block, to: output)
+            append(block, to: output, preserveHeadingMarkers: preserveHeadingMarkers)
             if index < blocks.count - 1 {
                 output.append(NSAttributedString(string: "\n"))
             }
@@ -62,9 +62,14 @@ enum AttributedStringDocumentBuilder {
 
     // MARK: - Blocks
 
-    private static func append(_ block: MarkdownBlock, to output: NSMutableAttributedString) {
+    private static func append(_ block: MarkdownBlock, to output: NSMutableAttributedString, preserveHeadingMarkers: Bool) {
         switch block {
         case .heading(let level, let text):
+            // A visible Markdown marker preserves heading semantics through RTF,
+            // whose reader intentionally does not infer headings from font size.
+            if preserveHeadingMarkers {
+                output.append(NSAttributedString(string: String(repeating: "#", count: max(1, min(level, 6))) + " ", attributes: [.font: bodyFont()]))
+            }
             output.append(inline(text, size: headingSize(level), bold: true))
             output.append(NSAttributedString(string: "\n"))
 

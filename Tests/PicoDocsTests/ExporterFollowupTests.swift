@@ -8,6 +8,130 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func exportedLooseListsKeepContinuationIdentityAndCounters() async throws {
+        for source in ["- Parent\n\n  Continuation\n- Next", "10. Parent\n\n    Continuation\n11. Next", "- Parent\n  - Child\n\n    Child continuation\n\n  Parent continuation\n- Next"] {
+            let data = try PicoDocsEngine.write(markdown: source, to: .docx)
+            let result = try await PicoDocsEngine.convert(data: data, filename: "loose.docx")
+            #expect(result.markdown() == source)
+            #expect(try xml(data, "word/numbering.xml").contains("w:numFmt w:val=\"none\""))
+        }
+    }
+
+    #if canImport(AppKit)
+    @Test func RTFHeadingLevelsRemainSlideBoundariesAfterRoundTrip() async throws {
+        let rtf = try PicoDocsEngine.write(markdown: "# First\n\nBody\n\n## Second\n\nMore", to: .rtf)
+        let result = try await PicoDocsEngine.convert(data: rtf, filename: "headings.rtf")
+        let headings = MarkdownBlockParser.parse(result.markdown()).compactMap { block -> Int? in
+            if case .heading(let level, _) = block { return level }; return nil
+        }
+        #expect(headings == [1, 2])
+        let pptx = try PicoDocsEngine.write(result, to: .pptx)
+        #expect(try xml(pptx, "ppt/presentation.xml").components(separatedBy: "<p:sldId ").count - 1 == 2)
+    }
+    #endif
+
+    @Test func onlyReferencedImageCarriersArePackagedAndInvalidAliasesDoNotHideValidImages() throws {
+        let body = DocumentSection(markdown: "![first](used.png) ![again](used.png)")
+        let used = DocumentSection(kind: .image, markdown: "", sourcePath: "valid/used.png", metadata: ["base64": "AQID", "mimeType": "image/png"])
+        let invalid = DocumentSection(kind: .image, markdown: "", sourcePath: "invalid/used.png", metadata: ["base64": "invalid", "mimeType": "image/png"])
+        let unused = DocumentSection(kind: .image, markdown: "", sourcePath: "unused.png", metadata: ["base64": Data(repeating: 7, count: 1024 * 1024).base64EncodedString(), "mimeType": "image/png"])
+        let data = try PicoDocsEngine.write(ConverterResult(sections: [body, used, invalid, unused]), to: .docx)
+        let archive = try #require(Archive(data: data, accessMode: .read))
+        #expect(archive.filter { $0.path.hasPrefix("word/media/") }.count == 1)
+        #expect(try xml(data, "word/document.xml").components(separatedBy: "<w:drawing>").count - 1 == 2)
+    }
+
+    @Test func repeatedSharedStringsRespectProjectedWorkbookBudget() async throws {
+        let base = try PicoDocsEngine.write(markdown: "cell", to: .xlsx)
+        let archive = try #require(Archive(data: base, accessMode: .read))
+        var parts: [(name: String, data: [UInt8])] = []
+        for entry in archive where entry.path != "xl/worksheets/sheet1.xml" {
+            var data = Data(); _ = try archive.extract(entry) { data.append($0) }
+            parts.append((entry.path, Array(data)))
+        }
+        let shared = "<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><si><t>" + String(repeating: "x", count: 32_000) + "</t></si></sst>"
+        parts.append(("xl/sharedStrings.xml", Array(shared.utf8)))
+        for count in [2, 1000] {
+            let rows = (1...count).map { "<row r=\"\($0)\"><c r=\"A\($0)\" t=\"s\"><v>0</v></c></row>" }.joined()
+            let sheet = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>" + rows + "</sheetData></worksheet>"
+            let data = PagesConverterTests.makeZip(parts + [("xl/worksheets/sheet1.xml", Array(sheet.utf8))])
+            if count == 2 {
+                let result = try await PicoDocsEngine.convert(data: data, filename: "small.xlsx")
+                #expect(result.sections.first?.metadata["csv"]?.count == 64_005)
+            } else {
+                await #expect(throws: PicoDocsError.parsingError) { try await PicoDocsEngine.convert(data: data, filename: "expansion.xlsx") }
+            }
+        }
+    }
+
+    @Test func escapeRestorationRetainsPlainAndEscapedCells() throws {
+        let result = ConverterResult(sections: [.init(markdown: #"| ordinary | \*literal\* |"# + "\n| --- | --- |")])
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == "ordinary\t*literal*")
+        #expect(try DocumentRenderer.render(result, to: .html).contains("<th>*literal*</th>"))
+    }
+
+    @Test func imageMetadataNewlinesCannotInjectBlocks() throws {
+        for separator in ["\n", "\r", "\r\n"] {
+            let image = DocumentSection(title: "caption" + separator + "# Forged", kind: .image, markdown: "", sourcePath: "a" + separator + "b.png", metadata: ["mimeType": "image/png", "base64": "AQID"])
+            let result = ConverterResult(sections: [image])
+            let synthesized = PicoDocsEngine.withSynthesizedImageReferences(result)
+            let blocks = MarkdownBlockParser.parse(synthesized.markdown())
+            #expect(blocks.count == 1)
+            #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains("<w:drawing>"))
+            #expect(!synthesized.markdown().contains(separator + "# Forged"))
+        }
+    }
+
+    @Test func looseHTMLListItemsKeepSeparateParagraphs() throws {
+        let source = ConverterResult(sections: [.init(markdown: "1. Parent\n\n   Continuation\n2. Next")])
+        let html = try DocumentRenderer.render(source, to: .html)
+        #expect(html.contains("<p>Parent</p>")); #expect(html.contains("<p>Continuation</p>"))
+        #expect(html.contains("<li>Next</li>"))
+    }
+
+    @Test func customExportersCanAcceptEmptyStructuredSections() throws {
+        struct StructuralExporter: DocumentExporter {
+            func accepts(_ format: ExportableFileType) -> Bool { format == .pages }
+            func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data { Data([42]) }
+        }
+        let registry = DocumentExporterRegistry().registering(StructuralExporter())
+        for section in [DocumentSection(kind: .slide, markdown: "", slideNumber: 1), DocumentSection(kind: .sheet, markdown: "")] {
+            #expect(try PicoDocsEngine.write(ConverterResult(sections: [section]), to: .pages, registry: registry) == Data([42]))
+        }
+        #expect(throws: PicoDocsError.emptyDocument) { try PicoDocsEngine.write(ConverterResult(sections: []), to: .pages, registry: registry) }
+    }
+
+    @Test func slideTitlesSurviveSharedOfficeProjectionWithoutDuplication() async throws {
+        for body in ["Details", "## Agenda\n\nDetails"] {
+            let result = ConverterResult(sections: [.init(title: "Agenda", kind: .slide, markdown: body, slideNumber: 1)])
+            let docx = try PicoDocsEngine.write(result, to: .docx)
+            let restored = try await PicoDocsEngine.convert(data: docx, filename: "agenda.docx")
+            #expect(restored.markdown().components(separatedBy: "Agenda").count - 1 == 1)
+            #expect(restored.markdown().contains("## Agenda")); #expect(restored.markdown().contains("Details"))
+            #if canImport(AppKit)
+            #expect(AttributedStringDocumentBuilder.attributedString(from: result).string.components(separatedBy: "Agenda").count - 1 == 1)
+            #endif
+        }
+    }
+
+    @Test func noteHyperlinksUseCanonicalBodyBookmarks() async throws {
+        let document = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="1" w:name="_Ref123"/><w:r><w:t>Details</w:t></w:r></w:p><w:p><w:r><w:t>See</w:t><w:footnoteReference w:id="1"/><w:endnoteReference w:id="2"/></w:r></w:p></w:body></w:document>"#
+        let link = #"<w:p><w:hyperlink w:anchor="_Ref123"><w:r><w:t>Back</w:t></w:r></w:hyperlink></w:p>"#
+        let footnotes = "<w:footnotes><w:footnote w:id=\"1\">" + link + "</w:footnote></w:footnotes>"
+        let endnotes = "<w:endnotes><w:endnote w:id=\"2\">" + link + "</w:endnote></w:endnotes>"
+        let data = PagesConverterTests.makeZip([("word/document.xml", Array(document.utf8)), ("word/footnotes.xml", Array(footnotes.utf8)), ("word/endnotes.xml", Array(endnotes.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "notes.docx")
+        #expect(result.markdown().contains("[^fn1]: [Back](#details)"))
+        #expect(result.markdown().contains("[^en2]: [Back](#details)"))
+    }
+
+    @Test func RTFHyperlinkSwitchesRetainBookmarkDestinations() {
+        for (instruction, expected) in [(#"HYPERLINK \\l "details""#, "#details"), (#"HYPERLINK "https://example.com" \\l "details""#, "https://example.com#details"), (#"HYPERLINK \\o "tip" \\l "details" \\t "_blank""#, "#details")] {
+            let rtf = #"{\rtf1 {\field{\*\fldinst "# + instruction + #"}{\fldrslt Back}}}"#
+            #expect(RTFConverter.markdown(fromRTF: rtf) == "[Back](" + expected + ")")
+        }
+    }
+
     @Test func inlinePlaceholdersKeepSourceDelimiterFlanking() {
         for source in ["[x](u)_em_", "`x`_em_", "_em_[x](u)", "_em_`x`", #"\*_em_"#] {
             #expect(MarkdownInlineParser.parse(source).contains(.emphasis([.text("em")])))
@@ -97,8 +221,8 @@ struct ExporterFollowupTests {
             for budget in [WordConverter.MediaBudget(maxBytes: 10), WordConverter.MediaBudget(maxImages: 1)] {
                 let images = try WordConverter.extractImages(from: body, relationships: ["body": "media/a.png"], archive: archive, budget: budget)
                 #expect(images.count == 1)
-                if sameImage { #expect(try WordConverter.extractNoteImages(archive, budget: budget).isEmpty) }
-                else { #expect(throws: PicoDocsError.parsingError) { try WordConverter.extractNoteImages(archive, budget: budget) } }
+                #expect(try WordConverter.extractNoteImages(archive, budget: budget).isEmpty)
+                #expect(images.first?.metadata["base64"] == Data(repeating: 1, count: 6).base64EncodedString())
             }
         }
     }

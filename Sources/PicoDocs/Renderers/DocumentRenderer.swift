@@ -599,9 +599,12 @@ public enum DocumentRenderer {
         return (out, escaped)
     }
 
+    private static let escapedPlaceholderPattern = try! NSRegularExpression(pattern: "\u{E006}([0-9]+)\u{E007}")
+
     private static func restoreEscapes(_ text: String, escaped: [String], html: Bool) -> String {
+        guard !escaped.isEmpty else { return text }
         let ns = text as NSString
-        let regex = try! NSRegularExpression(pattern: "\u{E006}([0-9]+)\u{E007}")
+        let regex = escapedPlaceholderPattern
         var out = "", offset = 0
         for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
             out += ns.substring(with: NSRange(location: offset, length: match.range.location - offset))

@@ -293,13 +293,28 @@ public struct RTFConverter: DocumentConverter {
         return paragraphs.joined(separator: "\n\n")
     }
 
-    private static let hyperlinkPattern = try! NSRegularExpression(pattern: #"^\s*HYPERLINK\s+(?:"([^"]*)"|(\S+))"#, options: .caseInsensitive)
+    private static let fieldTokenPattern = try! NSRegularExpression(pattern: #""([^"]*)"|(\S+)"#)
     private static func hyperlinkTarget(_ instruction: String) -> String? {
         let ns = instruction as NSString
-        guard let match = hyperlinkPattern.firstMatch(in: instruction, range: NSRange(location: 0, length: ns.length)) else { return nil }
-        let range = match.range(at: 1).location == NSNotFound ? match.range(at: 2) : match.range(at: 1)
-        let target = ns.substring(with: range)
-        return target.isEmpty ? nil : target
+        let tokens = fieldTokenPattern.matches(in: instruction, range: NSRange(location: 0, length: ns.length)).map { match in
+            ns.substring(with: match.range(at: match.range(at: 1).location == NSNotFound ? 2 : 1))
+        }
+        guard tokens.first?.uppercased() == "HYPERLINK" else { return nil }
+        var target: String?, bookmark: String?, index = 1
+        while index < tokens.count {
+            let token = tokens[index]
+            index += 1
+            if token == "\\l" || token == "\\o" || token == "\\t" {
+                guard index < tokens.count else { return nil }
+                if token == "\\l" { bookmark = tokens[index] }
+                index += 1
+            } else if token.hasPrefix("\\") { continue }
+            else if target == nil { target = token }
+        }
+        if let bookmark, !bookmark.isEmpty {
+            return (target?.components(separatedBy: "#").first ?? "") + "#" + bookmark
+        }
+        return target.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// Windows code pages that are double-byte (DBCS): one character may span two

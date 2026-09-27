@@ -31,6 +31,19 @@ enum OfficeDocumentBlocks {
                         if case .table = block { blocks.append(block) }
                     }
                 }
+            } else if section.kind == .slide, let title = section.title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                flush()
+                let parsed = MarkdownBlockParser.parse(section.markdown)
+                let normalized = MarkdownBlockParser.normalizedLineEndings(title).replacingOccurrences(of: "\n", with: " ")
+                let alreadyPresent = parsed.first.map { block in
+                    if case .heading(_, let text) = block { return MarkdownInlineParser.parse(text).plainText == normalized }
+                    return false
+                } ?? false
+                if !alreadyPresent {
+                    let escaped = normalized.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+                    blocks.append(.heading(2, escaped))
+                }
+                blocks += parsed
             } else { pending.append(section.markdown) }
         }
         flush()

@@ -67,11 +67,13 @@ final class WordListNumbering {
     /// `w:pStyle`, whose (inherited) numbering applies when the paragraph has none.
     private(set) var lastParagraphList: (instance: String, level: Int)?
     private(set) var lastParagraphIsContinuation = false
+    private(set) var lastParagraphIsExportedContinuation = false
     private var activeMarkerWidths: [Int: Int] = [:]
 
     func prefix(numPr: Element?, style: String?) -> String? {
         lastParagraphList = nil
         lastParagraphIsContinuation = false
+        lastParagraphIsExportedContinuation = style == "PicoListContinuation"
         var numID = numPr.flatMap { Self.child(of: $0, named: "w:numid") }.flatMap { try? $0.attr("w:val") }
         var level = numPr.flatMap { Self.child(of: $0, named: "w:ilvl") }.flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
         if numID == nil || level == nil, let inherited = styleNumbering(style) {
@@ -112,7 +114,7 @@ final class WordListNumbering {
         switch definition?.format ?? "bullet" {
         case "none":
             lastParagraphIsContinuation = true
-            let indent = (0..<max(ilvl, 1)).reduce(0) { $0 + (activeMarkerWidths[$1] ?? markerWidths[numID]?[$1] ?? 2) }
+            let indent = (0..<(lastParagraphIsExportedContinuation ? ilvl + 1 : max(ilvl, 1))).reduce(0) { $0 + (activeMarkerWidths[$1] ?? markerWidths[numID]?[$1] ?? 2) }
             return String(repeating: " ", count: indent)
         case "bullet":
             marker = "- "

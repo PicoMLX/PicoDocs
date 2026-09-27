@@ -109,13 +109,9 @@ public enum PicoDocsEngine {
         // *unless* it carries image sections (an image-only doc is valid output).
         let isEmpty = result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasImages = result.sections.contains { $0.kind == .image }
-        let hasCSV = result.sections.contains {
-            (format == .xlsx || ([ExportableFileType.docx, .pptx, .rtf].contains(format) && [.sheet, .table].contains($0.kind))) && !($0.metadata["csv"] ?? "").isEmpty
-        }
-        let hasSheets = result.sections.contains {
-            $0.kind == .sheet && (format == .xlsx || ([ExportableFileType.docx, .pptx, .rtf].contains(format) && !($0.sheetName ?? $0.metadata["sheetName"] ?? $0.title ?? "").isEmpty))
-        }
-        let hasSlides = format == .pptx && result.sections.contains { $0.kind == .slide }
+        let hasCSV = result.sections.contains { !($0.metadata["csv"] ?? "").isEmpty }
+        let hasSheets = result.sections.contains { $0.kind == .sheet }
+        let hasSlides = result.sections.contains { $0.kind == .slide || $0.slideNumber != nil }
         if isEmpty, !hasImages, !hasCSV, !hasSheets, !hasSlides {
             throw PicoDocsError.emptyDocument
         }
@@ -146,7 +142,7 @@ public enum PicoDocsEngine {
             var reference = [section.sourcePath, section.title]
                 .compactMap { $0 }
                 .first { !$0.isEmpty }
-            if reference == nil || counts[reference ?? "", default: 0] > 1 {
+            if reference == nil || counts[reference ?? "", default: 0] > 1 || reference?.contains(where: { $0.isNewline }) == true {
                 let ext = OfficeMediaType.fileExtension(forMIME: section.metadata["mimeType"] ?? "")
                 var generated: String
                 repeat {
@@ -158,7 +154,7 @@ public enum PicoDocsEngine {
                 reference = generated
             }
             guard let reference else { continue }
-            let alt = section.title ?? (reference as NSString).lastPathComponent
+            let alt = MarkdownBlockParser.normalizedLineEndings(section.title ?? (reference as NSString).lastPathComponent).replacingOccurrences(of: "\n", with: " ")
             refs.append(DocumentSection(
                 kind: .body,
                 markdown: "![\(Self.escapeMarkdown(alt, "\\`*_{}[]<>"))](<\(Self.escapeMarkdown(reference, "\\<>"))>)",
