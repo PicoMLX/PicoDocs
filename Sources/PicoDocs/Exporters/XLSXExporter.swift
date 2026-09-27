@@ -157,7 +157,7 @@ public struct XLSXExporter: DocumentExporter {
     private static func uniqueSheetName(_ section: DocumentSection, index: Int, used: inout Set<String>, nextSuffix: inout [String: Int]) -> String {
         let raw = section.sheetName ?? section.metadata["sheetName"] ?? section.title ?? "Sheet\(index)"
         var name = sanitizeSheetName(raw)
-        if name.isEmpty { name = "Sheet\(index)" }
+        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { name = "Sheet\(index)" }
         var candidate = name
         var suffix = nextSuffix[name.lowercased(), default: 2]
         while used.contains(candidate.lowercased()) {
@@ -189,7 +189,6 @@ public struct XLSXExporter: DocumentExporter {
         let space: Unicode.Scalar = " "
         let cleanedScalars = name.unicodeScalars.filter(OOXMLPackageWriter.isValidXMLScalar).map { invalid.contains($0) || [9, 10, 13].contains($0.value) ? space : $0 }
         let cleaned = String(String.UnicodeScalarView(cleanedScalars))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
         return truncateSheetName(cleaned, limit: 31).trimmingCharacters(in: CharacterSet(charactersIn: "'"))
     }
 

@@ -9,6 +9,47 @@ import AppKit
 
 struct ExporterFollowupTests {
 
+    @Test func SpreadsheetMLEscapesDecodeIncrementallyWithUTF16Semantics() {
+        let dense = SpreadsheetMLText.decode(String(repeating: "_x0000_", count: 100_000))
+        #expect(dense.utf8.count == 100_000)
+        #expect(dense.utf8.allSatisfy { $0 == 0 })
+        for (encoded, expected) in [("_xD83D__xDE00_", "😀"), ("_xD800__x0041_", "�A"), ("_xDC00_", "�"), ("_xD800_", "�"), ("_x005F_x0041_", "_x0041_"), ("_x00e9_😀", "é😀"), ("_xZZZZ_ _x123", "_xZZZZ_ _x123")] {
+            #expect(SpreadsheetMLText.decode(encoded) == expected)
+        }
+    }
+
+    @Test func blankCodeLinesAreChargedBeforeOfficeParsing() throws {
+        let input = ConverterResult(sections: [.init(markdown: "```\n" + String(repeating: "\n", count: 1_000_000) + "```")])
+        #expect(throws: ExporterError.self) { try OfficeDocumentBlocks.validateInput(input) }
+        try OfficeDocumentBlocks.validateInput(ConverterResult(sections: [.init(markdown: "```\nfirst\n\nlast\n```")]))
+    }
+
+    @Test func oversizedRTFFieldInstructionsKeepOnlyTheirLabel() {
+        for count in [3, 30_000] {
+            let rtf = #"{\rtf1{\field{\*\fldinst HYPERLINK "https://example.test" "# + String(repeating: #"\\z "#, count: count) + #"}{\fldrslt Label}}}"#
+            let result = RTFConverter.markdown(fromRTF: rtf)
+            #expect(result == (count == 3 ? "[Label](https://example.test)" : "Label"))
+        }
+    }
+
+    @Test func worksheetNamesPreserveOrdinaryEdgeSpaces() async throws {
+        let names = [" Data ", "Data", "   "]
+        var result = ConverterResult(sections: names.map { .init(kind: .sheet, markdown: "", sheetName: $0, metadata: ["csv": "x"]) })
+        for _ in 0..<3 {
+            result = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(result, to: .xlsx), filename: "names.xlsx")
+            #expect(result.sections.map(\.sheetName) == [" Data ", "Data", "Sheet3"])
+        }
+    }
+
+    @Test func RTFUnicodeFallbackIgnoresRawLineWrapping() {
+        for wrapping in ["\r", "\n", "\r\n", "\n\r\n"] {
+            let rtf = #"{\rtf1\ansi\uc1\u233"# + wrapping + #"\'e9}"#
+            #expect(RTFConverter.markdown(fromRTF: rtf) == "é")
+            let two = #"{\rtf1\ansi\uc2\u233"# + wrapping + #"\'e9"# + wrapping + "?}"
+            #expect(RTFConverter.markdown(fromRTF: two) == "é")
+        }
+    }
+
     @Test func denseInlineSyntaxIsChargedBeforeOfficeParsing() throws {
         let input = ConverterResult(sections: [.init(markdown: String(repeating: "**x** ", count: 1_000_000))])
         #expect(throws: ExporterError.self) { try OfficeDocumentBlocks.validateInput(input) }

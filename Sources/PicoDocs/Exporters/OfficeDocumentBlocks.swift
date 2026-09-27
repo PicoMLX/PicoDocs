@@ -64,7 +64,12 @@ enum OfficeDocumentBlocks {
                     // even when the paragraph occupies only one source line.
                     // Charge conservatively before constructing the inline IR.
                     if "*_[]`<>".unicodeScalars.contains(scalar) { try charge(64) }
-                    if scalar == "\n" || scalar == "\r" { hasContent = false; tableLine = false; continue }
+                    if scalar == "\n" || scalar == "\r" {
+                        // Empty/whitespace-only lines still become parser line
+                        // records and code-block paragraphs or break runs.
+                        if !hasContent { try charge(128) }
+                        hasContent = false; tableLine = false; continue
+                    }
                     if !hasContent, !CharacterSet.whitespaces.contains(scalar) {
                         hasContent = true; tableLine = scalar == "|"
                         try charge(128) // line/block/row storage before Markdown parsing

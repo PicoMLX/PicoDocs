@@ -44,7 +44,22 @@ public struct RTFConverter: DocumentConverter {
     // MARK: - Parser
 
     private struct Run { var text: String; var bold: Bool; var italic: Bool; var link: String?; var code: Bool; var field: Field? }
-    private final class Field { var instruction = ""; var target: String? }
+    private final class Field {
+        static let maximumInstructionBytes = 65_536
+        private(set) var instruction = ""
+        private var instructionBytes = 0
+        private var oversized = false
+        var target: String?
+        func appendInstruction(_ text: String) {
+            guard !oversized else { return }
+            let bytes = text.utf8.count
+            guard bytes <= Self.maximumInstructionBytes - instructionBytes else {
+                oversized = true; instruction = ""; return
+            }
+            instructionBytes += bytes
+            instruction += text
+        }
+    }
     private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool; var ucSkip: Int; var field: Field?; var instruction: Bool; var font: Int; var fontTable: Bool }
 
     /// Destination control words whose group contents are not body text.
@@ -94,7 +109,7 @@ public struct RTFConverter: DocumentConverter {
 
         func appendText(_ s: String) {
             if fontTable { fontNames[font, default: ""] += s; return }
-            if instruction, let field { field.instruction += s; return }
+            if instruction, let field { field.appendInstruction(s); return }
             let code = field?.target != nil && monospacedFonts.contains(font)
             guard !ignore, !s.isEmpty else { return }
             if var last = runs.last, last.bold == bold, last.italic == italic, last.link == field?.target, last.code == code, last.field === field {
@@ -267,7 +282,10 @@ public struct RTFConverter: DocumentConverter {
                         var skipped = 0
                         while i < n, skipped < ucSkip {
                             let fallback = chars[i]
-                            if fallback == "{" || fallback == "}" {
+                            if fallback == "\r" || fallback == "\n" {
+                                i += 1
+                                continue // Source wrapping is not an ANSI fallback unit.
+                            } else if fallback == "{" || fallback == "}" {
                                 break
                             } else if fallback == "\\" {
                                 if i + 1 < n, chars[i + 1] == "'" {
@@ -332,6 +350,7 @@ public struct RTFConverter: DocumentConverter {
 
     private static let fieldTokenPattern = try! NSRegularExpression(pattern: #""([^"]*)"|(\S+)"#)
     private static func hyperlinkTarget(_ instruction: String) -> String? {
+        guard instruction.utf8.count <= Field.maximumInstructionBytes else { return nil }
         let ns = instruction as NSString
         let tokens = fieldTokenPattern.matches(in: instruction, range: NSRange(location: 0, length: ns.length)).map { match in
             let quoted = match.range(at: 1).location != NSNotFound

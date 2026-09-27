@@ -42,18 +42,55 @@ enum SpreadsheetMLText {
         return bytes
     }
 
-    private static let pattern = try! NSRegularExpression(pattern: "_x([0-9A-Fa-f]{4})_")
-
     static func decode(_ text: String) -> String {
         guard text.contains("_x") else { return text }
-        let ns = text as NSString
-        var units: [UInt16] = [], offset = 0
-        for match in pattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-            units += ns.substring(with: NSRange(location: offset, length: match.range.location - offset)).utf16
-            units.append(UInt16(ns.substring(with: match.range(at: 1)), radix: 16)!)
-            offset = NSMaxRange(match.range)
+        let input = text.utf16
+        var index = input.startIndex, output = ""
+        var highSurrogate: UInt16?
+        // Decode directly into the result, retaining neither regex matches nor
+        // a second full UTF-16 buffer. Pair escaped and literal UTF-16 units alike.
+        func append(_ unit: UInt16) {
+            if let high = highSurrogate {
+                highSurrogate = nil
+                if (0xDC00...0xDFFF).contains(unit) {
+                    let value = 0x10000 + (UInt32(high - 0xD800) << 10) + UInt32(unit - 0xDC00)
+                    output.unicodeScalars.append(Unicode.Scalar(value)!)
+                    return
+                }
+                output.unicodeScalars.append("\u{FFFD}")
+            }
+            if (0xD800...0xDBFF).contains(unit) { highSurrogate = unit }
+            else if (0xDC00...0xDFFF).contains(unit) { output.unicodeScalars.append("\u{FFFD}") }
+            else { output.unicodeScalars.append(Unicode.Scalar(UInt32(unit))!) }
         }
-        units += ns.substring(from: offset).utf16
-        return String(decoding: units, as: UTF16.self)
+        func escape(at start: String.Index) -> (UInt16, String.Index)? {
+            var cursor = input.index(after: start)
+            guard cursor < input.endIndex, input[cursor] == 0x78 else { return nil }
+            var value: UInt16 = 0
+            for _ in 0..<4 {
+                cursor = input.index(after: cursor)
+                guard cursor < input.endIndex else { return nil }
+                let unit = input[cursor], digit: UInt16
+                switch unit {
+                case 0x30...0x39: digit = unit - 0x30
+                case 0x41...0x46: digit = unit - 0x41 + 10
+                case 0x61...0x66: digit = unit - 0x61 + 10
+                default: return nil
+                }
+                value = value * 16 + digit
+            }
+            cursor = input.index(after: cursor)
+            guard cursor < input.endIndex, input[cursor] == 0x5F else { return nil }
+            return (value, input.index(after: cursor))
+        }
+        while index < input.endIndex {
+            if input[index] == 0x5F, let (unit, next) = escape(at: index) {
+                append(unit); index = next
+            } else {
+                append(input[index]); index = input.index(after: index)
+            }
+        }
+        if highSurrogate != nil { output.unicodeScalars.append("\u{FFFD}") }
+        return output
     }
 }
