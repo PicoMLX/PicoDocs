@@ -27,7 +27,7 @@ public struct SpreadsheetConverter: DocumentConverter {
 
         var sections: [DocumentSection] = []
         var sheetNames: [String] = []
-        var remainingOutputBytes = 64 * 1024 * 1024
+        var projectionBudget = SpreadsheetProjectionBudget()
 
         for workbook in try file.parseWorkbooks() {
             for (name, path) in try file.parseWorksheetPathsAndNames(workbook: workbook) {
@@ -35,7 +35,7 @@ public struct SpreadsheetConverter: DocumentConverter {
                 let worksheet = try file.parseWorksheet(at: path)
                 let rows = worksheet.data?.rows ?? []
 
-                let table = try Self.markdownTable(rows: rows, sharedStrings: sharedStrings, sheetName: name, remainingOutputBytes: &remainingOutputBytes)
+                let table = try Self.markdownTable(rows: rows, sharedStrings: sharedStrings, sheetName: name, projectionBudget: &projectionBudget)
 
                 if let name { sheetNames.append(name) }
                 sections.append(DocumentSection(
@@ -55,7 +55,7 @@ public struct SpreadsheetConverter: DocumentConverter {
 
     // MARK: - Markdown table
 
-    private static func markdownTable(rows: [Row], sharedStrings: SharedStrings?, sheetName: String?, remainingOutputBytes: inout Int) throws -> (markdown: String, csv: String) {
+    private static func markdownTable(rows: [Row], sharedStrings: SharedStrings?, sheetName: String?, projectionBudget: inout SpreadsheetProjectionBudget) throws -> (markdown: String, csv: String) {
         let origin = ColumnReference("A")!
         let columnCount = (rows.flatMap(\.cells).map { origin.distance(to: $0.reference.column) }.max() ?? -1) + 1
         guard columnCount > 0 else { return ("", "") }
@@ -66,9 +66,7 @@ public struct SpreadsheetConverter: DocumentConverter {
               rowCount <= 1_000_000 / columnCount else { throw PicoDocsError.parsingError }
         // Reserve both serialized projections plus the decoded cell storage before
         // expanding repeated shared strings. The budget is shared by all sheets.
-        let fixedBytes = rowCount * columnCount * 10 + columnCount * 8 + (sheetName?.utf8.count ?? 0) + 16
-        guard fixedBytes <= remainingOutputBytes else { throw PicoDocsError.parsingError }
-        remainingOutputBytes -= fixedBytes
+        try projectionBudget.reserveGrid(rows: rowCount, columns: columnCount, name: sheetName)
         var grid: [Int: [String]] = [:]
         for row in rows {
             let rowIndex = Int(clamping: row.reference)
@@ -78,8 +76,7 @@ public struct SpreadsheetConverter: DocumentConverter {
                 let column = origin.distance(to: cell.reference.column)
                 guard column >= 0, column < columnCount else { throw PicoDocsError.fileCorrupted }
                 let value = cellText(cell, sharedStrings: sharedStrings)
-                guard value.utf8.count <= remainingOutputBytes / 5 else { throw PicoDocsError.parsingError }
-                remainingOutputBytes -= value.utf8.count * 5
+                try projectionBudget.reserveValue(value)
                 values[column] = value
             }
             grid[rowIndex] = values

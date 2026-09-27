@@ -243,8 +243,17 @@ public enum DocumentRenderer {
     /// Parses a CommonMark footnote definition line `[^id]: text`, returning the
     /// id and first-line text (nil if the line isn't a definition).
     private static func parseFootnoteDefinition(_ line: String) -> (id: String, text: String)? {
-        guard line.hasPrefix("[^"), let close = line.firstIndex(of: "]") else { return nil }
+        guard line.hasPrefix("[^") else { return nil }
         let idStart = line.index(line.startIndex, offsetBy: 2)
+        var close = idStart
+        while close < line.endIndex {
+            if line[close] == "\\" {
+                close = line.index(after: close)
+                if close < line.endIndex { close = line.index(after: close) }
+            } else if line[close] == "]" { break }
+            else { close = line.index(after: close) }
+        }
+        guard close < line.endIndex else { return nil }
         guard idStart < close else { return nil }
         let id = decodedFootnoteID(String(line[idStart..<close]))
         let afterClose = line.index(after: close)

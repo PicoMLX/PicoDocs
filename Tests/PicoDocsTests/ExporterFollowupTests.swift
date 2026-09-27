@@ -8,6 +8,57 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func XLSXWriterSharesTheReaderWorkbookProjectionBudget() throws {
+        var budget = SpreadsheetProjectionBudget()
+        for _ in 0..<6 { try budget.reserveGrid(rows: 1000, columns: 1000, name: "Sheet") }
+        #expect(throws: PicoDocsError.parsingError) { try budget.reserveGrid(rows: 1000, columns: 1000, name: "Sheet") }
+        var exact = SpreadsheetProjectionBudget(maximumBytes: 40)
+        try exact.reserveGrid(rows: 1, columns: 1, name: "S") // 35 bytes
+        try exact.reserveValue("x") // 5 bytes
+        #expect(throws: PicoDocsError.parsingError) { try exact.reserveValue("x") }
+        // Two individually valid sections exceed the aggregate budget with values.
+        let csv = Array(repeating: String(repeating: "x", count: 32_000), count: 220).joined(separator: "\n")
+        let result = ConverterResult(sections: [.init(kind: .sheet, markdown: "", metadata: ["csv": csv]), .init(kind: .sheet, markdown: "", metadata: ["csv": csv])])
+        #expect(throws: ExporterError.self) { try PicoDocsEngine.write(result, to: .xlsx) }
+    }
+
+    @Test func footnoteDefinitionsIgnoreEscapedLabelClosers() throws {
+        for label in [#"a\]b"#, #"a\\\]b"#, #"a\\"#] {
+            let result = ConverterResult(sections: [.init(markdown: "Claim[^" + label + "]\n\n[^" + label + "]: Note")])
+            let html = try DocumentRenderer.render(result, to: .html)
+            let text = try DocumentRenderer.render(result, to: .plaintext)
+            #expect(html.contains("class=\"footnote-ref\""))
+            #expect(text.contains("Claim[1]")); #expect(text.contains("[1] Note"))
+            #expect(!text.contains("[^"))
+        }
+    }
+
+    @Test func synthesizedImagesKeepTheirNativeSectionPositions() async throws {
+        let result = ConverterResult(sections: [
+            .init(title: "First", kind: .slide, markdown: "", slideNumber: 1),
+            .init(title: "Image one", kind: .image, markdown: "", sourcePath: "one.png", slideNumber: 1, metadata: ["mimeType": "image/png", "base64": "AQID"]),
+            .init(title: "Second", kind: .slide, markdown: "", slideNumber: 2),
+            .init(title: "Image two", kind: .image, markdown: "", sourcePath: "two.png", slideNumber: 2, metadata: ["mimeType": "image/png", "base64": "BAUG"]),
+        ])
+        let projected = PicoDocsEngine.withSynthesizedImageReferences(result)
+        #expect(projected.sections.map(\.kind) == [.slide, .image, .body, .slide, .image, .body])
+        let docx = try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml")
+        let firstTitle = try #require(docx.range(of: ">First<"))
+        let firstImage = try #require(docx.range(of: "descr=\"Image one\""))
+        let secondTitle = try #require(docx.range(of: ">Second<"))
+        let secondImage = try #require(docx.range(of: "descr=\"Image two\""))
+        #expect(firstTitle.lowerBound < firstImage.lowerBound && firstImage.lowerBound < secondTitle.lowerBound && secondTitle.lowerBound < secondImage.lowerBound)
+        let xlsx = try PicoDocsEngine.write(result, to: .xlsx)
+        #expect(try xml(xlsx, "xl/worksheets/sheet2.xml").contains("Image one"))
+        #expect(try xml(xlsx, "xl/worksheets/sheet4.xml").contains("Image two"))
+        #if canImport(AppKit)
+        let rtf = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(result, to: .rtf), filename: "images.rtf")
+        let text = try DocumentRenderer.render(rtf, to: .plaintext)
+        #expect(try #require(text.range(of: "Image one")).lowerBound < #require(text.range(of: "Second")).lowerBound)
+        #endif
+    }
+
+
     @Test func builtInExportersRejectCoverOnlyPayloads() throws {
         let result = ConverterResult(cover: Data([1, 2, 3]), sections: [])
         let exporters: [(any DocumentExporter, ExportableFileType)] = [(WordprocessingMLExporter(), .docx), (XLSXExporter(), .xlsx), (PPTXExporter(), .pptx)]

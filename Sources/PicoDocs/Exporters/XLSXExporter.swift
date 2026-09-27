@@ -26,6 +26,7 @@ public struct XLSXExporter: DocumentExporter {
 
         var sheets: [(name: String, rows: [[String]])] = []
         var usedNames = Set<String>()
+        var projectionBudget = SpreadsheetProjectionBudget()
         for section in result.sections where section.kind != .image {
             let rows = Self.rows(for: section)
             guard rows.allSatisfy({ $0.allSatisfy { $0.utf16.count <= 32_767 } }) else {
@@ -33,6 +34,12 @@ public struct XLSXExporter: DocumentExporter {
             }
             try Self.validateDimensions(rows: rows.count, columns: rows.map(\.count).max() ?? 0)
             let name = Self.uniqueSheetName(section, index: sheets.count + 1, used: &usedNames)
+            do {
+                try projectionBudget.reserveGrid(rows: rows.count, columns: rows.map(\.count).max() ?? 0, name: name)
+                for row in rows { for value in row { try projectionBudget.reserveValue(value) } }
+            } catch {
+                throw ExporterError.serializationFailed("Workbook exceeds the supported 64 MiB projection budget")
+            }
             sheets.append((name, rows))
         }
         if sheets.isEmpty {

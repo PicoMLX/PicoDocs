@@ -120,7 +120,7 @@ public enum PicoDocsEngine {
         return isEmpty && !hasImages && !hasCover && !hasCSV && !hasSheets && !hasSlides
     }
 
-    /// Appends a `.body` section with an inline `![alt](reference)` for each `.image`
+    /// Inserts a `.body` section beside each image carrier with an inline `![alt](reference)` for each `.image`
     /// carrier, so an image-only result renders its images instead of a blank
     /// document. `reference` is the carrier's full source path — the exporters'
     /// primary image-index key — so two carriers that share a basename
@@ -132,7 +132,7 @@ public enum PicoDocsEngine {
     static func withSynthesizedImageReferences(_ result: ConverterResult) -> ConverterResult {
         guard result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return result }
         var sections = result.sections
-        var refs: [DocumentSection] = []
+        var refs: [Int: DocumentSection] = [:]
         var generatedCount = 0
         let identities = sections.filter { $0.kind == .image }.compactMap {
             [$0.sourcePath, $0.title].compactMap { $0 }.first { !$0.isEmpty }
@@ -157,15 +157,20 @@ public enum PicoDocsEngine {
             }
             guard let reference else { continue }
             let alt = MarkdownBlockParser.normalizedLineEndings(section.title ?? (reference as NSString).lastPathComponent).replacingOccurrences(of: "\n", with: " ")
-            refs.append(DocumentSection(
+            refs[index] = DocumentSection(
                 kind: .body,
                 markdown: "![\(Self.escapeMarkdown(alt, "\\`*_{}[]<>"))](<\(Self.escapeMarkdown(reference, "\\<>"))>)",
                 slideNumber: section.slideNumber
-            ))
+            )
         }
         guard !refs.isEmpty else { return result }
-        sections.append(contentsOf: refs)
-        return ConverterResult(title: result.title, author: result.author, cover: result.cover, sections: sections)
+        var ordered: [DocumentSection] = []
+        ordered.reserveCapacity(sections.count + refs.count)
+        for (index, section) in sections.enumerated() {
+            ordered.append(section)
+            if let reference = refs[index] { ordered.append(reference) }
+        }
+        return ConverterResult(title: result.title, author: result.author, cover: result.cover, sections: ordered)
     }
 
     /// Backslash-escapes each character of `special` in `text`, so a synthesized
