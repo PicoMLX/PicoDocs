@@ -111,11 +111,17 @@ enum MarkdownInlineParser {
         // Pair destinations once; failed candidates never rescan a suffix.
         var parenCloses: [Int: Int] = [:], stack: [Int] = []
         var nextAngle: [Int: Int] = [:]
+        var lastWhitespace = -1
         for index in chars.indices {
             let delimiter = chars[index]
+            if delimiter.isWhitespace { lastWhitespace = index }
             guard delimiter == "(" || delimiter == ")", !isEscapedDelimiter(at: index) else { continue }
             if delimiter == "(" { stack.append(index) }
-            else if chars[index] == ")", let open = stack.popLast() { parenCloses[open] = index }
+            else if chars[index] == ")", let open = stack.popLast(), lastWhitespace < open {
+                // Only index ranges safe to skip within a bare destination.
+                // One position validates nested ranges without rescanning them.
+                parenCloses[open] = index
+            }
         }
         var angleClose: Int?
         for index in chars.indices.reversed() {
@@ -125,7 +131,11 @@ enum MarkdownInlineParser {
             if delimiter == "\n" || delimiter == "\r" || delimiter == "\r\n" { angleClose = nil; continue }
             guard delimiter == "<" || delimiter == ">", !isEscapedDelimiter(at: index) else { continue }
             if delimiter == ">" { angleClose = index }
-            else if chars[index] == "<", let close = angleClose { nextAngle[index] = close }
+            else if delimiter == "<" {
+                if let close = angleClose { nextAngle[index] = close }
+                // An unescaped opener invalidates any enclosing angle range.
+                angleClose = nil
+            }
         }
         var tickRuns: [(start: Int, length: Int)] = [], scan = 0
         while scan < chars.count {
@@ -292,7 +302,7 @@ enum MarkdownInlineParser {
             cursor = gt + 1
         } else {
             // Separate the bare URL from its optional title. Balanced URL
-            // parentheses are paired by the initial scan; escaped spaces stay literal.
+            // parentheses are paired and checked for whitespace by the initial scan.
             while cursor < chars.count, !chars[cursor].isWhitespace, chars[cursor] != ")" {
                 if chars[cursor] == "\\", cursor + 1 < chars.count { cursor += 2 }
                 else if chars[cursor] == "(" {

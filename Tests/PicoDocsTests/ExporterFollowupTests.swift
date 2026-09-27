@@ -9,6 +9,37 @@ import AppKit
 
 struct ExporterFollowupTests {
 
+    @Test func indexedLinkDestinationsRejectMalformedSkippedContent() throws {
+        let invalid = ["<https://example.test/a<b>", "a(b c)d", "a(b\nc)d", "a(b\rc)d", "a(b\r\nc)d", "a(b\tc)d", "a(b(c d)e)f"]
+        for destination in invalid {
+            for prefix in ["", "!"] {
+                let source = prefix + "[x](" + destination + ")"
+                #expect(!MarkdownInlineParser.parse(source).contains {
+                    switch $0 { case .link, .image: return true; default: return false }
+                })
+            }
+            let source = "[x](" + destination + ")"
+            let relationships = try xml(PicoDocsEngine.write(markdown: source, to: .docx), "word/_rels/document.xml.rels")
+            #expect(!relationships.contains("/hyperlink"))
+        }
+    }
+
+    @Test func indexedLinkDestinationsPreserveValidEscapesAndNesting() {
+        for (source, destination) in [
+            (#"[x](<https://example.test/a\<b>)"#, "https://example.test/a<b"),
+            (#"[x](<a\>b>)"#, "a>b"),
+            ("[x](a(b(c)d)e)", "a(b(c)d)e"),
+            (#"[x](a(b\)c)d)"#, "a(b)c)d"),
+            (#"[x](a(b)c "Title with spaces")"#, "a(b)c"),
+            ("[x](<a b>)", "a b")
+        ] {
+            #expect(MarkdownInlineParser.parse(source) == [.link(label: [.text("x")], destination: destination)])
+        }
+        #expect(MarkdownInlineParser.parse("[bad](<a<b>) [good](<c>)").contains(.link(label: [.text("good")], destination: "c")))
+        #expect(MarkdownInlineParser.parse("[bad](a(b c)d) [good](e(f)g)").contains(.link(label: [.text("good")], destination: "e(f)g")))
+    }
+
+
     @Test func OfficePreflightChargesParenthesisIndexesAndFullTableCells() throws {
         let parentheses = ConverterResult(sections: [.init(markdown: String(repeating: "()", count: 600_000) + "[")])
         #expect(throws: ExporterError.self) { try OfficeDocumentBlocks.validateInput(parentheses) }
