@@ -54,8 +54,11 @@ public struct XLSXExporter: DocumentExporter {
     }
 
     static func validateDimensions(rows: Int, columns: Int) throws {
-        guard rows <= 1_048_576, columns <= 16_384 else {
+        guard rows >= 0, columns >= 0, rows <= 1_048_576, columns <= 16_384 else {
             throw ExporterError.serializationFailed("Worksheet exceeds SpreadsheetML row or column limits")
+        }
+        guard columns == 0 || rows <= 1_000_000 / columns else {
+            throw ExporterError.serializationFailed("Worksheet exceeds the supported 1,000,000-cell projection budget")
         }
     }
 
@@ -93,7 +96,7 @@ public struct XLSXExporter: DocumentExporter {
                     rows.append([plain(line)])
                 }
             case .list(let list):
-                for item in list.paragraphs() { rows.append([plain(item.text)]) }
+                rows += list.plaintext(inline: plain).components(separatedBy: "\n").map { [$0] }
             case .code(let code):
                 for line in code.components(separatedBy: "\n") { rows.append([line]) }
             case .blockquote(let lines):

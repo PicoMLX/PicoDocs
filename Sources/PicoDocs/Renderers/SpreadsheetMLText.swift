@@ -2,10 +2,17 @@ import Foundation
 
 /// SpreadsheetML uses UTF-16 escape tokens in addition to XML escaping.
 enum SpreadsheetMLText {
+    private static let encodePattern = try! NSRegularExpression(pattern: "_(?=x[0-9A-Fa-f]{4}_)")
+    private static func forbidden(_ scalar: Unicode.Scalar) -> Bool {
+        (scalar.value < 0x20 && ![9, 10, 13].contains(scalar.value)) || scalar.value == 0xFFFE || scalar.value == 0xFFFF
+    }
+
     static func encode(_ text: String) -> String {
-        let protected = text.replacingOccurrences(of: "_(?=x[0-9A-Fa-f]{4}_)", with: "_x005F_", options: .regularExpression)
+        let hasEscapes = text.contains("_x")
+        guard hasEscapes || text.unicodeScalars.contains(where: forbidden) else { return text }
+        let protected = hasEscapes ? encodePattern.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "_x005F_") : text
         return protected.unicodeScalars.map { scalar in
-            if (scalar.value < 0x20 && ![9,10,13].contains(scalar.value)) || scalar.value == 0xFFFE || scalar.value == 0xFFFF {
+            if forbidden(scalar) {
                 return String(format: "_x%04X_", scalar.value)
             }
             return String(scalar)

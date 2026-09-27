@@ -78,8 +78,9 @@ public struct WordConverter: DocumentConverter {
         // Extract embedded images (body + notes) as separate .image sections
         // (bytes preserved for downstream OCR/captioning, and for HTML data-URL
         // embedding); the Markdown references them inline.
-        var imageSections = Self.extractImages(from: body, relationships: relationships, archive: archive)
-        imageSections += Self.extractNoteImages(archive)
+        let mediaBudget = MediaBudget()
+        var imageSections = try Self.extractImages(from: body, relationships: relationships, archive: archive, budget: mediaBudget)
+        imageSections += try Self.extractNoteImages(archive, budget: mediaBudget)
         // De-duplicate an image referenced from both the body and a note (by
         // archive path). NOTE: image identity downstream (the inline `src` and the
         // renderer's data-URL embedding) is keyed by basename, so two *different*
@@ -620,7 +621,7 @@ public struct WordConverter: DocumentConverter {
     /// Extracts embedded images from the footnote/endnote parts as `.image`
     /// sections, using each part's own relationships — so an image inside a note
     /// is preserved/embeddable like a body image (notes reference it inline).
-    static func extractNoteImages(_ archive: Archive) -> [DocumentSection] {
+    static func extractNoteImages(_ archive: Archive, budget: MediaBudget = MediaBudget()) throws -> [DocumentSection] {
         var sections: [DocumentSection] = []
         for (typeSuffix, fallback, rootTag) in [
             ("/footnotes", "word/footnotes.xml", "w:footnotes"),
@@ -635,7 +636,7 @@ public struct WordConverter: DocumentConverter {
             // A note part's image targets resolve relative to the note part's own
             // folder (usually `word`, but a subfolder when the part lives in one).
             let partDirectory = (part as NSString).deletingLastPathComponent
-            sections.append(contentsOf: extractImages(from: root, relationships: relationships, archive: archive, partDirectory: partDirectory))
+            sections.append(contentsOf: try extractImages(from: root, relationships: relationships, archive: archive, partDirectory: partDirectory, budget: budget))
         }
         return sections
     }
@@ -676,14 +677,23 @@ public struct WordConverter: DocumentConverter {
         return "image"
     }
 
+    /// One budget covers body, footnotes, and endnotes before base64 retention.
+    final class MediaBudget {
+        var remainingBytes: Int
+        var remainingImages: Int
+        var seen: Set<String> = []
+        init(maxBytes: Int = 64 * 1024 * 1024, maxImages: Int = 1024) {
+            remainingBytes = max(0, maxBytes); remainingImages = max(0, maxImages)
+        }
+    }
+
     /// Extracts each embedded image once as an `.image` section carrying the raw
     /// bytes (base64) and MIME type, so consumers can render or caption them.
-    static func extractImages(from body: Element, relationships: [String: String], archive: Archive, partDirectory: String = "word") -> [DocumentSection] {
+    static func extractImages(from body: Element, relationships: [String: String], archive: Archive, partDirectory: String = "word", budget: MediaBudget = MediaBudget()) throws -> [DocumentSection] {
         let blips = (try? body.getElementsByTag("a:blip").array()) ?? []
         let vmlImages = (try? body.getElementsByTag("v:imagedata").array()) ?? []
 
         var sections: [DocumentSection] = []
-        var seen = Set<String>()
         for element in blips + vmlImages {
             var relId = (try? element.attr("r:embed")) ?? ""
             if relId.isEmpty { relId = (try? element.attr("r:id")) ?? "" }
@@ -691,10 +701,14 @@ public struct WordConverter: DocumentConverter {
 
             // parseRelationships already decoded package-absolute image paths.
             let mediaPath = target.hasPrefix("/") ? String(target.dropFirst()) : resolvePartPath(target, relativeTo: partDirectory)
-            guard !seen.contains(mediaPath) else { continue }
-            seen.insert(mediaPath)
+            guard budget.seen.insert(mediaPath).inserted else { continue }
+            try Task.checkCancellation()
+            guard let entry = archive[mediaPath] else { continue }
+            guard budget.remainingImages > 0, entry.uncompressedSize <= UInt64(budget.remainingBytes) else { throw PicoDocsError.parsingError }
 
-            guard let bytes = readEntry(archive, path: mediaPath), !bytes.isEmpty else { continue }
+            guard let bytes = readEntry(archive, path: mediaPath, maxBytes: min(32 * 1024 * 1024, budget.remainingBytes)), !bytes.isEmpty else { continue }
+            budget.remainingBytes -= bytes.count
+            budget.remainingImages -= 1
             let filename = (mediaPath as NSString).lastPathComponent
             sections.append(DocumentSection(
                 title: filename,

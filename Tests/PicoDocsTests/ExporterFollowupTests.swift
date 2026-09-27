@@ -8,6 +8,44 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func WordMediaBudgetIsSharedAcrossBodyAndNotes() throws {
+        let body = try SwiftSoup.parse(#"<w:body><a:blip r:embed="body"/></w:body>"#, "", SwiftSoup.Parser.xmlParser())
+        let note = #"<w:footnotes><w:footnote w:id="1"><a:blip r:embed="note"/></w:footnote></w:footnotes>"#
+        for sameImage in [false, true] {
+            let target = sameImage ? "media/a.png" : "media/b.png"
+            let rels = "<Relationships><Relationship Id=\"note\" Type=\"rel/image\" Target=\"" + target + "\"/></Relationships>"
+            let data = PagesConverterTests.makeZip([(name: "word/media/a.png", data: Array(repeating: 1, count: 6)), (name: "word/media/b.png", data: Array(repeating: 2, count: 6)), (name: "word/footnotes.xml", data: Array(note.utf8)), (name: "word/_rels/footnotes.xml.rels", data: Array(rels.utf8))])
+            let archive = try #require(Archive(data: data, accessMode: .read))
+            for budget in [WordConverter.MediaBudget(maxBytes: 10), WordConverter.MediaBudget(maxImages: 1)] {
+                let images = try WordConverter.extractImages(from: body, relationships: ["body": "media/a.png"], archive: archive, budget: budget)
+                #expect(images.count == 1)
+                if sameImage { #expect(try WordConverter.extractNoteImages(archive, budget: budget).isEmpty) }
+                else { #expect(throws: PicoDocsError.parsingError) { try WordConverter.extractNoteImages(archive, budget: budget) } }
+            }
+        }
+    }
+
+    @Test func spreadsheetEncodeFastPathRetainsEscapesAndControls() {
+        for source in ["ordinary", "_x0041_", "_xFFFF_\u{0001}", "tab\tline\n", "emoji 😀", "\u{FFFE}"] {
+            #expect(SpreadsheetMLText.decode(SpreadsheetMLText.encode(source)) == source)
+        }
+    }
+
+    @Test func XLSXDimensionsRespectTheReaderCellBudget() throws {
+        try XLSXExporter.validateDimensions(rows: 1_000, columns: 1_000)
+        #expect(throws: ExporterError.self) { try XLSXExporter.validateDimensions(rows: 1_001, columns: 1_000) }
+        #expect(throws: ExporterError.self) { try XLSXExporter.validateDimensions(rows: Int.max, columns: Int.max) }
+    }
+
+    @Test func XLSXListProjectionKeepsMarkersAndContentIndentation() throws {
+        let data = try PicoDocsEngine.write(markdown: "3. Third\n   - child\n4. Fourth", to: .xlsx)
+        let sheet = try xml(data, "xl/worksheets/sheet1.xml")
+        #expect(sheet.contains(">3. Third</t>"))
+        #expect(sheet.contains(">   - child</t>"))
+        #expect(sheet.contains(">4. Fourth</t>"))
+    }
+
+
     @Test func emptyCSVCellSurvivesOfficeProjection() async throws {
         let converted = try await PicoDocsEngine.convert(data: Data("\"\"".utf8), filename: "empty.csv")
         let legacy = ConverterResult(sections: [.init(kind: .table, markdown: "|  |\n| --- |", metadata: ["csv": ""])])
@@ -937,7 +975,7 @@ struct ExporterFollowupTests {
         let oversized = ConverterResult(sections: [DocumentSection(markdown: "data", metadata: ["csv": Array(repeating: "x", count: 16_385).joined(separator: ",")])])
         #expect(throws: ExporterError.self) { try PicoDocsEngine.write(oversized, to: .xlsx) }
         #expect(throws: ExporterError.self) { try XLSXExporter.validateDimensions(rows: 1_048_577, columns: 1) }
-        try XLSXExporter.validateDimensions(rows: 1_048_576, columns: 16_384)
+        try XLSXExporter.validateDimensions(rows: 61, columns: 16_384)
     }
 
     @Test func metadataAndCanonicalTableBreaks() throws {

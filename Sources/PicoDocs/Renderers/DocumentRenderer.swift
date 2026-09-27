@@ -560,9 +560,12 @@ public enum DocumentRenderer {
         return restoreEscapes(protected, escaped: escaped, html: false)
     }
 
+    private static let footnoteReferencePattern = try! NSRegularExpression(pattern: "\\[\\^([^\\]]+)\\]")
+
     private static func renderFootnoteReferences(_ text: String, escaped: [String], numbers: [String: Int], html: Bool) -> String {
+        guard !numbers.isEmpty, text.contains("[^") else { return text }
         let ns = text as NSString
-        let regex = try! NSRegularExpression(pattern: "\\[\\^([^\\]]+)\\]")
+        let regex = footnoteReferencePattern
         let lookup = Dictionary(numbers.map { (html ? escapeHTML($0.key) : $0.key, $0.value) }, uniquingKeysWith: { first, _ in first })
         var output = "", offset = 0
         for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
