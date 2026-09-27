@@ -44,6 +44,7 @@ enum MarkdownInlineParser {
         if !text.unicodeScalars.contains(where: { syntax.contains($0) }) {
             return text.isEmpty ? [] : [.text(text)]
         }
+        if let literal = escapeOnlyText(text) { return literal.isEmpty ? [] : [.text(literal)] }
         let chars = Array(text)
         // Cache the next unescaped label closer once instead of rescanning the
         // suffix for every unmatched opener in partially generated Markdown.
@@ -185,6 +186,27 @@ enum MarkdownInlineParser {
             }
         }
         return restore(parseEmphasis(run, structured: structured))
+    }
+
+    /// Decode escapes without allocating delimiter indexes when no active syntax
+    /// remains. A late syntax marker falls back to the structured parser.
+    private static func escapeOnlyText(_ text: String) -> String? {
+        let scalars = text.unicodeScalars
+        let syntax: Set<Unicode.Scalar> = ["`", "[", "*", "_", "\n", "<", "\u{E020}"]
+        let escapable = Set(punctuation.unicodeScalars)
+        var output = "", index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            index = scalars.index(after: index)
+            if scalar == "\\", index < scalars.endIndex, escapable.contains(scalars[index]) {
+                output.unicodeScalars.append(scalars[index])
+                index = scalars.index(after: index)
+            } else {
+                guard !syntax.contains(scalar) else { return nil }
+                output.unicodeScalars.append(scalar)
+            }
+        }
+        return output
     }
 
     // MARK: - Link / image

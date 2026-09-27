@@ -20,7 +20,23 @@ enum OfficeDocumentBlocks {
             }
             try charge(value.utf8.count * 7)
         }
-        for section in result.sections where section.kind != .image {
+        for section in result.sections {
+            if section.kind == .image {
+                // Synthesis duplicates identities into alt text, destinations and
+                // generated sections before any Markdown parser sees them.
+                try charge(256)
+                for value in [section.title, section.sourcePath].compactMap({ $0 }) {
+                    guard value.utf8.count <= remaining / 14 else { throw ExporterError.serializationFailed("Office image references exceed the supported byte budget") }
+                    try charge(value.utf8.count * 14)
+                }
+                for (key, value) in section.metadata where key != "base64" {
+                    guard key.utf8.count <= remaining / 7 else { throw ExporterError.serializationFailed("Office image metadata exceeds the supported byte budget") }
+                    try charge(key.utf8.count * 7)
+                    guard value.utf8.count <= remaining / 7 else { throw ExporterError.serializationFailed("Office image metadata exceeds the supported byte budget") }
+                    try charge(value.utf8.count * 7)
+                }
+                continue
+            }
             let projectedTitle = section.kind == .sheet ? (section.sheetName ?? section.metadata["sheetName"] ?? section.title) : section.title
             for title in Set([section.title, projectedTitle].compactMap({ $0 })) {
                 guard title.utf8.count <= remaining / 7 else { throw ExporterError.serializationFailed("Office section metadata exceeds the supported byte budget") }

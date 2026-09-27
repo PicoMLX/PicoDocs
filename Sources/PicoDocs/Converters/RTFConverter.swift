@@ -57,11 +57,9 @@ public struct RTFConverter: DocumentConverter {
     ]
 
     static func markdown(fromRTF rtf: String) -> String {
-        // NOTE: Swift clusters "\r\n" into a single Character, so the newline
-        // handling below matches it as one grapheme (alongside lone "\r"/"\n")
-        // rather than normalizing the string — which keeps `\bin` byte-offset
-        // skipping (which indexes this array) untouched.
-        let chars = Array(rtf)
+        // convert() decodes bytes as Latin-1: each scalar is exactly one source
+        // byte. Keep CR and LF separate so \binN skips N bytes, not graphemes.
+        let chars = rtf.unicodeScalars.map { Character(String($0)) }
         let n = chars.count
         var i = 0
 
@@ -161,7 +159,6 @@ public struct RTFConverter: DocumentConverter {
             // flush the buffer before any other token so byte order is preserved.
             // Raw newlines are non-content (RTF line-wrapping) and can fall *inside*
             // a DBCS character (\'82\r\n\'a0), so they must not flush the buffer.
-            // "\r\n" is matched explicitly because Swift treats it as one Character.
             if !pendingBytes.isEmpty,
                !(c == "\\" && i + 1 < n && chars[i + 1] == "'"),
                c != "\r", c != "\n", c != "\r\n" {
@@ -319,7 +316,7 @@ public struct RTFConverter: DocumentConverter {
                 }
 
             case "\r", "\n", "\r\n":
-                i += 1                                          // raw newlines aren't content (CRLF is one grapheme)
+                i += 1                                          // raw line-wrapping bytes are not content
 
             default:
                 appendText(String(c))

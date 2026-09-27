@@ -30,6 +30,10 @@ public struct PPTXExporter: DocumentExporter {
         let result = PicoDocsEngine.withSynthesizedImageReferences(sanitized)
 
         let slides = try Self.slides(from: result)
+        if !result.sections.contains(where: { $0.kind == .slide || $0.slideNumber != nil }),
+           !slides.contains(where: { !$0.title.isEmpty || !$0.body.isEmpty }) {
+            throw PicoDocsError.emptyDocument
+        }
         guard slides.allSatisfy({ $0.body.allSatisfy { $0.level <= 8 } }) else {
             throw ExporterError.serializationFailed("PPTX supports at most nine native list levels")
         }

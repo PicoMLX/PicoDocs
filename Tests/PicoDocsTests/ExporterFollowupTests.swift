@@ -8,6 +8,59 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func RTFBinaryLengthsCountLatin1BytesIncludingCRLF() async throws {
+        for payload: [UInt8] in [[13, 10], [13, 10, 123, 92], [255, 13, 10, 125]] {
+            var data = Data("{\\rtf1 Before{\\pict\\bin\(payload.count) ".utf8)
+            data.append(contentsOf: payload)
+            data.append(Data("}After}".utf8))
+            let result = try await PicoDocsEngine.convert(data: data, filename: "binary.rtf")
+            #expect(result.markdown() == "BeforeAfter")
+        }
+    }
+
+    @Test func repeatedAmbiguousImageKeysKeepAltTextAndAllowExactMatches() throws {
+        let bytes = Data(repeating: 1, count: 8 * 1024 * 1024).base64EncodedString()
+        let carriers = ["a/logo.png", "b/logo.png"].map { DocumentSection(kind: .image, markdown: "", sourcePath: $0, metadata: ["base64": bytes, "mimeType": "image/png"]) }
+        let ambiguous = (0..<32).map { "![Missing \($0)](unknown\($0)/logo.png)" }.joined(separator: " ")
+        let result = ConverterResult(sections: [.init(markdown: ambiguous + " ![Exact](a/logo.png) ![Again](logo.png)")] + carriers)
+        let data = try PicoDocsEngine.write(result, to: .docx)
+        let archive = try #require(Archive(data: data, accessMode: .read))
+        #expect(archive.filter { $0.path.hasPrefix("word/media/") }.count == 1)
+        let document = try xml(data, "word/document.xml")
+        #expect(document.contains("Missing 31")); #expect(document.contains("Again"))
+    }
+
+    @Test func escapeOnlyInlineParagraphAvoidsDenseDelimiterIndexes() {
+        let input = String(repeating: #"\*"#, count: 4 * 1024 * 1024)
+        #expect(MarkdownInlineParser.parse(input) == [.text(String(repeating: "*", count: 4 * 1024 * 1024))])
+        #expect(MarkdownInlineParser.parse(#"\[literal\] \`code\`"#) == [.text("[literal] `code`")])
+        #expect(MarkdownInlineParser.parse(#"\\*bold*"#) == [.text("\\"), .emphasis([.text("bold")])])
+        #expect(MarkdownInlineParser.parse(#"\* literal **bold**"#) == [.text("* literal "), .strong([.text("bold")])])
+    }
+
+    @Test func effectiveWorksheetTitlesAreSanitizedBeforeProjection() throws {
+        for legacy in [false, true] {
+            for title in ["\0", "A\0B"] {
+                let section = DocumentSection(kind: .sheet, markdown: "", sheetName: legacy ? nil : title, metadata: legacy ? ["sheetName": title] : [:])
+                let result = ConverterResult(sections: [section])
+                for (format, path) in [(ExportableFileType.docx, "word/document.xml"), (.pptx, "ppt/slides/slide1.xml")] {
+                    if title == "\0" { #expect(throws: PicoDocsError.emptyDocument) { try PicoDocsEngine.write(result, to: format) } }
+                    else { #expect(try xml(PicoDocsEngine.write(result, to: format), path).contains("AB")) }
+                }
+            }
+        }
+    }
+
+    @Test func oversizedImageIdentitiesAreRejectedBeforeSynthesis() throws {
+        let huge = String(repeating: "x", count: 5 * 1024 * 1024)
+        for image in [DocumentSection(title: huge, kind: .image, markdown: "", sourcePath: "photo.png", metadata: ["base64": "AQID"]), DocumentSection(kind: .image, markdown: "", sourcePath: huge, metadata: ["base64": "AQID"])] {
+            for format in [ExportableFileType.docx, .xlsx, .pptx, .rtf] {
+                #expect(throws: ExporterError.self) { try PicoDocsEngine.write(ConverterResult(sections: [image]), to: format) }
+            }
+        }
+    }
+
+
     @Test func effectiveWorksheetTitlesArePreflightedBeforeHeadingProjection() throws {
         let large = String(repeating: "&", count: 10 * 1024 * 1024)
         for section in [DocumentSection(kind: .sheet, markdown: "", sheetName: large), DocumentSection(kind: .sheet, markdown: "", metadata: ["sheetName": large])] {

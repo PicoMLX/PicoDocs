@@ -112,9 +112,14 @@ public struct WordprocessingMLExporter: DocumentExporter {
     /// source path *and* by basename — the basename map only when unambiguous — so
     /// two carriers that share a basename (`charts/logo.png` vs `headers/logo.png`)
     /// stay distinct instead of one overwriting the other.
-    private struct ImageIndex {
+    private final class ImageIndex {
         let byPath: [String: [IndexedImage]]
         let byBasename: [String: [IndexedImage]]
+        private var ambiguousPaths: Set<String> = []
+        private var ambiguousBasenames: Set<String> = []
+        init(byPath: [String: [IndexedImage]], byBasename: [String: [IndexedImage]]) {
+            self.byPath = byPath; self.byBasename = byBasename
+        }
 
         func lookup(_ source: String) throws -> IndexedImage? {
             func unique(_ candidates: [IndexedImage]) throws -> (image: IndexedImage?, ambiguous: Bool) {
@@ -130,9 +135,16 @@ public struct WordprocessingMLExporter: DocumentExporter {
             }
             if let exact = byPath[source] {
                 // A registered full path is authoritative, even if its payload is invalid.
-                return try unique(exact).image
+                guard !ambiguousPaths.contains(source) else { return nil }
+                let result = try unique(exact)
+                if result.ambiguous { ambiguousPaths.insert(source) }
+                return result.image
             }
-            return try unique(byBasename[WordprocessingMLExporter.portableBasename(source)] ?? []).image
+            let basename = WordprocessingMLExporter.portableBasename(source)
+            guard !ambiguousBasenames.contains(basename) else { return nil }
+            let result = try unique(byBasename[basename] ?? [])
+            if result.ambiguous { ambiguousBasenames.insert(basename) }
+            return result.image
         }
     }
 

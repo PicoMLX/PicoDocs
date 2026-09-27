@@ -104,6 +104,8 @@ struct OOXMLPackageWriter {
         for index in result.sections.indices where result.sections[index].kind != .image {
             result.sections[index].markdown = clean(result.sections[index].markdown)
             result.sections[index].title = result.sections[index].title.map(clean)
+            result.sections[index].sheetName = result.sections[index].sheetName.map(clean)
+            if let name = result.sections[index].metadata["sheetName"] { result.sections[index].metadata["sheetName"] = clean(name) }
             if let csv = result.sections[index].metadata["csv"] { result.sections[index].metadata["csv"] = clean(csv) }
         }
         return result
