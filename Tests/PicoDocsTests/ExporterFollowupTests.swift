@@ -8,6 +8,44 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func orderedListRestartsAreBoundedBeforeNumberingSerialization() throws {
+        let tooMany = ConverterResult(sections: [.init(markdown: String(repeating: "1. item\n", count: 16_385))])
+        try OfficeDocumentBlocks.validateInput(tooMany)
+        #expect(throws: ExporterError.self) { try PicoDocsEngine.write(tooMany, to: .docx) }
+        let ordinary = ConverterResult(sections: [.init(markdown: "1. First\n1. Restart\n2. Continue")])
+        let numbering = try xml(PicoDocsEngine.write(ordinary, to: .docx), "word/numbering.xml")
+        #expect(numbering.components(separatedBy: "<w:num w:numId=").count == 3)
+    }
+
+    @Test func XLSXPreservesControlCharactersBeforeXMLEscaping() async throws {
+        for text in ["\0", "\u{000B}"] {
+            if text == "\u{000B}" {
+                #expect(throws: PicoDocsError.emptyDocument) { try PicoDocsEngine.write(markdown: text, to: .xlsx) }
+            }
+            var sections = [DocumentSection(kind: .table, markdown: "", metadata: ["csv": text]), DocumentSection(kind: .table, markdown: "", metadata: ["csv": "\"" + text + "\""])]
+            if text == "\0" { sections.append(DocumentSection(markdown: text)) }
+            for section in sections {
+                let data = try PicoDocsEngine.write(ConverterResult(sections: [section]), to: .xlsx)
+                let worksheet = try xml(data, "xl/worksheets/sheet1.xml")
+                #expect(worksheet.contains(text == "\0" ? "_x0000_" : "_x000B_"))
+                let imported = try await PicoDocsEngine.convert(data: data, filename: "controls.xlsx")
+                let csv = try #require(imported.sections.first?.metadata["csv"])
+                #expect(CSVConverter.parseCSV(csv).first?.first == text)
+            }
+        }
+    }
+
+    @Test func DOCXMediaDeclarationOverridesConflictingPathExtension() throws {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        let image = DocumentSection(kind: .image, markdown: "", sourcePath: "photo.jpg", metadata: ["base64": png, "mimeType": "image/png"])
+        let result = ConverterResult(sections: [.init(markdown: "![Photo](photo.jpg)"), image])
+        let data = try PicoDocsEngine.write(result, to: .docx)
+        let archive = try #require(Archive(data: data, accessMode: .read))
+        #expect(archive["word/media/photo.png"] != nil)
+        #expect(archive["word/media/photo.jpg"] == nil)
+        #expect(try xml(data, "[Content_Types].xml").contains("ContentType=\"image/png\""))
+    }
+
     @Test func DOCXRelationshipStoreBoundsCountBytesAndFailedInsertions() throws {
         var countLimited = WordprocessingMLExporter.RelationshipStore(maximumCount: 2)
         try countLimited.add(id: "one", type: "hyperlink", target: "https://example.com/1", external: true)
@@ -34,14 +72,14 @@ struct ExporterFollowupTests {
     }
 
     @Test func forbiddenImageIdentitiesHaveVisibleOfficeFallbacks() async throws {
-        for identity in ["\0", "\u{000B}", "\u{FFFE}"] {
+        for identity in ["\0", "\u{000B}", "\u{FFFE}", " ", "\t", "\u{00A0}"] {
             for useTitle in [false, true] {
                 let image = DocumentSection(title: useTitle ? identity : nil, kind: .image, markdown: "", sourcePath: useTitle ? nil : identity, metadata: ["base64": "AQID", "mimeType": "image/png"])
                 let result = ConverterResult(sections: [image])
                 for (format, path) in [(ExportableFileType.pptx, "ppt/slides/slide1.xml"), (.xlsx, "xl/worksheets/sheet1.xml")] {
                     let output = try xml(PicoDocsEngine.write(result, to: format), path)
                     #expect(output.contains("image-1.png"))
-                    #expect(!output.contains(identity))
+                    if ["\0", "\u{000B}", "\u{FFFE}"].contains(identity) { #expect(!output.contains(identity)) }
                 }
                 let imported = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(result, to: .rtf), filename: "image.rtf")
                 #expect(try DocumentRenderer.render(imported, to: .plaintext) == "image-1.png")

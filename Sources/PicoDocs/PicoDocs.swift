@@ -134,9 +134,13 @@ public enum PicoDocsEngine {
         var sections = result.sections
         // Every Office writer projects image-only carriers through this path.
         // Clean identities before choosing visible labels or generated fallbacks.
+        func visibleIdentity(_ source: String) -> String? {
+            let clean = OOXMLPackageWriter.xmlSafeText(source)
+            return clean.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : clean
+        }
         for index in sections.indices where sections[index].kind == .image {
-            sections[index].title = sections[index].title.map(OOXMLPackageWriter.xmlSafeText)
-            sections[index].sourcePath = sections[index].sourcePath.map(OOXMLPackageWriter.xmlSafeText)
+            sections[index].title = sections[index].title.flatMap(visibleIdentity)
+            sections[index].sourcePath = sections[index].sourcePath.flatMap(visibleIdentity)
         }
         var refs: [Int: DocumentSection] = [:]
         var generatedCount = 0

@@ -165,12 +165,14 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
             // The carrier's display name (basename of the source path, else title).
             let name = [section.sourcePath, section.title].compactMap { $0 }.first { !$0.isEmpty }.map(portableBasename)
-            // Pick a stem + extension; fall back to the declared MIME for the
-            // extension so a name like "logo" (or no name) still gets a type Office
-            // recognizes rather than `.bin`/octet-stream.
+            // A recognized MIME declaration is authoritative over a conflicting
+            // display-name extension; retain equivalent aliases (e.g. jpg/jpeg).
             let mime = section.metadata["mimeType"]
             var ext = (name as NSString?)?.pathExtension.lowercased() ?? ""
-            if OfficeMediaType.mimeType(forExtension: ext) == "application/octet-stream" { ext = OfficeMediaType.fileExtension(forMIME: mime ?? "") }
+            let declaredExtension = OfficeMediaType.fileExtension(forMIME: mime ?? "")
+            if declaredExtension != "bin", OfficeMediaType.mimeType(forExtension: declaredExtension) != OfficeMediaType.mimeType(forExtension: ext) {
+                ext = declaredExtension
+            } else if OfficeMediaType.mimeType(forExtension: ext) == "application/octet-stream" { ext = declaredExtension }
             let stem = (name as NSString?)?.deletingPathExtension ?? ""
 
             // Allocate a unique media filename (suffix on basename collisions) so
@@ -300,17 +302,32 @@ public struct WordprocessingMLExporter: DocumentExporter {
             }
             var numId = 1
             var expected = list.items.first?.number ?? 1
-            func allocate(_ start: Int) -> Int {
+            func allocate(_ start: Int) -> Int? {
+                // Each serialized instance is under 256 bytes even with Int.max
+                // starts. This cap leaves ample room under the 8 MiB part limit
+                // for all nine levels, bullet and markerless definitions.
+                guard orderedNumIds.count < 16_384 else {
+                    failure = ExporterError.serializationFailed("DOCX exceeds 16,384 ordered-list numbering instances")
+                    return nil
+                }
                 let id = nextOrderedNumId
                 nextOrderedNumId += 1
                 orderedNumIds.append((id, level, start))
                 return id
             }
-            if list.ordered { numId = allocate(expected) } else { usedBullet = true }
+            if list.ordered {
+                guard let id = allocate(expected) else { return }
+                numId = id
+            } else { usedBullet = true }
             for item in list.items {
-                if let number = item.number, number != expected { numId = allocate(number) }
+                guard failure == nil else { return }
+                if let number = item.number, number != expected {
+                    guard let id = allocate(number) else { return }
+                    numId = id
+                }
                 if let number = item.number { expected = min(number, Int.max - 1) + 1 }
                 for (index, content) in item.content.enumerated() {
+                    guard failure == nil else { return }
                     switch content {
                     case .text(let text):
                         if index > 0, continuationNumID == nil {
