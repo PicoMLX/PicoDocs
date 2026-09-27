@@ -12,6 +12,16 @@
 import Foundation
 
 enum MarkdownTableCell {
+    /// Escape literal scalar punctuation without allocating a String per character.
+    static func escapeLiteral(_ text: String, punctuation: String) -> String {
+        var output = ""
+        for scalar in text.unicodeScalars {
+            if punctuation.unicodeScalars.contains(scalar) { output.append("\\") }
+            output.unicodeScalars.append(scalar)
+        }
+        return output
+    }
+
     /// Transform semantic code spans separately from canonical literal text.
     static func mapCodeSpans(_ text: String, keepDelimiters: Bool = true, code: (String) -> String, plain: (String) -> String) -> String {
         guard text.contains("`") else { return plain(text) }

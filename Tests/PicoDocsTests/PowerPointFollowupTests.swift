@@ -5,6 +5,68 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func largeWordAndSpreadsheetLiteralsUseScalarEscapes() async throws {
+        let source = String(repeating: "*\u{0301}x*\u{0301} ", count: 30_000).trimmingCharacters(in: .whitespaces)
+        let document = "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:body><w:p><w:r><w:t>\(source)</w:t></w:r></w:p></w:body></w:document>"
+        let worksheet = "<worksheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'><sheetData><row r='1'><c r='A1' t='inlineStr'><is><t>\(source)</t></is></c></row></sheetData></worksheet>"
+        let inputs = [("literal.docx", PagesConverterTests.makeZip([("word/document.xml", Array(document.utf8))])), ("literal.xlsx", ConverterTests.xlsx(sheetXML: worksheet))]
+        for (filename, data) in inputs {
+            let result = try await PicoDocsEngine.convert(data: data, filename: filename)
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(source))
+            let html = try DocumentRenderer.render(result, to: .html)
+            #expect(html.contains(source)); #expect(!html.contains("<em>"))
+        }
+    }
+
+    @Test func largePagesCellPreservesLiteralPunctuationAndCleanup() throws {
+        let source = String(repeating: "*\u{0301}x*\u{0301} | ", count: 30_000).trimmingCharacters(in: .whitespaces)
+        let escaped = IWATable.cleanCell("\u{0001}" + source + "\u{FFFC}\r\n\t")
+        let result = ConverterResult(sections: [.init(kind: .table, markdown: "| " + escaped + " |\n| --- |")])
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains(source))
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains(source)); #expect(!html.contains("<em>"))
+    }
+
+    @Test func retainedRelationshipMapsShareCountAndByteBudgets() throws {
+        typealias B = PowerPointConverterTests
+        let type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+        let relationXML = B.relationshipsXML([("image", type, "../media/a.png")])
+        let paths = ["ppt/slides/a.xml", "ppt/slides/b.xml", "ppt/slides/c.xml"]
+        let entries = paths.map { path in ("ppt/slides/_rels/" + (path as NSString).lastPathComponent + ".rels", Array(relationXML.utf8)) }
+        let archive = try #require(Archive(data: PagesConverterTests.makeZip(entries), accessMode: .read))
+        let counted = PowerPointPackage(archive: archive, maximumRelationships: 2)
+        for path in paths.prefix(2) { #expect(PowerPointConverter.relationships(counted, forPart: path).count == 1) }
+        #expect(PowerPointConverter.relationships(counted, forPart: paths[0]).count == 1)
+        try counted.check()
+        #expect(PowerPointConverter.relationships(counted, forPart: paths[2]).isEmpty)
+        #expect(throws: PicoDocsError.fileCorrupted) { try counted.check() }
+        let cost = paths[0].utf8.count + 64 + "image".utf8.count + type.utf8.count + "../media/a.png".utf8.count + 96
+        let bytes = PowerPointPackage(archive: archive, maximumRelationshipBytes: cost)
+        #expect(PowerPointConverter.relationships(bytes, forPart: paths[0]).count == 1)
+        try bytes.check()
+        #expect(PowerPointConverter.relationships(bytes, forPart: paths[1]).isEmpty)
+        #expect(throws: PicoDocsError.fileCorrupted) { try bytes.check() }
+        let empty = PowerPointPackage(archive: archive, maximumRelationshipBytes: 64)
+        _ = PowerPointConverter.relationships(empty, forPart: "")
+        try empty.check()
+        _ = PowerPointConverter.relationships(empty, forPart: "missing")
+        #expect(throws: PicoDocsError.fileCorrupted) { try empty.check() }
+    }
+
+    @Test func packageRejectsSymlinksRegardlessOfDuplicateOrder() throws {
+        for types in [[Entry.EntryType.symlink], [.symlink, .file], [.file, .symlink]] {
+            let archive = try #require(Archive(data: Data(), accessMode: .create))
+            for type in types {
+                try archive.addEntry(with: "ppt/presentation.xml", type: type, uncompressedSize: Int64(1)) { _, _ in Data([65]) }
+            }
+            #expect(throws: PicoDocsError.fileCorrupted) { try PowerPointPackage(archive: archive).check() }
+        }
+        let directory = try #require(Archive(data: Data(), accessMode: .create))
+        try directory.addEntry(with: "ppt/", type: .directory, uncompressedSize: Int64(0)) { _, _ in Data() }
+        try PowerPointPackage(archive: directory).check()
+    }
+
+
     @Test func sharedDOMCacheChargesNodesAttributesAndNormalizedBytes() throws {
         typealias B = PowerPointConverterTests
         let source = "<p:sldLayout \(B.namespaces)><p:cSld><p:spTree/></p:cSld></p:sldLayout>"

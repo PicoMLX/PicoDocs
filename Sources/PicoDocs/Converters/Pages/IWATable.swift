@@ -985,7 +985,7 @@ enum IWATable {
     ///    skipped) rather than rendering as visible garbage;
     ///  • escapes backslash and pipe so the text can't break the table; and
     ///  • trims surrounding whitespace.
-    private static func cleanCell(_ text: String) -> String {
+    static func cleanCell(_ text: String) -> String {
         var folded = text
         for separator in ["\r\n", "\r", "\n", "\u{2028}", "\u{2029}", "\u{000B}", "\u{000C}"] {
             folded = folded.replacingOccurrences(of: separator, with: " ")
@@ -998,9 +998,7 @@ enum IWATable {
                 || (0x7F...0x9F).contains(value)             // DEL + C1 controls
                 || value == 0xFFFC                           // object-replacement placeholder
         }
-        let escaped = String(scalars).map {
-            #"\`*_{}[]<>|"#.contains($0) ? "\\" + String($0) : String($0)
-        }.joined()
+        let escaped = MarkdownTableCell.escapeLiteral(String(scalars), punctuation: #"\`*_{}[]<>|"#)
         return escaped.trimmingCharacters(in: .whitespaces)
     }
 }

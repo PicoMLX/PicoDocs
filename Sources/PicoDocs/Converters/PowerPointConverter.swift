@@ -1026,6 +1026,7 @@ public struct PowerPointConverter: DocumentConverter {
     /// A part's relationships (`<dir>/_rels/<file>.rels`), keyed by id.
     static func relationships(_ archive: PowerPointPackage, forPart part: String) -> [String: Relationship] {
         if let cached = archive.relationshipMaps[part] { return cached }
+        guard archive.reserveRelationshipMap(part) else { return [:] }
         let parent = directory(of: part)
         let relsPath = (parent.isEmpty ? "" : parent + "/") + "_rels/\((part as NSString).lastPathComponent).rels"
         guard let document = xml(archive, path: relsPath) else {
@@ -1059,6 +1060,7 @@ public struct PowerPointConverter: DocumentConverter {
                     } else if segment != "." { depth += 1 }
                 }
             }
+            guard archive.reserveRelationship(id: id, type: type, target: target) else { return [:] }
             map[id] = Relationship(type: type, target: target, external: external)
         }
         archive.relationshipMaps[part] = map

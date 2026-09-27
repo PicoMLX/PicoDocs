@@ -107,7 +107,7 @@ public struct SpreadsheetConverter: DocumentConverter {
         }
         // Spreadsheet values are literal; escape inline syntax and table pipes, then flatten newlines
         // (including Windows CRLF and bare CR, common in Excel-on-Windows files).
-        return raw.map { #"\`*_{}[]<>()#+-.!|"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+        return MarkdownTableCell.escapeLiteral(raw, punctuation: #"\`*_{}[]<>()#+-.!|"#)
             .replacingOccurrences(of: "\r\n", with: " ")
             .replacingOccurrences(of: "\r", with: " ")
             .replacingOccurrences(of: "\n", with: " ")

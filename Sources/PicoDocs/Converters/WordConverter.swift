@@ -320,7 +320,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     private static func escapeLiteralText(_ text: String) -> String {
-        text.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+        MarkdownTableCell.escapeLiteral(text, punctuation: #"\`*_{}[]<>"#)
     }
 
     /// Generated inline content already has escaped source text. Preserve those

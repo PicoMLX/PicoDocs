@@ -10,13 +10,17 @@ final class PowerPointPackage {
     private var remaining: Int
     private let entryLimit: Int
     private(set) var failure: Error?
+    private var remainingRelationships: Int
+    private var remainingRelationshipBytes: Int
     var contentTypes: [String: String]?
     var relationshipMaps: [String: [String: PowerPointConverter.Relationship]] = [:]
 
-    init(archive: Archive, entryLimit: Int = 64 * 1024 * 1024, totalLimit: Int = 256 * 1024 * 1024, maximumEntries: Int = 16_384, maximumNameBytes: Int = 8 * 1024 * 1024) {
+    init(archive: Archive, entryLimit: Int = 64 * 1024 * 1024, totalLimit: Int = 256 * 1024 * 1024, maximumEntries: Int = 16_384, maximumNameBytes: Int = 8 * 1024 * 1024, maximumRelationships: Int = 65_536, maximumRelationshipBytes: Int = 16 * 1024 * 1024) {
         self.archive = archive
         self.entryLimit = entryLimit
         self.remaining = totalLimit
+        self.remainingRelationships = max(0, maximumRelationships)
+        self.remainingRelationshipBytes = max(0, maximumRelationshipBytes)
         var names: Set<String> = []
         var count = 0, nameBytes = 0
         for entry in archive {
@@ -26,8 +30,26 @@ final class PowerPointPackage {
                 fail(PicoDocsError.fileCorrupted); break
             }
             count += 1; nameBytes += bytes
-            if entry.type == .file, !names.insert(entry.path).inserted { fail(PicoDocsError.fileCorrupted); break }
+            guard entry.type == .file || entry.type == .directory else { fail(PicoDocsError.fileCorrupted); break }
+            if entry.type != .directory, !names.insert(entry.path).inserted { fail(PicoDocsError.fileCorrupted); break }
         }
+    }
+
+    /// Bound all retained relationship dictionaries, including empty-map keys.
+    func reserveRelationshipMap(_ part: String) -> Bool {
+        let bytes = part.utf8.count + 64
+        guard bytes <= remainingRelationshipBytes else { fail(PicoDocsError.fileCorrupted); return false }
+        remainingRelationshipBytes -= bytes
+        return true
+    }
+
+    func reserveRelationship(id: String, type: String, target: String) -> Bool {
+        let bytes = id.utf8.count + type.utf8.count + target.utf8.count + 96
+        guard remainingRelationships > 0, bytes <= remainingRelationshipBytes else {
+            fail(PicoDocsError.fileCorrupted); return false
+        }
+        remainingRelationships -= 1; remainingRelationshipBytes -= bytes
+        return true
     }
 
     func fail(_ error: Error) { if failure == nil { failure = error } }
