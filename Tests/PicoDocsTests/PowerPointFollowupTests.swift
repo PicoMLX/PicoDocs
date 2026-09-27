@@ -5,6 +5,119 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func XMLNodeAndAttributeBudgetsRejectBeforeDOMConstruction() {
+        let siblings = Data("<root><a/><b/><c/></root>".utf8)
+        #expect(PowerPointXML.normalize(siblings, maximumNodes: 4) != nil)
+        #expect(PowerPointXML.normalize(siblings, maximumNodes: 3) == nil)
+        #expect(PowerPointXML.normalize(Data("<root>text<a/>tail</root>".utf8), maximumNodes: 3) == nil)
+        let attributes = Data("<root a='1'><x b='2' c='3'/></root>".utf8)
+        #expect(PowerPointXML.normalize(attributes, maximumAttributes: 3) != nil)
+        #expect(PowerPointXML.normalize(attributes, maximumAttributes: 2) == nil)
+        #expect(PowerPointXML.normalize(Data(("<root>" + String(repeating: "<n/>", count: 250_000) + "</root>").utf8)) == nil)
+    }
+
+    @Test func archiveIndexHasEntryAndFilenameBudgets() throws {
+        let archive = try #require(Archive(data: PagesConverterTests.makeZip([("first", []), ("second", [])]), accessMode: .read))
+        try PowerPointPackage(archive: archive, maximumEntries: 2, maximumNameBytes: 11).check()
+        #expect(throws: PicoDocsError.fileCorrupted) { try PowerPointPackage(archive: archive, maximumEntries: 1).check() }
+        #expect(throws: PicoDocsError.fileCorrupted) { try PowerPointPackage(archive: archive, maximumNameBytes: 10).check() }
+    }
+
+    @Test func selectedParagraphAndRunPropertiesRetainFormattingAndLinks() async throws {
+        typealias B = PowerPointConverterTests
+        let ppr = selectedWrapper("<a:pPr lvl=\"0\">" + selectedWrapper(#"<a:buAutoNum type="arabicPeriod" startAt="5"/>"#) + selectedWrapper(#"<a:defRPr b="1"/>"#) + "</a:pPr>")
+        let rpr = selectedWrapper("<a:rPr i=\"1\">" + selectedWrapper(#"<a:hlinkClick r:id="link"/>"#) + "</a:rPr>")
+        let paragraph = "<a:p>" + ppr + "<a:r>" + rpr + selectedWrapper("<a:t>Selected</a:t>") + "</a:r></a:p>"
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.shape(placeholder: nil, paragraphs: [paragraph]), relationships: [("link", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "https://example.com\" TargetMode=\"External")])])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "properties.pptx")
+        #expect(result.markdown().contains("5. [***Selected***](https://example.com)"))
+    }
+
+    @Test func generatedTableBackslashesDecodeExactlyOnce() async throws {
+        let value = #"C:\Users\name | \\server\share"#
+        let escaped = value.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+        let wordXML = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>\(escaped)</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"
+        let word = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([("word/document.xml", Array(wordXML.utf8))]), filename: "paths.docx")
+        let html = try await PicoDocsEngine.convert(data: Data("<table><tr><th>\(escaped)</th></tr></table>".utf8), filename: "paths.html")
+        typealias B = PowerPointConverterTests
+        let table = "<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>\(escaped)</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"
+        let pptx = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: table)]), filename: "paths.pptx")
+        for result in [word, html, pptx, ConverterResult(sections: [.init(markdown: "| " + MarkdownTableCell.escapeDelimiters(value) + " |\n| --- |")])] {
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                let rendered = try DocumentRenderer.render(result, to: format)
+                #expect(rendered.contains(value))
+            }
+        }
+    }
+
+    @Test func externalTargetsCannotInjectMarkdownSyntax() async throws {
+        typealias B = PowerPointConverterTests
+        let shape = B.shape(placeholder: nil, paragraphs: [#"<a:p><a:r><a:rPr><a:hlinkClick r:id="link"/></a:rPr><a:t>Label</a:t></a:r></a:p>"#])
+        for target in ["https://example.com/a&gt;![inject](https://evil.example/image)", "https://example.com/&#10;&gt;![inject](https://evil.example/image)", "https://example.com/a b(c)&lt;d&gt;", "https://example.com/&#9;tab"] {
+            let rels = "<Relationships><Relationship Id=\"link\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"\(target)\" TargetMode=\"External\"/></Relationships>"
+            let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: shape)], extraParts: [("ppt/slides/_rels/s.xml.rels", Array(rels.utf8))]), filename: "links.pptx")
+            let markdown = result.markdown()
+            #expect(!markdown.contains("![inject]"))
+            #expect(!(try DocumentRenderer.render(result, to: .html)).contains("<img"))
+            if target.contains("&#") { #expect(markdown == "Label") }
+            else { #expect(markdown.contains("%3E")) }
+        }
+    }
+
+    @Test func notesGroupsInheritAndOverrideLinksWithoutSiblingLeakage() async throws {
+        typealias B = PowerPointConverterTests
+        func note(_ text: String, click: String? = nil) -> String {
+            let shape = B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: ["<a:p><a:r><a:t>\(text)</a:t></a:r></a:p>"])
+            guard let click else { return shape }
+            return shape.replacingOccurrences(of: #"<p:cNvPr id="2" name="Shape"/>"#, with: "<p:cNvPr><a:hlinkClick r:id=\"\(click)\"/></p:cNvPr>")
+        }
+        let group = "<p:grpSp><p:nvGrpSpPr><p:cNvPr><a:hlinkClick r:id=\"group\"/></p:cNvPr></p:nvGrpSpPr>" + note("Inherited") + selectedWrapper("<p:grpSp>" + note("Nested") + "</p:grpSp>") + note("Override", click: "child") + note("Unsafe", click: "unsafe") + "</p:grpSp>" + note("Outside")
+        let notes = "<p:notes \(B.namespaces)><p:cSld><p:spTree>\(group)</p:spTree></p:cSld></p:notes>"
+        let rels = B.relationshipsXML([("group", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "https://example.com/group\" TargetMode=\"External"), ("child", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "https://example.com/child\" TargetMode=\"External"), ("unsafe", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "javascript:bad\" TargetMode=\"External")])
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Slide"), relationships: [("notes", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide", "../notesSlides/n.xml")])], extraParts: [("ppt/notesSlides/n.xml", Array(notes.utf8)), ("ppt/notesSlides/_rels/n.xml.rels", Array(rels.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "notes-groups.pptx")
+        let text = try #require(result.sections.first?.metadata["notes"])
+        #expect(text.contains("[Inherited](https://example.com/group)"))
+        #expect(text.contains("[Nested](https://example.com/group)"))
+        #expect(text.contains("[Override](https://example.com/child)"))
+        #expect(!text.contains("[Unsafe]"))
+        #expect(!text.contains("[Outside]"))
+    }
+
+    @Test func pictureAlternativeTextPrefersDescriptionThenTitleThenName() async throws {
+        typealias B = PowerPointConverterTests
+        for (attrs, expected) in [(#"descr="Description" title="Title" name="Picture 1""#, "Description"), (#"title="Title" name="Picture 1""#, "Title"), (#"descr=" " title="Title" name="Picture 1""#, "Title"), (#"name="Picture 1""#, "Picture 1")] {
+            let picture = "<p:pic><p:nvPicPr><p:cNvPr \(attrs)/></p:nvPicPr><p:blipFill><a:blip r:embed=\"image\"/></p:blipFill></p:pic>"
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: picture, relationships: [("image", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "../media/p.png")])], extraParts: [("ppt/media/p.png", [1,2,3])])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "alt.pptx")
+            #expect(result.markdown().contains("![\(expected)]"))
+            #expect(try DocumentRenderer.render(result, to: .html).contains("alt=\"\(expected)\""))
+            #expect(try DocumentRenderer.render(result, to: .plaintext).contains(expected))
+        }
+    }
+
+    @Test func unsupportedRequiredWrappersFailButIgnoredAndExtensionContentDoNot() async throws {
+        typealias B = PowerPointConverterTests
+        let wrapped = "<e:wrapper xmlns:e=\"urn:vendor\">" + B.titleShape("Hidden") + "</e:wrapper>"
+        let visible = B.titleShape("Visible")
+        let invalid = B.deck(slides: [.init(file: "s.xml", shapes: wrapped + visible)])
+        await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: invalid, filename: "required.pptx") }
+        for wrapper in [wrapped.replacingOccurrences(of: "<e:wrapper ", with: "<e:wrapper mc:Ignorable=\"e\" "), "<p:extLst><p:ext uri=\"vendor\">" + wrapped + "</p:ext></p:extLst>", "<mc:AlternateContent xmlns:e=\"urn:vendor\"><mc:Choice Requires=\"e\">" + wrapped + "</mc:Choice><mc:Fallback/></mc:AlternateContent>"] {
+            let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: wrapper + visible)]), filename: "ignored.pptx")
+            #expect(result.markdown() == "## Visible")
+        }
+    }
+
+    @Test func streamingDTDScanHandlesLongTextAndAllLiteralContainers() {
+        let padding = String(repeating: "x", count: 100_000)
+        for wrapper in ["<!-- <!DOCTYPE ignored> -->", "<?pi <!DOCTYPE ignored> ?>", "<x><![CDATA[<!DOCTYPE literal>]]></x>"] {
+            let source = "<root>" + padding + wrapper + padding + "</root>"
+            #expect(PowerPointXML.normalize(Data(source.utf8)) != nil)
+        }
+        #expect(PowerPointXML.normalize(Data(("<?xml version=\"1.0\"?>" + "<!-- ignored -->" + "<!DOCTYPE x><x/>").utf8)) == nil)
+    }
+
+
     @Test func relatedPartsUseExactTransitionalAndStrictRelationshipTypes() throws {
         let archive = try #require(Archive(data: PagesConverterTests.makeZip([("placeholder", [0])]), accessMode: .read))
         for suffix in ["/slideLayout", "/slideMaster", "/notesMaster", "/notesSlide", "/slide", "/image", "/hyperlink"] {
@@ -167,7 +280,7 @@ struct PowerPointFollowupTests {
         let visible = B.titleShape("Visible")
         let hidden = B.titleShape("Hidden")
         let base = B.deck(slides: [.init(file: "s.xml", shapes: "")])
-        let shapes = "<alias:wrapper><e:wrapper>\(visible)</e:wrapper></alias:wrapper><e:other>\(hidden)</e:other><e:wrapper xmlns:e=\"urn:different\">\(hidden)</e:wrapper>"
+        let shapes = "<alias:wrapper><e:wrapper>\(visible)</e:wrapper></alias:wrapper><e:other>\(hidden)</e:other><e:wrapper xmlns:e=\"urn:different\" mc:Ignorable=\"e\">\(hidden)</e:wrapper>"
         let xml = "<p:sld \(B.namespaces) xmlns:e=\"urn:extension\" xmlns:alias=\"urn:extension\" mc:Ignorable=\"e\" mc:ProcessContent=\"e:wrapper\"><e:wrapper><p:cSld><p:spTree>\(shapes)</p:spTree></p:cSld></e:wrapper></p:sld>"
         let parts = try entries(base).filter { $0.name != "ppt/slides/s.xml" } + [("ppt/slides/s.xml", Array(xml.utf8))]
         let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(parts), filename: "process-content.pptx")

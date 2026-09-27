@@ -13,13 +13,20 @@ final class PowerPointPackage {
     var contentTypes: [String: String]?
     var relationshipMaps: [String: [String: PowerPointConverter.Relationship]] = [:]
 
-    init(archive: Archive, entryLimit: Int = 64 * 1024 * 1024, totalLimit: Int = 256 * 1024 * 1024) {
+    init(archive: Archive, entryLimit: Int = 64 * 1024 * 1024, totalLimit: Int = 256 * 1024 * 1024, maximumEntries: Int = 16_384, maximumNameBytes: Int = 8 * 1024 * 1024) {
         self.archive = archive
         self.entryLimit = entryLimit
         self.remaining = totalLimit
         var names: Set<String> = []
-        for entry in archive where entry.type == .file {
-            if !names.insert(entry.path).inserted { fail(PicoDocsError.fileCorrupted); break }
+        var count = 0, nameBytes = 0
+        for entry in archive {
+            if Task.isCancelled { fail(CancellationError()); break }
+            let bytes = entry.path.utf8.count
+            guard count < maximumEntries, bytes <= maximumNameBytes - nameBytes else {
+                fail(PicoDocsError.fileCorrupted); break
+            }
+            count += 1; nameBytes += bytes
+            if entry.type == .file, !names.insert(entry.path).inserted { fail(PicoDocsError.fileCorrupted); break }
         }
     }
 
@@ -67,6 +74,10 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
     private var output = ""
     private var hasError = false
     private var outputBytes = 0
+    private var nodes = 0
+    private var attributesCount = 0
+    private var maximumNodes = 250_000
+    private var maximumAttributes = 500_000
     private var maximumOutputBytes = 64 * 1024 * 1024
     private static let prefixes = [
         "http://schemas.openxmlformats.org/presentationml/2006/main": "p",
@@ -74,6 +85,9 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships": "r",
         "http://schemas.openxmlformats.org/markup-compatibility/2006": "mc",
         "http://purl.org/dc/elements/1.1/": "dc",
+        "http://purl.org/dc/terms/": "dcterms",
+        "http://purl.org/dc/dcmitype/": "dcmitype",
+        "http://www.w3.org/2001/XMLSchema-instance": "xsi",
         "http://schemas.openxmlformats.org/package/2006/metadata/core-properties": "cp",
         "http://purl.oclc.org/ooxml/presentationml/main": "p",
         "http://purl.oclc.org/ooxml/drawingml/main": "a",
@@ -82,11 +96,13 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         "http://schemas.openxmlformats.org/package/2006/content-types": ""
     ]
 
-    static func normalize(_ data: Data, maximumOutputBytes: Int = 64 * 1024 * 1024) -> String? {
+    static func normalize(_ data: Data, maximumOutputBytes: Int = 64 * 1024 * 1024, maximumNodes: Int = 250_000, maximumAttributes: Int = 500_000) -> String? {
         guard !containsDoctype(data) else { return nil }
         let parser = XMLParser(data: data)
         let delegate = PowerPointXML()
         delegate.maximumOutputBytes = maximumOutputBytes
+        delegate.maximumNodes = maximumNodes
+        delegate.maximumAttributes = maximumAttributes
         parser.delegate = delegate
         parser.shouldResolveExternalEntities = false
         guard parser.parse(), !delegate.hasError, !Task.isCancelled else { return nil }
@@ -97,21 +113,29 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
     /// recognizes ASCII declaration tokens in UTF-8, UTF-16 and UTF-32 inputs.
     /// Comments, processing instructions and CDATA cannot introduce a DTD.
     private static func containsDoctype(_ data: Data) -> Bool {
-        var tail: [UInt8] = []
-        let declaration = Array("<!DOCTYPE".utf8), comment = Array("<!--".utf8)
-        let cdata = Array("<![CDATA[".utf8), processing = Array("<?".utf8)
-        var ending: [UInt8]?
+        // The low bytes of this register are a fixed-size rolling window.
+        // Nine-byte openings compare their first eight bytes before shifting.
+        func token(_ value: String) -> UInt64 { value.utf8.reduce(0) { ($0 << 8) | UInt64($1) } }
+        let declaration = token("<!DOCTYP"), cdata = token("<![CDATA")
+        let comment = token("<!--"), processing = token("<?")
+        let commentEnd = token("-->"), cdataEnd = token("]]>"), processingEnd = token("?>")
+        var window: UInt64 = 0
+        var ending = 0
         for (index, byte) in data.enumerated() {
             if index.isMultiple(of: 4096), Task.isCancelled { return true }
             guard byte != 0 else { continue }
-            tail.append(byte)
-            if tail.count > 9 { tail.removeFirst() }
-            if let terminator = ending {
-                if tail.suffix(terminator.count).elementsEqual(terminator) { ending = nil; tail.removeAll(keepingCapacity: true) }
-            } else if tail.suffix(comment.count).elementsEqual(comment) { ending = Array("-->".utf8) }
-            else if tail.suffix(cdata.count).elementsEqual(cdata) { ending = Array("]]>".utf8) }
-            else if tail.suffix(processing.count).elementsEqual(processing) { ending = Array("?>".utf8) }
-            else if tail.elementsEqual(declaration) { return true }
+            let previous = window
+            window = (window << 8) | UInt64(byte)
+            if ending != 0 {
+                if (ending == 1 && window & 0xFFFFFF == commentEnd)
+                    || (ending == 2 && window & 0xFFFFFF == cdataEnd)
+                    || (ending == 3 && window & 0xFFFF == processingEnd) {
+                    ending = 0; window = 0
+                }
+            } else if window & 0xFFFFFFFF == comment { ending = 1 }
+            else if previous == cdata && byte == 91 { ending = 2 }
+            else if window & 0xFFFF == processing { ending = 3 }
+            else if previous == declaration && byte == 69 { return true }
         }
         return false
     }
@@ -140,7 +164,11 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
     func parser(_ parser: XMLParser, validationErrorOccurred validationError: Error) { hasError = true }
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes: [String: String]) {
-        guard names.count < 128, !Task.isCancelled else { parser.abortParsing(); return }
+        guard names.count < 128, nodes < maximumNodes,
+              attributes.count <= maximumAttributes - attributesCount, !Task.isCancelled else {
+            hasError = true; parser.abortParsing(); return
+        }
+        nodes += 1; attributesCount += attributes.count
         var scope = scopes.last!
         for (key, value) in attributes {
             if key == "xmlns" { scope[""] = value }
@@ -162,9 +190,12 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
             }
         }
         compatibility.append(settings)
-        let tag = name(elementName, scope: scope)
-        names.append(tag)
+        var tag = name(elementName, scope: scope)
         let prefix = elementName.split(separator: ":", maxSplits: 1).dropLast().first.map(String.init) ?? ""
+        if tag.hasPrefix("extension"), !settings.ignored.contains(scope[prefix] ?? "") {
+            tag = "required" + tag
+        }
+        names.append(tag)
         let transparent = tag.hasPrefix("extension") && settings.ignored.contains(scope[prefix] ?? "") && settings.processed.contains(tag)
         emitted.append(!transparent)
         if transparent { return }
@@ -189,11 +220,16 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         if compatibility.count > 1 { compatibility.removeLast() }
         if scopes.count > 1 { scopes.removeLast() }
     }
+    private func countTextNode(_ parser: XMLParser) -> Bool {
+        guard nodes < maximumNodes else { hasError = true; parser.abortParsing(); return false }
+        nodes += 1
+        return true
+    }
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        appendEscaped(string, parser: parser)
+        if countTextNode(parser) { appendEscaped(string, parser: parser) }
     }
     func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
-        appendEscaped(String(decoding: CDATABlock, as: UTF8.self), parser: parser)
+        if countTextNode(parser) { appendEscaped(String(decoding: CDATABlock, as: UTF8.self), parser: parser) }
     }
     private func append(_ text: String, parser: XMLParser) {
         guard !hasError else { return }
