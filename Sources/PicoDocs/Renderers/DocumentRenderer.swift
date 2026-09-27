@@ -388,7 +388,7 @@ public enum DocumentRenderer {
 
     private static func csvRows(fromMarkdown markdown: String) -> [String] {
         var rows: [String] = []
-        let lines = markdown.components(separatedBy: "\n")
+        let lines = markdown.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
         var i = 0
         var codeFence: (character: Character, length: Int)?
         while i < lines.count {

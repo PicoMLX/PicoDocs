@@ -29,6 +29,7 @@ indirect enum MarkdownInline: Equatable {
 }
 
 enum MarkdownInlineParser {
+    private static let structuredRegex = try! NSRegularExpression(pattern: "\u{E020}([0-9]+)\u{E021}")
     private static let punctuation = ##"!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"##
 
     /// Parses an inline Markdown string into structured nodes. Code spans, links,
@@ -148,10 +149,10 @@ enum MarkdownInlineParser {
             nodes.flatMap { node -> [MarkdownInline] in
                 switch node {
                 case .text(let text):
+                    guard text.contains("\u{E020}") else { return [node] }
                     let ns = text as NSString
-                    let pattern = try! NSRegularExpression(pattern: "\u{E020}([0-9]+)\u{E021}")
                     var output: [MarkdownInline] = [], offset = 0
-                    for match in pattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                    for match in structuredRegex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
                         if match.range.location > offset { output.append(.text(ns.substring(with: NSRange(location: offset, length: match.range.location - offset)))) }
                         if let index = Int(ns.substring(with: match.range(at: 1))), structured.indices.contains(index) { output.append(structured[index]) }
                         else { output.append(.text(ns.substring(with: match.range))) }

@@ -8,6 +8,78 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func backslashPairsKeepInlineDelimitersActive() throws {
+        for count in 1...4 {
+            let prefix = String(repeating: "\\", count: count)
+            let result = ConverterResult(sections: [.init(markdown: prefix + "*em*")])
+            let expected = String(repeating: "\\", count: count / 2) + (count.isMultiple(of: 2) ? "em" : "*em*")
+            for format in [ExportFileType.plaintext, .csv] { #expect(try DocumentRenderer.render(result, to: format) == expected) }
+            #expect(try DocumentRenderer.render(result, to: .html).contains("<em>em</em>") == count.isMultiple(of: 2))
+        }
+        let links = ConverterResult(sections: [.init(markdown: #"\\[Link](https://example.com)"#)])
+        #expect(try DocumentRenderer.render(links, to: .html).contains(#"\<a href="https://example.com">Link</a>"#))
+        let notes = ConverterResult(sections: [.init(markdown: #"\\[^n]"# + "\n\n[^n]: Note")])
+        #expect(try DocumentRenderer.render(notes, to: .html).contains("<sup"))
+    }
+
+    @Test func csvFencesNormalizeCRLFAndCR() throws {
+        for newline in ["\n", "\r\n", "\r"] {
+            let source = ["```", "a|b", "```", "| c | d |", "| --- | --- |"].joined(separator: newline)
+            #expect(try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: source)]), to: .csv) == "a|b\nc,d")
+        }
+    }
+
+    @Test func exporterErrorsExposeTheirExplanation() throws {
+        let result = ConverterResult(sections: [.init(markdown: "", metadata: ["csv": String(repeating: "x", count: 32_768)])])
+        do {
+            _ = try PicoDocsEngine.write(result, to: .xlsx)
+            Issue.record("Expected the worksheet cell limit to be enforced")
+        } catch ExporterError.serializationFailed(let message) {
+            #expect(!message.isEmpty)
+            #expect(ExporterError.serializationFailed(message).localizedDescription == message)
+        }
+    }
+
+    @Test func portableVectorAndCarrierDimensionsPreserveAspectRatio() throws {
+        let vectors = [#"<svg viewBox="0 0 20 60"/>"#, #"<svg width="2in" height="1in" viewBox="0 0 10 10"/>"#, #"<svg width="100%" height="100%" viewBox="0,0,20,20"/>"#]
+        for (source, ratio) in zip(vectors, [1.0 / 3, 2, 1]) {
+            let data = Data(source.utf8)
+            let (cx, cy) = WordprocessingMLExporter.imageExtents(data)
+            #expect(abs(Double(cx) / Double(cy) - ratio) < 0.00001)
+            let result = ConverterResult(sections: [.init(kind: .image, markdown: "", sourcePath: "vector.svg", metadata: ["base64": data.base64EncodedString(), "mimeType": "image/svg+xml"])])
+            #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains("<wp:extent cx=\"\(cx)\" cy=\"\(cy)\"/>"))
+        }
+        var emf = Data(repeating: 0, count: 88)
+        func put(_ value: UInt32, offset: Int, count: Int, into data: inout Data) {
+            for index in 0..<count { data[offset + index] = UInt8(truncatingIfNeeded: value >> (8 * index)) }
+        }
+        put(1, offset: 0, count: 4, into: &emf)
+        put(0x464D4520, offset: 40, count: 4, into: &emf)
+        put(20, offset: 32, count: 4, into: &emf)
+        put(60, offset: 36, count: 4, into: &emf)
+        var wmf = Data(repeating: 0, count: 22)
+        put(0x9AC6CDD7, offset: 0, count: 4, into: &wmf)
+        put(20, offset: 10, count: 2, into: &wmf)
+        put(60, offset: 12, count: 2, into: &wmf)
+        for data in [emf, wmf] {
+            let (cx, cy) = WordprocessingMLExporter.imageExtents(data)
+            #expect(abs(Double(cx) / Double(cy) - 1.0 / 3) < 0.00001)
+        }
+        let (cx, cy) = WordprocessingMLExporter.imageExtents(Data([1, 2, 3]), metadata: ["width": "30", "height": "10"])
+        #expect(cx == 3 * cy)
+        #expect(OfficeImageDimensions.read(Data(#"<svg width="NaN" height="0"/>"#.utf8)) == nil)
+        _ = WordprocessingMLExporter.imageExtents(Data(#"<svg width="1e-320" height="1e-320"/>"#.utf8))
+    }
+
+    @Test func imageOnlyBookmarkedHeadingsAllocateCanonicalSlugs() async throws {
+        let document = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="1" w:name="rawBookmark"/><w:r><w:drawing><wp:inline><wp:docPr id="1" name="Picture" descr="Chart"/><a:blip r:embed="image"/></wp:inline></w:drawing></w:r></w:p><w:p><w:hyperlink w:anchor="rawBookmark"><w:r><w:t>Link</w:t></w:r></w:hyperlink></w:p></w:body></w:document>"#
+        let relationships = #"<Relationships><Relationship Id="image" Target="media/chart.png" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"/></Relationships>"#
+        let data = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/_rels/document.xml.rels", data: Array(relationships.utf8)), (name: "word/media/chart.png", data: [1, 2, 3])])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "heading.docx")
+        #expect(result.markdown().contains("[Link](#chart)"))
+        #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains(#"w:anchor="heading_1""#))
+    }
+
     @Test func flattenedTableHeadingsDoNotAllocateFragments() async throws {
         let heading = #"<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>"#
         let xml = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"# + "<w:tbl><w:tr><w:tc><w:p>" + heading + "<w:r><w:t>Details</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p>" + heading + #"<w:bookmarkStart w:id="1" w:name="details"/><w:r><w:t>Details</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p><w:p><w:hyperlink w:anchor="details"><w:r><w:t>Link</w:t></w:r></w:hyperlink></w:p></w:body></w:document>"#

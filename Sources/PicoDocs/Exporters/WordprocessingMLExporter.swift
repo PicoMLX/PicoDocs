@@ -49,18 +49,28 @@ public struct WordprocessingMLExporter: DocumentExporter {
         return try pkg.data()
     }
 
-    static func imageExtents(_ data: Data) -> (Int, Int) {
+    static func imageExtents(_ data: Data, metadata: [String: String] = [:]) -> (Int, Int) {
         let maximumWidth = 4_572_000.0, maximumHeight = 3_429_000.0
+        func fit(_ width: Double, _ height: Double) -> (Int, Int) {
+            let ratio = width / height
+            if ratio >= maximumWidth / maximumHeight { return (Int(maximumWidth), max(1, Int((maximumWidth / ratio).rounded()))) }
+            return (max(1, Int((maximumHeight * ratio).rounded())), Int(maximumHeight))
+        }
         #if canImport(ImageIO)
         if let source = CGImageSourceCreateWithData(data as CFData, nil),
            let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
            let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
            let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
            width.isFinite, height.isFinite, width > 0, height > 0 {
-            let scale = min(maximumWidth / width, maximumHeight / height)
-            return (max(1, Int((width * scale).rounded())), max(1, Int((height * scale).rounded())))
+            return fit(width, height)
         }
         #endif
+        let declared = Double(metadata["width"] ?? "").flatMap { width in
+            Double(metadata["height"] ?? "").flatMap { OfficeImageDimensions.valid(width, $0) }
+        }
+        if let (width, height) = OfficeImageDimensions.read(data) ?? declared {
+            return fit(width, height)
+        }
         return (Int(maximumWidth), Int(maximumHeight))
     }
 
@@ -71,6 +81,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
     private struct IndexedImage {
         let data: Data
         let mediaFilename: String
+        let metadata: [String: String]
     }
 
     /// Resolves an inline image reference to an embedded carrier. Keyed by full
@@ -125,7 +136,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             }
             usedFilenames.insert(mediaFilename.lowercased())
 
-            let image = IndexedImage(data: data, mediaFilename: mediaFilename)
+            let image = IndexedImage(data: data, mediaFilename: mediaFilename, metadata: section.metadata)
             if let identity = [section.sourcePath, section.title].compactMap({ $0 }).first(where: { !$0.isEmpty }) {
                 byPath[identity] = image
             }
@@ -365,7 +376,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             let name = OOXMLPackageWriter.escapeAttribute(filename)
             let descr = alt.isEmpty ? "" : " descr=\"\(OOXMLPackageWriter.escapeAttribute(alt))\""
             // Fit the intrinsic aspect ratio inside the existing 5 × 3.75-inch box.
-            let (cx, cy) = WordprocessingMLExporter.imageExtents(image.data)
+            let (cx, cy) = WordprocessingMLExporter.imageExtents(image.data, metadata: image.metadata)
             return """
             <w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">\
             <wp:extent cx="\(cx)" cy="\(cy)"/>\

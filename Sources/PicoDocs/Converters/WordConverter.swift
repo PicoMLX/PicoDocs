@@ -37,9 +37,9 @@ public struct WordConverter: DocumentConverter {
 
         // Map heading bookmarks to their canonical fragments before rendering,
         // so forward internal links survive the DOCX round trip.
-        var headings = Self.headingParagraphs(in: body)
+        var headings = Self.headingParagraphs(in: body, relationships: relationships)
         for textBox in try body.getElementsByTag("w:txbxContent") where Self.shouldRenderTextBox(textBox) {
-            headings += Self.headingParagraphs(in: textBox)
+            headings += Self.headingParagraphs(in: textBox, relationships: relationships)
         }
         let titles = headings.map { MarkdownInlineParser.parse(Self.renderInline($0, relationships: relationships)).plainText }
         for (heading, slug) in zip(headings, MarkdownHeadingAnchors.slugs(titles)) {
@@ -106,7 +106,7 @@ public struct WordConverter: DocumentConverter {
 
     /// Match the block traversal and its emitted order; headings in flattened
     /// table cells and ignored revision wrappers do not allocate fragments.
-    private static func headingParagraphs(in container: Element) -> [Element] {
+    private static func headingParagraphs(in container: Element, relationships: [String: String]) -> [Element] {
         var headings: [Element] = []
         var pending = Array(container.children().array().reversed())
         while let element = pending.popLast() {
@@ -114,7 +114,7 @@ public struct WordConverter: DocumentConverter {
             case "w:p":
                 let properties = element.children().first { $0.tagName().lowercased() == "w:ppr" }
                 let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
-                if headingLevel(forStyle: style) != nil, !renderInline(element, relationships: [:]).trimmingCharacters(in: .whitespaces).isEmpty { headings.append(element) }
+                if headingLevel(forStyle: style) != nil, !renderInline(element, relationships: relationships).trimmingCharacters(in: .whitespaces).isEmpty { headings.append(element) }
             case "w:sdt":
                 if let content = element.children().first(where: { $0.tagName().lowercased() == "w:sdtcontent" }) { pending += content.children().array().reversed() }
             default: break

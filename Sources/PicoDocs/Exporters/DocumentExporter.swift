@@ -27,6 +27,16 @@ public enum ExporterError: Error, Sendable {
     case serializationFailed(String)
 }
 
+extension ExporterError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .notAccepted: return "The exporter does not accept this format."
+        case .platformUnavailable: return "The exporter is unavailable on this platform."
+        case .serializationFailed(let explanation): return explanation
+        }
+    }
+}
+
 public protocol DocumentExporter: Sendable {
 
     /// Cheap check against the requested format only. Must not inspect the result

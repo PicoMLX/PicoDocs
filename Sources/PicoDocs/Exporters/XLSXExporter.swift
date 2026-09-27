@@ -63,7 +63,7 @@ public struct XLSXExporter: DocumentExporter {
 
     private static func rows(for section: DocumentSection) -> [[String]] {
         if let csv = section.metadata["csv"], !csv.isEmpty {
-            return parseCSV(csv)
+            return CSVConverter.parseCSV(csv)
         }
         var blocks = MarkdownBlockParser.parse(section.markdown)
         // `SpreadsheetConverter` prefixes each sheet's Markdown with `## <sheetName>`
@@ -111,41 +111,6 @@ public struct XLSXExporter: DocumentExporter {
 
     /// Minimal RFC-4180 CSV parser: handles quoted fields with embedded commas,
     /// quotes (`""`), and newlines.
-    private static func parseCSV(_ csv: String) -> [[String]] {
-        var rows: [[String]] = []
-        var row: [String] = []
-        var field = ""
-        var inQuotes = false
-        var fieldStarted = false
-        let chars = Array(csv.unicodeScalars)
-        var i = 0
-        func endField() { row.append(field); field = ""; fieldStarted = false }
-        func endRow() { endField(); rows.append(row); row = [] }
-        while i < chars.count {
-            let c = chars[i]
-            if inQuotes {
-                if c == "\"" {
-                    if i + 1 < chars.count, chars[i + 1] == "\"" { field.append("\""); i += 2; continue }
-                    inQuotes = false; i += 1; continue
-                }
-                field.unicodeScalars.append(c); i += 1
-            } else {
-                switch c {
-                case "\"": fieldStarted = true; inQuotes = true; i += 1
-                case ",": endField(); i += 1
-                case "\r":
-                    if i + 1 < chars.count, chars[i + 1] == "\n" { i += 1 }
-                    endRow(); i += 1
-                case "\n": endRow(); i += 1
-                default: field.unicodeScalars.append(c); i += 1
-                }
-            }
-        }
-        // Flush the trailing field/row unless the input ended exactly on a newline.
-        if fieldStarted || !field.isEmpty || !row.isEmpty { endRow() }
-        return rows
-    }
-
     // MARK: - Sheet naming
 
     private static func uniqueSheetName(_ section: DocumentSection, index: Int, used: inout Set<String>) -> String {
