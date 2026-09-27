@@ -147,7 +147,9 @@ public enum DocumentRenderer {
         // Count basenames among *embeddable* sections; a basename shared by two of
         // them is ambiguous and skipped below.
         var basenameCounts: [String: Int] = [:]
+        var pathCounts: [String: Int] = [:]
         for section in imageSections where !(section.metadata["base64"] ?? "").isEmpty {
+            if let path = section.sourcePath, !path.isEmpty { pathCounts[path, default: 0] += 1 }
             guard let filename = imageRefName(for: section) else { continue }
             basenameCounts[filename, default: 0] += 1
         }
@@ -155,7 +157,7 @@ public enum DocumentRenderer {
         for section in imageSections {
             guard let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
             let mime = section.metadata["mimeType"] ?? "application/octet-stream"
-            var references = section.sourcePath.map { [$0] } ?? []
+            var references = section.sourcePath.flatMap { pathCounts[$0] == 1 ? [$0] : nil } ?? []
             if let filename = imageRefName(for: section), basenameCounts[filename] == 1 { references.append(filename) }
             for reference in Set(references) {
                 result = result.replacingOccurrences(of: "src=\"\(escapeHTML(reference))\"", with: "src=\"data:\(mime);base64,\(base64)\"")

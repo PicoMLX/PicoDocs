@@ -319,6 +319,7 @@ enum MarkdownInlineParser {
             let delimiter: Character
             let canClose: Bool
             var nodes: [MarkdownInline]
+            var text = ""
         }
         let chars = Array(text)
         // Placeholder boundaries have the source node's punctuation/whitespace
@@ -353,12 +354,17 @@ enum MarkdownInlineParser {
             guard let c else { return false }
             return c.unicodeScalars.allSatisfy { CharacterSet.punctuationCharacters.union(.symbols).contains($0) }
         }
-        func appendText(_ value: String) {
-            guard !value.isEmpty else { return }
+        func appendText(_ value: String) { frames[frames.count - 1].text += value }
+        func flushText() {
             let last = frames.count - 1
-            if case .text(let previous)? = frames[last].nodes.last {
-                frames[last].nodes[frames[last].nodes.count - 1] = .text(previous + value)
-            } else { frames[last].nodes.append(.text(value)) }
+            if !frames[last].text.isEmpty {
+                frames[last].nodes.append(.text(frames[last].text))
+                frames[last].text = ""
+            }
+        }
+        func appendNode(_ node: MarkdownInline) {
+            if case .text(let text) = node { appendText(text) }
+            else { flushText(); frames[frames.count - 1].nodes.append(node) }
         }
         while index < chars.count {
             guard chars[index] == "*" || chars[index] == "_" else {
@@ -386,22 +392,21 @@ enum MarkdownInlineParser {
                         && (frames[candidate].count % 3 != 0 || remaining % 3 != 0))
                 }) else { break }
                 while frames.count - 1 > match {
+                    flushText()
                     let skipped = frames.removeLast()
                     appendText(String(repeating: String(skipped.delimiter), count: skipped.count))
-                    for node in skipped.nodes {
-                        if case .text(let text) = node { appendText(text) }
-                        else { frames[frames.count - 1].nodes.append(node) }
-                    }
+                    for node in skipped.nodes { appendNode(node) }
                 }
                 let top = frames.count - 1
                 let used = frames[top].count >= 2 && remaining >= 2 && !(frames[top].count == 3 && remaining == 3) ? 2 : 1
+                flushText()
                 let children = frames[top].nodes
                 let node: MarkdownInline = used == 2 ? .strong(children) : .emphasis(children)
                 frames[top].count -= used
                 remaining -= used
                 if frames[top].count == 0 {
                     frames.removeLast()
-                    frames[frames.count - 1].nodes.append(node)
+                    appendNode(node)
                 } else { frames[top].nodes = [node] }
             }
             if remaining > 0 {
@@ -411,13 +416,12 @@ enum MarkdownInlineParser {
             }
         }
         while frames.count > 1 {
+            flushText()
             let frame = frames.removeLast()
             appendText(String(repeating: String(frame.delimiter), count: frame.count))
-            for node in frame.nodes {
-                if case .text(let value) = node { appendText(value) }
-                else { frames[frames.count - 1].nodes.append(node) }
-            }
+            for node in frame.nodes { appendNode(node) }
         }
+        flushText()
         return frames[0].nodes
     }
 

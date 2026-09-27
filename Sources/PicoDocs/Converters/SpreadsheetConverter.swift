@@ -58,7 +58,10 @@ public struct SpreadsheetConverter: DocumentConverter {
     private static func markdownTable(rows: [Row], sharedStrings: SharedStrings?, sheetName: String?, projectionBudget: inout SpreadsheetProjectionBudget) throws -> (markdown: String, csv: String) {
         let origin = ColumnReference("A")!
         let columnCount = (rows.flatMap(\.cells).map { origin.distance(to: $0.reference.column) }.max() ?? -1) + 1
-        guard columnCount > 0 else { return ("", "") }
+        guard columnCount > 0 else {
+            try projectionBudget.reserveGrid(rows: 0, columns: 0, name: sheetName)
+            return ("", "")
+        }
         let rowCount = rows.map { Int(clamping: $0.reference) }.max() ?? 0
         // Bound dense materialization: sparse files can point at the final Excel
         // coordinate with only a few bytes of XML.

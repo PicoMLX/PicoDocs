@@ -92,7 +92,21 @@ public struct PPTXExporter: DocumentExporter {
             }
             let maximum = numbered.keys.max() ?? 0
             var groups = maximum > 0 ? (1...maximum).map { numbered[$0] ?? [] } : []
-            groups += unnumberedSlides
+            if !unnumberedSlides.isEmpty {
+                groups = []
+                var emitted: Set<Int> = []
+                var nextGap = 1
+                for section in explicit {
+                    if let number = section.slideNumber, number > 0 {
+                        guard emitted.insert(number).inserted else { continue }
+                        while nextGap < number {
+                            if numbered[nextGap] == nil { groups.append([]) }
+                            nextGap += 1
+                        }
+                        groups.append(numbered[number] ?? [])
+                    } else { groups.append([section]) }
+                }
+            }
             // Keynote's recovery path may carry text without slide provenance.
             // Keep it as a leading slide rather than losing it when tables exist.
             let unnumbered = result.sections.filter { $0.slideNumber == nil && $0.kind != .slide && $0.kind != .image }

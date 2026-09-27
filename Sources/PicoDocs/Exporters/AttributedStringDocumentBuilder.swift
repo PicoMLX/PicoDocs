@@ -128,7 +128,7 @@ enum AttributedStringDocumentBuilder {
             }
 
         case .rule:
-            output.append(NSAttributedString(string: "————————\n", attributes: [.font: bodyFont()]))
+            output.append(NSAttributedString(string: preserveBlockMarkers ? "---\n" : "————————\n", attributes: [.font: bodyFont()]))
         }
     }
 

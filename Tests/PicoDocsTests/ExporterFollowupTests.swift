@@ -8,6 +8,104 @@ import AppKit
 @testable import PicoDocs
 
 struct ExporterFollowupTests {
+    @Test func emptyWorksheetsConsumeProjectionBudget() throws {
+        var budget = SpreadsheetProjectionBudget(maximumBytes: 34)
+        try budget.reserveGrid(rows: 0, columns: 0, name: "A")
+        try budget.reserveGrid(rows: 0, columns: 0, name: "B")
+        #expect(throws: PicoDocsError.parsingError) { try budget.reserveGrid(rows: 0, columns: 0, name: "C") }
+    }
+
+    @Test func duplicateHeadingAndWorksheetNamesUseStableSuffixes() throws {
+        #expect(MarkdownHeadingAnchors.slugs(["A", "A-1", "A", "A", "A-2"]) == ["a", "a-1", "a-2", "a-3", "a-2-1"])
+        let slugs = MarkdownHeadingAnchors.slugs(Array(repeating: "Same", count: 10_000))
+        #expect(Set(slugs).count == 10_000); #expect(slugs.last == "same-9999")
+        let names = ["A", "a (2)", "a", "A"] + Array(repeating: "Same", count: 1000)
+        let result = ConverterResult(sections: names.map { .init(title: $0, kind: .sheet, markdown: "") })
+        let workbook = try xml(XLSXExporter().write(result, format: .xlsx), "xl/workbook.xml")
+        for name in ["A", "a (2)", "a (3)", "A (4)", "Same (1000)"] { #expect(workbook.contains("name=\"\(name)\"")) }
+    }
+
+    @Test func delimiterHeavyLiteralIdentifiersCoalesceOnce() {
+        let source = String(repeating: "a_", count: 100_000) + "z"
+        #expect(MarkdownInlineParser.parse(source) == [.text(source)])
+        #expect(MarkdownInlineParser.parse("before *unclosed") == [.text("before *unclosed")])
+        #expect(MarkdownInlineParser.parse("before **bold** after") == [.text("before "), .strong([.text("bold")]), .text(" after")])
+    }
+
+    @Test func DOCXFootnoteMarkerProvenanceSurvivesReimport() async throws {
+        for label in ["1", #"a\]b"#, #"a\\b"#] {
+            let source = "Claim[^" + label + "]\n\n[^" + label + "]: Note"
+            let data = try PicoDocsEngine.write(markdown: source, to: .docx)
+            #expect(try xml(data, "word/document.xml").contains("PicoFootnoteMarker"))
+            let recovered = try await PicoDocsEngine.convert(data: data, filename: "footnotes.docx")
+            #expect(try DocumentRenderer.render(recovered, to: .plaintext) == "Claim[1]\n\n[1] Note")
+            #expect(try DocumentRenderer.render(recovered, to: .html).contains("class=\"footnote-ref\""))
+        }
+        let literal = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(markdown: #"\[^1]"#, to: .docx), filename: "literal.docx")
+        #expect(literal.markdown() == #"\[^1\]"#)
+    }
+
+    @Test func DOCXMediaDecodeBudgetEnforcesAllThreeLimits() throws {
+        let image = Data([1,2,3]).base64EncodedString()
+        let budget = OfficeMediaDecodeBudget(maximumImageBytes: 3, maximumBytes: 6, maximumImages: 3)
+        #expect(try budget.decode(image) == Data([1,2,3]))
+        #expect(try budget.decode(image) == Data([1,2,3]))
+        #expect(throws: ExporterError.self) { try budget.decode(image) }
+        let perImage = OfficeMediaDecodeBudget(maximumImageBytes: 2, maximumBytes: 6)
+        #expect(throws: ExporterError.self) { try perImage.decode(image) }
+        let count = OfficeMediaDecodeBudget(maximumImages: 1)
+        _ = try count.decode(image)
+        #expect(throws: ExporterError.self) { try count.decode(image) }
+        let sections = (0..<1025).map { DocumentSection(kind: .image, markdown: "", sourcePath: "\($0).png", metadata: ["base64": image, "mimeType": "image/png"]) }
+        #expect(throws: ExporterError.self) { try PicoDocsEngine.write(ConverterResult(sections: sections), to: .docx) }
+        let repeated = ConverterResult(sections: [.init(markdown: String(repeating: "![Image](one.png) ", count: 1025)), .init(kind: .image, markdown: "", sourcePath: "one.png", metadata: ["base64": image])])
+        let data = try PicoDocsEngine.write(repeated, to: .docx)
+        let archive = try #require(Archive(data: data, accessMode: .read))
+        #expect(archive.filter { $0.path.hasPrefix("word/media/") }.count == 1)
+    }
+
+    @Test func duplicateFullPathImagesRemainUnresolved() throws {
+        let body = DocumentSection(markdown: "![Image](media/a.png)")
+        let first = DocumentSection(kind: .image, markdown: "", sourcePath: "media/a.png", metadata: ["base64": "AQID", "mimeType": "image/png"])
+        let second = DocumentSection(kind: .image, markdown: "", sourcePath: "media/a.png", metadata: ["base64": "BAUG", "mimeType": "image/png"])
+        let html = try DocumentRenderer.render(ConverterResult(sections: [body, first, second]), to: .html)
+        #expect(html.contains("src=\"media/a.png\"")); #expect(!html.contains("data:image"))
+        let unique = try DocumentRenderer.render(ConverterResult(sections: [body, first]), to: .html)
+        #expect(unique.contains("data:image/png;base64,AQID"))
+    }
+
+    @Test func mixedNumberedAndUnnumberedSlidesKeepTheirPositions() throws {
+        let result = ConverterResult(sections: [
+            .init(kind: .slide, markdown: "Cover"),
+            .init(kind: .slide, markdown: "First", slideNumber: 1),
+            .init(kind: .slide, markdown: "Interlude"),
+            .init(kind: .slide, markdown: "Third", slideNumber: 3),
+            .init(kind: .table, markdown: "| Ancillary |\n| --- |", slideNumber: 1),
+            .init(kind: .slide, markdown: "Closing")])
+        let data = try PicoDocsEngine.write(result, to: .pptx)
+        for (index, text) in ["Cover", "First", "Interlude", "", "Third", "Closing"].enumerated() {
+            let slide = try xml(data, "ppt/slides/slide\(index + 1).xml")
+            #expect(slide.contains(text.isEmpty ? "<a:p/>" : text))
+        }
+        #expect(try xml(data, "ppt/slides/slide2.xml").contains("Ancillary"))
+    }
+
+    @Test func RTFLinkedMonospaceRunsRetainCodeSemantics() async throws {
+        let rtf = #"{\rtf1\deff0{\fonttbl{\f0\fnil Helvetica;}{\f1\fmodern Courier;}}{\field{\*\fldinst HYPERLINK "https://example.test"}{\fldrslt \f1 API}}}"#
+        #expect(RTFConverter.markdown(fromRTF: rtf) == "[`API`](https://example.test)")
+        #if canImport(AppKit)
+        for source in ["[`API`](https://example.test)", "[Docs `API` now](https://example.test)"] {
+            let data = try PicoDocsEngine.write(markdown: source, to: .rtf)
+            let result = try await PicoDocsEngine.convert(data: data, filename: "linked-code.rtf")
+            #expect(result.markdown() == source)
+            #expect(try DocumentRenderer.render(result, to: .html).contains("<code>API</code>"))
+        }
+        let rule = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(markdown: "Before\n\n---\n\nAfter", to: .rtf), filename: "rule.rtf")
+        #expect(try DocumentRenderer.render(rule, to: .html).contains("<hr>"))
+        #endif
+    }
+
+
     @Test func XLSXWriterSharesTheReaderWorkbookProjectionBudget() throws {
         var budget = SpreadsheetProjectionBudget()
         for _ in 0..<6 { try budget.reserveGrid(rows: 1000, columns: 1000, name: "Sheet") }

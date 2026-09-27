@@ -318,6 +318,11 @@ public struct WordConverter: DocumentConverter {
         let properties = try? run.getElementsByTag("w:rPr").first()
         let bold = isFormattingEnabled(properties, tag: "w:b")
         let italic = isFormattingEnabled(properties, tag: "w:i")
+        if (try? properties?.getElementsByTag("w:rStyle").first()?.attr("w:val")) == "PicoFootnoteMarker" {
+            let marker = codeText(run)
+            let parsed = MarkdownInlineParser.parse(marker)
+            if parsed.count == 1, case .footnoteReference = parsed[0] { return marker }
+        }
         if (try? properties?.getElementsByTag("w:rStyle").first()?.attr("w:val")) == "PicoCode" {
             let code = codeText(run)
             let delimiter = String(repeating: "`", count: max(1, (code.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0) + 1))

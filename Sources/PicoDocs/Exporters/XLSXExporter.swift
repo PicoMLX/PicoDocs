@@ -26,6 +26,7 @@ public struct XLSXExporter: DocumentExporter {
 
         var sheets: [(name: String, rows: [[String]])] = []
         var usedNames = Set<String>()
+        var nextNameSuffix: [String: Int] = [:]
         var projectionBudget = SpreadsheetProjectionBudget()
         for section in result.sections where section.kind != .image {
             let rows = Self.rows(for: section)
@@ -33,7 +34,7 @@ public struct XLSXExporter: DocumentExporter {
                 throw ExporterError.serializationFailed("Worksheet cell exceeds Excel's 32,767-character limit")
             }
             try Self.validateDimensions(rows: rows.count, columns: rows.map(\.count).max() ?? 0)
-            let name = Self.uniqueSheetName(section, index: sheets.count + 1, used: &usedNames)
+            let name = Self.uniqueSheetName(section, index: sheets.count + 1, used: &usedNames, nextSuffix: &nextNameSuffix)
             do {
                 try projectionBudget.reserveGrid(rows: rows.count, columns: rows.map(\.count).max() ?? 0, name: name)
                 for row in rows { for value in row { try projectionBudget.reserveValue(value) } }
@@ -124,17 +125,18 @@ public struct XLSXExporter: DocumentExporter {
     /// quotes (`""`), and newlines.
     // MARK: - Sheet naming
 
-    private static func uniqueSheetName(_ section: DocumentSection, index: Int, used: inout Set<String>) -> String {
+    private static func uniqueSheetName(_ section: DocumentSection, index: Int, used: inout Set<String>, nextSuffix: inout [String: Int]) -> String {
         let raw = section.sheetName ?? section.title ?? "Sheet\(index)"
         var name = sanitizeSheetName(raw)
         if name.isEmpty { name = "Sheet\(index)" }
         var candidate = name
-        var suffix = 2
+        var suffix = nextSuffix[name.lowercased(), default: 2]
         while used.contains(candidate.lowercased()) {
             let tail = " (\(suffix))"
             candidate = truncateSheetName(name, limit: 31 - tail.utf16.count) + tail
             suffix += 1
         }
+        nextSuffix[name.lowercased()] = suffix
         used.insert(candidate.lowercased())
         return candidate
     }

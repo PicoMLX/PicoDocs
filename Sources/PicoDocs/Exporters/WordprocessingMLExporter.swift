@@ -31,6 +31,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         let builder = Builder(images: Self.imageIndex(result.sections), blocks: blocks)
         for block in blocks {
             builder.append(block)
+            if let failure = builder.failure { throw failure }
         }
         builder.finishRelationships()
 
@@ -83,13 +84,14 @@ public struct WordprocessingMLExporter: DocumentExporter {
         let base64: String
         let mediaFilename: String
         let metadata: [String: String]
+        let budget: OfficeMediaDecodeBudget
         private var attemptedDecode = false
         private var cachedData: Data?
-        init(base64: String, mediaFilename: String, metadata: [String: String]) {
-            self.base64 = base64; self.mediaFilename = mediaFilename; self.metadata = metadata
+        init(base64: String, mediaFilename: String, metadata: [String: String], budget: OfficeMediaDecodeBudget) {
+            self.base64 = base64; self.mediaFilename = mediaFilename; self.metadata = metadata; self.budget = budget
         }
-        func decodedData() -> Data? {
-            if !attemptedDecode { cachedData = Data(base64Encoded: base64); attemptedDecode = true }
+        func decodedData() throws -> Data? {
+            if !attemptedDecode { cachedData = try budget.decode(base64); attemptedDecode = true }
             return cachedData
         }
     }
@@ -102,9 +104,9 @@ public struct WordprocessingMLExporter: DocumentExporter {
         let byPath: [String: [IndexedImage]]
         let byBasename: [String: [IndexedImage]]
 
-        func lookup(_ source: String) -> IndexedImage? {
-            if let image = byPath[source]?.last(where: { $0.decodedData() != nil }) { return image }
-            let candidates = byBasename[WordprocessingMLExporter.portableBasename(source)]?.filter { $0.decodedData() != nil } ?? []
+        func lookup(_ source: String) throws -> IndexedImage? {
+            if let image = try byPath[source]?.last(where: { try $0.decodedData() != nil }) { return image }
+            let candidates = try byBasename[WordprocessingMLExporter.portableBasename(source)]?.filter { try $0.decodedData() != nil } ?? []
             return candidates.count == 1 ? candidates[0] : nil
         }
     }
@@ -117,6 +119,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         var byPath: [String: [IndexedImage]] = [:]
         var byBasename: [String: [IndexedImage]] = [:]
         var usedFilenames: Set<String> = []
+        let budget = OfficeMediaDecodeBudget()
 
         for section in sections where section.kind == .image {
             guard let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
@@ -145,7 +148,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             }
             usedFilenames.insert(mediaFilename.lowercased())
 
-            let image = IndexedImage(base64: base64, mediaFilename: mediaFilename, metadata: section.metadata)
+            let image = IndexedImage(base64: base64, mediaFilename: mediaFilename, metadata: section.metadata, budget: budget)
             if let identity = [section.sourcePath, section.title].compactMap({ $0 }).first(where: { !$0.isEmpty }) {
                 byPath[identity, default: []].append(image)
             }
@@ -163,6 +166,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
     /// recursion.
     private final class Builder {
         private(set) var body = ""
+        private(set) var failure: Error?
         private(set) var relationships: [Relationship] = []
         private(set) var media: [(filename: String, data: Data)] = []
         private(set) var mediaExtensions: Set<String> = []
@@ -328,8 +332,9 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 case .image(let alt, let source):
                     out += imageRun(alt: alt, source: source) ?? textRun(alt, bold: bold, italic: italic, monospace: false)
                 case .footnoteReference(let fid):
-                    // No footnote part is generated; preserve the marker as literal text.
-                    out += textRun("[^\(fid)]", bold: bold, italic: italic, monospace: false)
+                    // Keep textual footnotes paired using explicit marker provenance.
+                    let id = fid.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "]", with: "\\]")
+                    out += "<w:r><w:rPr><w:rStyle w:val=\"PicoFootnoteMarker\"/></w:rPr><w:t xml:space=\"preserve\">\(OOXMLPackageWriter.escape("[^" + id + "]"))</w:t></w:r>"
                 }
             }
             return out
@@ -348,7 +353,13 @@ public struct WordprocessingMLExporter: DocumentExporter {
         ///   `WordConverter.imageAltText` reads first, so meaningful alt text survives
         ///   the round-trip instead of collapsing to the filename.
         private func imageRun(alt: String, source: String) -> String? {
-            guard let image = images.lookup(source), let data = image.decodedData() else { return nil }
+            guard failure == nil else { return nil }
+            do { return try checkedImageRun(alt: alt, source: source) }
+            catch { failure = error; return nil }
+        }
+
+        private func checkedImageRun(alt: String, source: String) throws -> String? {
+            guard let image = try images.lookup(source), let data = try image.decodedData() else { return nil }
             let filename = image.mediaFilename
             let ext = (filename as NSString).pathExtension.lowercased()
 
@@ -507,6 +518,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         styles += "<w:style w:type=\"paragraph\" w:styleId=\"PicoListContinuation\"><w:name w:val=\"List Continuation\"/><w:basedOn w:val=\"Normal\"/></w:style>"
         styles += "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:ind w:left=\"720\" w:right=\"720\"/></w:pPr><w:rPr><w:i/></w:rPr></w:style>"
         styles += "<w:style w:type=\"paragraph\" w:styleId=\"PicoCodeBlock\"><w:name w:val=\"Code Block\"/><w:basedOn w:val=\"Normal\"/><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr><w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/></w:rPr></w:style>"
+        styles += "<w:style w:type=\"character\" w:styleId=\"PicoFootnoteMarker\"><w:name w:val=\"Footnote Marker\"/></w:style>"
         styles += "<w:style w:type=\"character\" w:styleId=\"PicoCode\"><w:name w:val=\"Inline Code\"/><w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/></w:rPr></w:style>"
         return OOXMLPackageWriter.xmlDeclaration + "<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\(styles)</w:styles>"
     }

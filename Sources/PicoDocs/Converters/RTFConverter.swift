@@ -43,9 +43,9 @@ public struct RTFConverter: DocumentConverter {
 
     // MARK: - Parser
 
-    private struct Run { var text: String; var bold: Bool; var italic: Bool; var link: String? }
+    private struct Run { var text: String; var bold: Bool; var italic: Bool; var link: String?; var code: Bool }
     private final class Field { var instruction = ""; var target: String? }
-    private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool; var ucSkip: Int; var field: Field?; var instruction: Bool }
+    private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool; var ucSkip: Int; var field: Field?; var instruction: Bool; var font: Int; var fontTable: Bool }
 
     /// Destination control words whose group contents are not body text.
     private static let ignoredDestinations: Set<String> = [
@@ -71,6 +71,10 @@ public struct RTFConverter: DocumentConverter {
         var ucSkip = 1
         var field: Field?
         var instruction = false
+        var font = 0, defaultFont = 0
+        var fontTable = false
+        var fontNames: [Int: String] = [:]
+        var monospacedFonts: Set<Int> = []
         var ansiEncoding: String.Encoding = .windowsCP1252
         var isDBCS = false
         var stack: [GroupState] = []
@@ -84,14 +88,22 @@ public struct RTFConverter: DocumentConverter {
         var markdownFence: (character: Character, length: Int)?
         var previousBlankParagraph = true
 
+        func finishFont() {
+            guard fontTable else { return }
+            let name = fontNames[font, default: ""].lowercased()
+            if ["menlo", "monaco", "courier", "consolas", "sfmono", "sfnsmono", "monospaced"].contains(where: name.contains) { monospacedFonts.insert(font) }
+        }
+
         func appendText(_ s: String) {
+            if fontTable { fontNames[font, default: ""] += s; return }
             if instruction, let field { field.instruction += s; return }
+            let code = field?.target != nil && monospacedFonts.contains(font)
             guard !ignore, !s.isEmpty else { return }
-            if var last = runs.last, last.bold == bold, last.italic == italic, last.link == field?.target {
+            if var last = runs.last, last.bold == bold, last.italic == italic, last.link == field?.target, last.code == code {
                 last.text += s
                 runs[runs.count - 1] = last
             } else {
-                runs.append(Run(text: s, bold: bold, italic: italic, link: field?.target))
+                runs.append(Run(text: s, bold: bold, italic: italic, link: field?.target, code: code))
             }
         }
 
@@ -157,14 +169,16 @@ public struct RTFConverter: DocumentConverter {
             }
             switch c {
             case "{":
-                stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip, field: field, instruction: instruction))
+                stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip, field: field, instruction: instruction, font: font, fontTable: fontTable))
                 i += 1
 
             case "}":
                 if let saved = stack.popLast() {
+                    finishFont()
                     if instruction, !saved.instruction, let field { field.target = hyperlinkTarget(field.instruction) }
                     bold = saved.bold; italic = saved.italic; ignore = saved.ignore; ucSkip = saved.ucSkip
                     field = saved.field; instruction = saved.instruction
+                    font = saved.font; fontTable = saved.fontTable
                 }
                 i += 1
 
@@ -184,6 +198,10 @@ public struct RTFConverter: DocumentConverter {
                     if i < n, chars[i] == " " { i += 1 }
 
                     switch word {
+                    case "fonttbl": fontTable = true; ignore = true
+                    case "deff": if let param { defaultFont = param; font = param }
+                    case "f": if let param { finishFont(); font = param }
+                    case "fmodern": if fontTable { monospacedFonts.insert(font) }
                     case "field": field = Field()
                     case "fldinst": instruction = field != nil; ignore = true
                     case "fldrslt": instruction = false
@@ -212,7 +230,7 @@ public struct RTFConverter: DocumentConverter {
                         // them so they can't corrupt group/brace parsing.
                         if let param, param > 0 { i += min(param, n - i) }
                     case "plain":
-                        bold = false; italic = false
+                        bold = false; italic = false; font = defaultFont
                     case "b":
                         bold = (param ?? 1) != 0
                     case "i":
@@ -406,6 +424,15 @@ public struct RTFConverter: DocumentConverter {
     /// `**word** ` rather than `** word **`).
     private static func renderRun(_ run: Run) -> String {
         guard !run.text.isEmpty else { return "" }
+        if run.code {
+            let text = run.text
+            let delimiter = String(repeating: "`", count: max(1, (text.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0) + 1))
+            let padding = text.hasPrefix("`") || text.hasSuffix("`") || (text.hasPrefix(" ") && text.hasSuffix(" ") && text.contains(where: { $0 != " " })) ? " " : ""
+            var fragment = delimiter + padding + text + padding + delimiter
+            if run.italic { fragment = "*" + fragment + "*" }
+            if run.bold { fragment = "**" + fragment + "**" }
+            return fragment
+        }
         if run.text.allSatisfy({ $0 == " " || $0 == "\t" || $0 == "\n" }) { return run.text }
         let isSpace: (Character) -> Bool = { $0 == " " || $0 == "\t" }
         let afterLeading = run.text.drop(while: isSpace)
