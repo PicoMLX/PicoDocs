@@ -43,7 +43,8 @@ public struct PowerPointConverter: DocumentConverter {
         _ = Self.contentType("", archive: archive)
         try archive.check()
         let packageRelationships = Self.relationships(archive, forPart: "")
-        let officeDocuments = packageRelationships.values.filter { $0.type.hasSuffix("/officeDocument") }
+        let officeTypes: Set<String> = ["http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument", "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument"]
+        let officeDocuments = packageRelationships.values.filter { officeTypes.contains($0.type) }
         guard officeDocuments.count == 1, let officeDocument = officeDocuments.first, !officeDocument.external else {
             try archive.check()
             throw PicoDocsError.fileCorrupted
@@ -159,7 +160,7 @@ public struct PowerPointConverter: DocumentConverter {
             context.master = document
             context.placeholders = parts.placeholders
         }
-        let paragraphs = selectedChildren(in: tree, descendingInto: ["p:grpsp"]).filter { $0.tagName().lowercased() == "p:sp" }
+        let paragraphs = selectedChildren(in: tree, descendingInto: ["p:grpsp"], visibleOnly: true).filter { $0.tagName().lowercased() == "p:sp" }
             .filter { placeholderType(of: $0) == "body" }
             .flatMap { shape in
                 context.defaultLink = shapeLink(shape, context: context)
@@ -359,6 +360,7 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     private static func selectedDescendant(in element: Element, named name: String) -> Element? {
+        guard !element.tagName().lowercased().hasPrefix("extension") else { return nil }
         if element.tagName().lowercased() == name { return element }
         if element.tagName().lowercased() == "mc:alternatecontent" {
             return selectedAlternateBranch(element).flatMap { selectedDescendant(in: $0, named: name) }
@@ -524,11 +526,12 @@ public struct PowerPointConverter: DocumentConverter {
 
     // MARK: - Paragraphs and lists
 
-    private static func selectedChildren(in container: Element, descendingInto groups: Set<String> = []) -> [Element] {
+    private static func selectedChildren(in container: Element, descendingInto groups: Set<String> = [], visibleOnly: Bool = false) -> [Element] {
         var children: [Element] = []
         var pending = Array(container.children().array().reversed())
         while let element = pending.popLast() {
             let tag = element.tagName().lowercased()
+            if tag.hasPrefix("extension") || (visibleOnly && isHidden(element)) { continue }
             if tag == "mc:alternatecontent" {
                 if let branch = selectedAlternateBranch(element) { pending += branch.children().array().reversed() }
             } else if groups.contains(tag) { pending += element.children().array().reversed() }
@@ -962,7 +965,20 @@ public struct PowerPointConverter: DocumentConverter {
     static func xml(_ archive: PowerPointPackage, path: String) -> Document? {
         guard let data = archive.read(path),
               let text = PowerPointXML.normalize(data) else { return nil }
-        return try? SwiftSoup.parse(text, "", SwiftSoup.Parser.xmlParser())
+        guard let document = try? SwiftSoup.parse(text, "", SwiftSoup.Parser.xmlParser()) else { return nil }
+        // MustUnderstand applies to the processed tree, excluding ignored extension
+        // subtrees and unselected AlternateContent branches.
+        var pending = document.children().array()
+        while let element = pending.popLast() {
+            let tag = element.tagName().lowercased()
+            if tag.hasPrefix("extension") { continue }
+            let required = ((try? element.attr("mc:MustUnderstand")) ?? "").split(whereSeparator: \.isWhitespace)
+            if required.contains("unsupported") { archive.fail(PicoDocsError.fileCorrupted); return nil }
+            if tag == "mc:alternatecontent" {
+                if let selected = selectedAlternateBranch(element) { pending.append(selected) }
+            } else { pending += element.children().array() }
+        }
+        return document
     }
 
     /// Raw text of an element's text nodes, preserving significant whitespace

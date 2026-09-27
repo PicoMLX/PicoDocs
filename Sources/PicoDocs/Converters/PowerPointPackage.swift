@@ -171,8 +171,11 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         append("<" + tag, parser: parser)
         for (key, value) in attributes where key != "xmlns" && !key.hasPrefix("xmlns:") {
             var value = value
-            if key == "Requires" {
-                value = value.split(separator: " ").map { Self.prefixes[scope[String($0)] ?? ""] ?? "unsupported" }.joined(separator: " ")
+            if key == "Requires" || name(key, scope: scope, attribute: true) == "mc:MustUnderstand" {
+                value = value.split(whereSeparator: \.isWhitespace).map { prefix in
+                    if prefix == "xml" { return "xml" }
+                    return Self.prefixes[scope[String(prefix)] ?? ""] ?? "unsupported"
+                }.joined(separator: " ")
             }
             append(" \(name(key, scope: scope, attribute: true))=\"", parser: parser)
             appendEscaped(value, attribute: true, parser: parser)

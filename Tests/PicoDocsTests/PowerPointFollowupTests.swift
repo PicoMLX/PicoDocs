@@ -5,6 +5,64 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func hiddenNotePlaceholdersAndGroupsAreExcluded() async throws {
+        typealias B = PowerPointConverterTests
+        func note(_ text: String) -> String { B.shape(placeholder: #"<p:ph type="body"/>"#, paragraphs: ["<a:p><a:r><a:t>\(text)</a:t></a:r></a:p>"]) }
+        let hidden = note("Hidden shape").replacingOccurrences(of: "<p:cNvPr ", with: "<p:cNvPr hidden=\"1\" ")
+        let group = "<p:grpSp><p:nvGrpSpPr><p:cNvPr hidden=\"true\"/></p:nvGrpSpPr>" + selectedWrapper(note("Hidden group")) + "</p:grpSp>"
+        let notes = "<p:notes \(B.namespaces)><p:cSld><p:spTree>" + hidden + group + note("Visible") + "</p:spTree></p:cSld></p:notes>"
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Slide"), relationships: [("notes", "rel/notesSlide", "../notesSlides/n.xml")])], extraParts: [("ppt/notesSlides/n.xml", Array(notes.utf8))])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "hidden-notes.pptx")
+        #expect(result.sections.first?.metadata["notes"] == "- Visible")
+        #expect(!result.markdown().contains("Hidden"))
+    }
+
+    @Test func ignoredExtensionsCannotSupplyPicturesOrTables() async throws {
+        typealias B = PowerPointConverterTests
+        let picture = #"<p:pic xmlns:e="urn:extension" mc:Ignorable="e"><p:blipFill><e:ignored><a:blip r:embed="missing"/></e:ignored><a:blip r:embed="real"/></p:blipFill></p:pic>"#
+        let cell = "<a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Visible cell</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl>"
+        let table = "<p:graphicFrame xmlns:e=\"urn:extension\" mc:Ignorable=\"e\"><e:ignored>" + cell.replacingOccurrences(of: "Visible", with: "Hidden") + "</e:ignored><a:graphic><a:graphicData>" + cell + "</a:graphicData></a:graphic></p:graphicFrame>"
+        let data = B.deck(slides: [.init(file: "s.xml", shapes: picture + table, relationships: [("real", "rel/image", "../media/real.png")])], extraParts: [("ppt/media/real.png", [1,2,3])])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "ignored.pptx")
+        #expect(result.markdown().contains("real.png")); #expect(result.markdown().contains("Visible cell")); #expect(!result.markdown().contains("Hidden"))
+    }
+
+    @Test func rootOfficeRelationshipUsesSupportedURIIdentity() async throws {
+        typealias B = PowerPointConverterTests
+        let base = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Slide"))])
+        for type in ["http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument", "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument", "https://vendor.example/officeDocument"] {
+            let rels = B.relationshipsXML([("office", type, "ppt/presentation.xml"), ("vendor", "https://vendor.example/officeDocument", "missing.xml")])
+            let parts = try entries(base).filter { $0.name != "_rels/.rels" } + [("_rels/.rels", Array(rels.utf8))]
+            let data = PagesConverterTests.makeZip(parts)
+            if type.hasPrefix("https://vendor") {
+                await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: data, filename: "vendor.pptx") }
+            } else {
+                let result = try await PicoDocsEngine.convert(data: data, filename: "uri.pptx")
+                #expect(result.markdown() == "## Slide")
+            }
+        }
+    }
+
+    @Test func mustUnderstandChecksOnlyProcessedNamespaceDeclarations() async throws {
+        typealias B = PowerPointConverterTests
+        let base = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Visible"))])
+        for required in ["a", "alias", "e", "undeclared"] {
+            let parts = try entries(base).map { entry -> (name: String, data: [UInt8]) in
+                guard entry.name == "ppt/slides/s.xml" else { return entry }
+                let xml = String(decoding: entry.data, as: UTF8.self).replacingOccurrences(of: "<p:sld ", with: "<p:sld xmlns:e=\"urn:unsupported\" xmlns:alias=\"http://schemas.openxmlformats.org/drawingml/2006/main\" mc:MustUnderstand=\"\(required)\" ")
+                return (entry.name, Array(xml.utf8))
+            }
+            let data = PagesConverterTests.makeZip(parts)
+            if required == "a" || required == "alias" {
+                let result = try await PicoDocsEngine.convert(data: data, filename: "understood.pptx")
+                #expect(result.markdown() == "## Visible")
+            } else { await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: data, filename: "unsupported.pptx") } }
+        }
+        let alternate = "<mc:AlternateContent xmlns:e=\"urn:unsupported\"><mc:Choice Requires=\"e\" mc:MustUnderstand=\"e\">" + B.titleShape("Wrong") + "</mc:Choice><mc:Fallback>" + B.titleShape("Fallback") + "</mc:Fallback></mc:AlternateContent>"
+        let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: alternate)]), filename: "unselected.pptx")
+        #expect(result.markdown() == "## Fallback")
+    }
+
     @Test func parameterizedContentTypesPreserveValuesAndRejectMalformedParameters() async throws {
         typealias B = PowerPointConverterTests
         let valid = ["application/xml;charset=utf-8", "application/custom ; name=\"semi;colon\";quoted=\"a\\\"b\"", "application/x;empty=\"\""]
