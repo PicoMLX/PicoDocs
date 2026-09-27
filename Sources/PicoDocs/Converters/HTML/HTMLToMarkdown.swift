@@ -180,9 +180,9 @@ enum HTMLToMarkdown {
     /// pipe escapes; doubling existing backslashes would create visible slashes.
     private static func escapeTablePipes(_ text: String) -> String {
         var output = "", escaped = false
-        for character in text {
+        for character in text.unicodeScalars {
             if character == "|", !escaped { output.append("\\") }
-            output.append(character)
+            output.unicodeScalars.append(character)
             escaped = character == "\\" && !escaped
         }
         return output

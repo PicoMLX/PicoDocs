@@ -4,6 +4,43 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func nativePagesListFenceTextUsesGeneratedStructure() async throws {
+        for style in [PagesConverterTests.ListKind.bullet, .ordered] {
+            for separator in ["\n", "\r", "\u{2029}", "\u{2028}"] {
+                let source = "```" + separator + #"\* regex"#
+                let data = PagesConverterTests.makeListPagesFile(text: source, style: style, restarts: [])
+                let result = try await PicoDocsEngine.convert(data: data, filename: "fence-list.pages")
+                for format in [ExportFileType.html, .plaintext, .csv] {
+                    let rendered = try DocumentRenderer.render(result, to: format)
+                    #expect(rendered.contains(#"\* regex"#))
+                    #expect(!rendered.contains("<pre>"))
+                }
+            }
+        }
+        let source = "```\n\\* regex"
+        let data = PagesConverterTests.makeListPagesFile(text: source, style: .ordered, restarts: [(4, 12)])
+        let result = try await PicoDocsEngine.convert(data: data, filename: "restart.pages")
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains(#"\* regex"#))
+    }
+
+    @Test func HTMLTablePipesEscapeBeforeCombiningScalars() throws {
+        for mark in ["\u{0301}", "\u{FE0F}"] {
+            for code in [false, true] {
+                let source = "a|" + mark + "b"
+                let inner = code ? "<code>\(source)</code>" : source
+                let converted = try HTMLToMarkdown.convert(html: "<table><tr><td>\(inner)</td></tr></table>")
+                #expect(converted.markdown.contains("a\\|" + mark + "b"))
+                let result = ConverterResult(sections: [.init(markdown: converted.markdown)])
+                let html = try SwiftSoup.parse(DocumentRenderer.render(result, to: .html))
+                let cells = try html.select("th,td")
+                #expect(cells.size() == 1)
+                #expect(try cells.first()?.text() == source)
+                #expect(try DocumentRenderer.render(result, to: .csv).contains(source))
+            }
+        }
+    }
+
+
     @Test func PagesTrimmingUsesTheEmittedFenceContext() async throws {
         for separator in ["\n", "\r", "\u{2029}"] {
             let source = ["- item", "  ```", #"outside \*"#].joined(separator: separator)

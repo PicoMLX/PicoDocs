@@ -225,6 +225,7 @@ enum IWATable {
         let characterStyles = indexedReferences(in: storage, field: 8)
         let smartFields = indexedReferences(in: storage, field: 11)
         let listStyles = indexedReferences(in: storage, field: 7)
+        let paragraphStyles = indexedReferences(in: storage, field: 5)
         var traits: [UInt64: (bold: Bool, italic: Bool)] = [:]
         for id in Set(characterStyles.compactMap(\.id)) { traits[id] = characterTraits(of: id, in: objects) }
         var links: [UInt64: String] = [:]
@@ -248,15 +249,27 @@ enum IWATable {
                 }
             }
         }
-        return BodyStorage(units: units, escapedBackslashes: visibleEscapeProjection(text, boundaries: Set(characterStyles.map(\.offset) + smartFields.map(\.offset)), hardBoundaries: tableOffsets),
-                           paragraphStyles: indexedReferences(in: storage, field: 5),
+        // Native list content receives escaped block starts and generated markers.
+        // Use those same paragraph styles when deciding code/fence escape context.
+        var nativeListParagraphs: [Range<Int>] = []
+        var paragraphStart = 0
+        for end in 0...units.count where end == units.count || isParagraphSeparator(units[end]) {
+            let range = paragraphStart..<end
+            let paragraphStyle = majorityStyle(units, paragraphStyles, range, total: units.count)
+            let listStyle = majorityStyle(units, listStyles, range, total: units.count, includeUnstyled: true)
+            if headingLevel(styleName(paragraphStyle, objects: objects)) == nil,
+               let listStyle, listMarkers[listStyle] != nil { nativeListParagraphs.append(range) }
+            paragraphStart = end + 1
+        }
+        return BodyStorage(units: units, escapedBackslashes: visibleEscapeProjection(text, boundaries: Set(characterStyles.map(\.offset) + smartFields.map(\.offset)), hardBoundaries: tableOffsets, nativeListParagraphs: nativeListParagraphs),
+                           paragraphStyles: paragraphStyles,
                            characterStyles: characterStyles, smartFields: smartFields,
                            listStyles: listStyles, listRestarts: listRestarts(in: storage),
                            traits: traits, links: links, listMarkers: listMarkers)
     }
 
     /// Escape the rendered stream, then project insertions back to storage indices.
-    private static func visibleEscapeProjection(_ text: String, boundaries: Set<Int>, hardBoundaries: Set<Int> = []) -> (after: [Int], before: Set<Int>) {
+    private static func visibleEscapeProjection(_ text: String, boundaries: Set<Int>, hardBoundaries: Set<Int> = [], nativeListParagraphs: [Range<Int>] = []) -> (after: [Int], before: Set<Int>) {
         let units = Array(text.utf16)
         var offsets: [Int] = []
         for index in units.indices {
@@ -286,7 +299,28 @@ enum IWATable {
             if visibleIndex < offsets.count, offsets[visibleIndex] == index { visibleIndex += 1 }
         }
         let visible = String(decoding: offsets.map { hardBoundaries.contains($0) ? 0x0A : units[$0] }, as: UTF16.self)
-        let projection = MarkdownLiteral.escapeProjection(visible, boundaries: visibleBoundaries, paragraphSeparators: [0x0A, 0x0D, 0x2029], softSeparators: [0x2028, 0x0B, 0x0C])
+        // Keep one structural line per visible line so inserted source escapes
+        // still map to their original UTF-16 positions. Soft continuations use
+        // list indentation; source block markers are escaped exactly as listLines.
+        let separators: Set<UInt16> = [0x0A, 0x0D, 0x2029, 0x2028, 0x0B, 0x0C]
+        var structuralLines: [String] = [], lineStart = 0, rangeIndex = 0
+        var previousListRange: Int?
+        for end in 0...offsets.count where end == offsets.count || hardBoundaries.contains(offsets[end]) || separators.contains(units[offsets[end]]) {
+            let source = lineStart < offsets.count ? offsets[lineStart] : units.count
+            while rangeIndex < nativeListParagraphs.count, nativeListParagraphs[rangeIndex].upperBound <= source { rangeIndex += 1 }
+            let line = String(decoding: offsets[lineStart..<end].map { units[$0] }, as: UTF16.self)
+            if rangeIndex < nativeListParagraphs.count, nativeListParagraphs[rangeIndex].contains(source) {
+                let continuation = previousListRange == rangeIndex
+                let content = continuation ? String(line.drop { $0 == " " || $0 == "\t" }) : line
+                structuralLines.append((continuation ? "  " : "- ") + escapingListMarker(content))
+                previousListRange = rangeIndex
+            } else {
+                structuralLines.append(line)
+                previousListRange = nil
+            }
+            lineStart = end + 1
+        }
+        let projection = MarkdownLiteral.escapeProjection(visible, boundaries: visibleBoundaries, paragraphSeparators: [0x0A, 0x0D, 0x2029], softSeparators: [0x2028, 0x0B, 0x0C], structuralText: structuralLines.joined(separator: "\n"))
         var after = Array(repeating: 0, count: units.count), before: Set<Int> = []
         for (index, source) in offsets.enumerated() {
             after[source] = projection.after[index]

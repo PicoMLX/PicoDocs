@@ -65,14 +65,14 @@ enum MarkdownTableCell {
     /// Backslashes elsewhere are source text and must remain untouched.
     static func codePipes(_ text: String, encoding: Bool) -> String {
         var output = "", slashes = 0
-        for character in text {
+        for character in text.unicodeScalars {
             if character == "\\" { slashes += 1; continue }
             let count: Int
             if character == "|" {
                 count = encoding ? slashes * 2 + 1 : (slashes.isMultiple(of: 2) ? slashes : (slashes - 1) / 2)
             } else { count = slashes }
             output += String(repeating: "\\", count: count)
-            output.append(character); slashes = 0
+            output.unicodeScalars.append(character); slashes = 0
         }
         return output + String(repeating: "\\", count: slashes)
     }
