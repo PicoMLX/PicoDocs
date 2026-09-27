@@ -5,6 +5,45 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointFollowupTests {
+    @Test func opaqueGraphicDataCannotExposeAnOLEPreview() async throws {
+        typealias B = PowerPointConverterTests
+        let picture = #"<p:pic><p:nvPicPr><p:cNvPr name="Preview"/></p:nvPicPr><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic>"#
+        for uri in ["http://schemas.openxmlformats.org/presentationml/2006/ole", "http://schemas.openxmlformats.org/drawingml/2006/chart", "urn:unsupported", ""] {
+            let attribute = uri.isEmpty ? "" : " uri='\(uri)'"
+            let frame = "<p:graphicFrame><a:graphic><a:graphicData\(attribute)><p:oleObj>" + picture + "</p:oleObj></a:graphicData></a:graphic></p:graphicFrame>"
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title") + frame, relationships: [("image", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "../media/preview.png")])], extraParts: [("ppt/media/preview.png", [1,2,3])])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "ole.pptx")
+            #expect(result.sections.contains { $0.kind == .image } == uri.hasSuffix("/ole"))
+            #expect(result.markdown().contains("Preview") == uri.hasSuffix("/ole"))
+        }
+    }
+
+    @Test func renderedSlidesShareACumulativeByteBudget() async throws {
+        typealias B = PowerPointConverterTests
+        let shape = B.shape(placeholder: nil, paragraphs: ["<a:p><a:r><a:t>**literal**</a:t></a:r></a:p>"])
+        let one = B.deck(slides: [.init(file: "s.xml", shapes: shape)])
+        let info = StreamInfo(detectedFormat: .pptx)
+        let result = try await PowerPointConverter().convert(one, info: info)
+        let cost = result.sections.reduce(0) { $0 + $1.markdown.utf8.count + ($1.title?.utf8.count ?? 0) + ($1.sourcePath?.utf8.count ?? 0) + $1.metadata.filter { $0.key != "base64" }.reduce(0) { $0 + $1.key.utf8.count + $1.value.utf8.count } } + (result.title?.utf8.count ?? 0) + (result.author?.utf8.count ?? 0)
+        _ = try await PowerPointConverter(maximumRenderedBytes: cost).convert(one, info: info)
+        await #expect(throws: PicoDocsError.fileCorrupted) { try await PowerPointConverter(maximumRenderedBytes: cost - 1).convert(one, info: info) }
+        let two = B.deck(slides: [.init(file: "s.xml", shapes: shape), .init(file: "t.xml", shapes: shape)])
+        await #expect(throws: PicoDocsError.fileCorrupted) { try await PowerPointConverter(maximumRenderedBytes: cost).convert(two, info: info) }
+    }
+
+    @Test func embeddedImageReferencesCannotOccupyAURLScheme() async throws {
+        typealias B = PowerPointConverterTests
+        let picture = #"<p:pic><p:nvPicPr><p:cNvPr name="Preview"/></p:nvPicPr><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic>"#
+        for filename in ["javascript:preview.png", "data:preview.png", "file:preview.png"] {
+            let data = B.deck(slides: [.init(file: "s.xml", shapes: B.titleShape("Title") + picture, relationships: [("image", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "../media/" + filename)])], extraParts: [("ppt/media/" + filename, [1,2,3])])
+            let result = try await PicoDocsEngine.convert(data: data, filename: "images.pptx")
+            let carrier = try #require(result.sections.first { $0.kind == .image })
+            #expect(carrier.metadata["markdownReference"]?.hasPrefix("./") == true)
+            #expect(try DocumentRenderer.render(result, to: .html).contains("data:image/png;base64,AQID"))
+        }
+    }
+
+
     @Test func opaqueGraphicDataCannotExposeATable() async throws {
         typealias B = PowerPointConverterTests
         for uri in ["http://schemas.openxmlformats.org/drawingml/2006/table", "http://schemas.openxmlformats.org/drawingml/2006/chart", "urn:unsupported", ""] {
@@ -784,7 +823,7 @@ struct PowerPointFollowupTests {
     @Test func OLEFramesKeepTheirVisiblePreviewPictures() async throws {
         typealias B = PowerPointConverterTests
         let picture = #"<p:pic><p:nvPicPr><p:cNvPr name="Preview"/></p:nvPicPr><p:blipFill><a:blip r:embed="image"/></p:blipFill></p:pic>"#
-        let frame = "<p:graphicFrame><a:graphic><a:graphicData><p:oleObj r:id=\"ole\">" + picture + "</p:oleObj></a:graphicData></a:graphic></p:graphicFrame>"
+        let frame = "<p:graphicFrame><a:graphic><a:graphicData uri='http://schemas.openxmlformats.org/presentationml/2006/ole'><p:oleObj r:id=\"ole\">" + picture + "</p:oleObj></a:graphicData></a:graphic></p:graphicFrame>"
         let bytes: [UInt8] = [0x89, 0x50, 0x4e, 0x47]
         let data = B.deck(slides: [.init(file: "s.xml", shapes: frame, relationships: [("image", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "../media/preview.png")])], extraParts: [("ppt/media/preview.png", bytes)])
         let result = try await PicoDocsEngine.convert(data: data, filename: "ole.pptx")

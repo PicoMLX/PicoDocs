@@ -28,7 +28,10 @@ import SwiftSoup
 
 public struct PowerPointConverter: DocumentConverter {
 
-    public init() {}
+    private let maximumRenderedBytes: Int
+
+    public init() { maximumRenderedBytes = 64 * 1024 * 1024 }
+    init(maximumRenderedBytes: Int) { self.maximumRenderedBytes = max(0, maximumRenderedBytes) }
 
     public func accepts(_ info: StreamInfo) -> Bool {
         info.detectedFormat == .pptx
@@ -56,6 +59,16 @@ public struct PowerPointConverter: DocumentConverter {
 
         let defaultTextStyle = presentation.children().first().flatMap { Self.selectedChild(of: $0, named: "p:defaulttextstyle") }
         var sections: [DocumentSection] = []
+        var remainingRenderedBytes = maximumRenderedBytes
+        func charge(_ text: String?) throws {
+            let bytes = text?.utf8.count ?? 0
+            guard bytes <= remainingRenderedBytes else { throw PicoDocsError.fileCorrupted }
+            remainingRenderedBytes -= bytes
+        }
+        func chargeSection(_ section: DocumentSection) throws {
+            try charge(section.markdown); try charge(section.title); try charge(section.sourcePath)
+            for (key, value) in section.metadata where key != "base64" { try charge(key); try charge(value) }
+        }
         let slidePaths = try Self.slidePaths(presentation, archive: archive, presentationPath: presentationPath)
         // Reserve all external image destinations first, including later slides,
         // so embedded references cannot claim an external occurrence's src.
@@ -92,20 +105,24 @@ public struct PowerPointConverter: DocumentConverter {
             try archive.check()
             guard !blocks.isEmpty else { continue }   // empty slide: keep its number, emit nothing
 
-            sections.append(DocumentSection(
+            let section = DocumentSection(
                 title: context.plainTitle,
                 kind: .slide,
                 markdown: blocks.joined(separator: "\n\n"),
                 sourcePath: slidePath,
                 slideNumber: index + 1,
                 metadata: notes.map { ["notes": $0] } ?? [:]
-            ))
+            )
+            try chargeSection(section)
+            sections.append(section)
         }
+        for section in images.sections { try chargeSection(section) }
         sections += images.sections
         try archive.check()
         guard sections.contains(where: { $0.kind != .image }) else { throw PicoDocsError.emptyDocument }
 
         let properties = Self.coreProperties(archive)
+        try charge(properties.title ?? info.filename); try charge(properties.author)
         try archive.check()
         return ConverterResult(
             title: properties.title ?? info.filename,
@@ -408,8 +425,15 @@ public struct PowerPointConverter: DocumentConverter {
         guard !Task.isCancelled else { return nil }
         guard !["p:ext", "a:ext"].contains(element.tagName().lowercased()) else { return nil }
         guard !element.tagName().lowercased().hasPrefix("extension"), !element.tagName().lowercased().hasPrefix("requiredextension") else { return nil }
-        if name == "a:tbl", element.tagName().lowercased() == "a:graphicdata",
-           (try? element.attr("uri")) != "http://schemas.openxmlformats.org/drawingml/2006/table" { return nil }
+        if element.tagName().lowercased() == "a:graphicdata" {
+            let requiredURI: String?
+            switch name {
+            case "a:tbl": requiredURI = "http://schemas.openxmlformats.org/drawingml/2006/table"
+            case "p:oleobj": requiredURI = "http://schemas.openxmlformats.org/presentationml/2006/ole"
+            default: requiredURI = nil
+            }
+            if let requiredURI, (try? element.attr("uri")) != requiredURI { return nil }
+        }
         if element.tagName().lowercased() == name { return element }
         if element.tagName().lowercased() == "mc:alternatecontent" {
             return selectedAlternateBranch(element).flatMap { selectedDescendant(in: $0, named: name) }
@@ -953,7 +977,10 @@ public struct PowerPointConverter: DocumentConverter {
             let encodedBytes = ((bytes.count + 2) / 3) * 4
             guard encodedBytes <= remainingEncodedBytes else { archive.fail(PicoDocsError.fileCorrupted); return nil }
             remainingEncodedBytes -= encodedBytes
-            var reference = filename
+            // A colon (including a percent-encoded one) must never occupy the
+            // scheme position of a generated embedded-image URL.
+            let needsRelativePrefix = filename.contains(":") || filename.contains("%") || filename.hasPrefix("/") || filename.hasPrefix("\\")
+            var reference = needsRelativePrefix ? "./" + filename : filename
             while usedReferences.contains(PowerPointConverter.linkDestination(reference)) {
                 nextReference += 1
                 reference = "picodocs-embedded/\(nextReference)/" + filename
