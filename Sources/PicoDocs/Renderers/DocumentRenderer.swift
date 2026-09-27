@@ -550,17 +550,8 @@ public enum DocumentRenderer {
                 blocks.append(.blockquote(inner)); continue
             }
 
-            let leadingBare = bareListMarker(trimmed)
-            let next = i + 1
-            let prospectiveBase = indentWidth(line)
-            let prospectiveContent = prospectiveBase + trimmed.count + 1
-            let adjacent = next < lines.count && !isBlank(lines[next])
-                && (indentWidth(lines[next]) < prospectiveBase + 2 || indentWidth(lines[next]) >= prospectiveContent)
-                && (listMarker(lines[next].trimmingCharacters(in: .whitespaces)) ?? bareListMarker(lines[next].trimmingCharacters(in: .whitespaces))) == leadingBare
-            var following = next
-            while following < lines.count, isBlank(lines[following]) { following += 1 }
-            let continuation = following < lines.count && indentWidth(lines[following]) >= prospectiveContent
-            let confirmedBare = leadingBare != nil && (adjacent || continuation)
+            let leadingBare = confirmedBareMarker(lines, index: i)
+            let confirmedBare = leadingBare != nil
             if listMarker(trimmed) != nil || confirmedBare {
                 let ordered = (listMarker(trimmed) ?? leadingBare) == .ordered
                 let start = ordered ? listStart(trimmed) : 1
@@ -672,11 +663,24 @@ public enum DocumentRenderer {
         return digits.count <= 9 ? Int(digits) ?? 1 : 1
     }
 
-    static func literalListIndent(_ line: String) -> (base: Int, content: Int)? {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard listMarker(trimmed) != nil else { return nil }
+    private static func confirmedBareMarker(_ lines: [String], index: Int) -> ListKind? {
+        let line = lines[index], trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard let marker = bareListMarker(trimmed) else { return nil }
+        let next = index + 1, base = indentWidth(line), content = indentWidth(line) + trimmed.count + 1
+        let adjacent = next < lines.count && !lines[next].trimmingCharacters(in: .whitespaces).isEmpty
+            && (indentWidth(lines[next]) < base + 2 || indentWidth(lines[next]) >= content)
+            && (listMarker(lines[next].trimmingCharacters(in: .whitespaces)) ?? bareListMarker(lines[next].trimmingCharacters(in: .whitespaces))) == marker
+        var following = next
+        while following < lines.count, lines[following].trimmingCharacters(in: .whitespaces).isEmpty { following += 1 }
+        return adjacent || (following < lines.count && indentWidth(lines[following]) >= content) ? marker : nil
+    }
+
+    static func literalListIndent(_ lines: [String], index: Int) -> (base: Int, content: Int)? {
+        let line = lines[index], trimmed = line.trimmingCharacters(in: .whitespaces)
+        let filled = listMarker(trimmed) != nil
+        guard filled || confirmedBareMarker(lines, index: index) != nil else { return nil }
         let base = indentWidth(line)
-        return (base, base + markerWidth(trimmed))
+        return (base, base + (filled ? markerWidth(trimmed) : trimmed.count + 1))
     }
 
     /// Shared boundaries for verbatim-source escaping and rendered inline blocks.

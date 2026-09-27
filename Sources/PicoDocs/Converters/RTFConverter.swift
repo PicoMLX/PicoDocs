@@ -268,15 +268,21 @@ public struct RTFConverter: DocumentConverter {
         // Compute escaping from source text before inserting style delimiters,
         // retaining code context across runs and paragraph boundaries.
         let source = paragraphs.map { $0.map(\.text).joined() }.joined(separator: "\n\n")
-        let escapes = MarkdownLiteral.backslashEscapeCounts(source)
+        var boundaries: Set<Int> = [], position = 0
+        for paragraph in paragraphs {
+            for run in paragraph { boundaries.insert(position); position += run.text.utf16.count }
+            position += 2
+        }
+        let escapes = MarkdownLiteral.escapeProjection(source, boundaries: boundaries)
         var offset = 0
         return paragraphs.map { paragraph in
             let rendered = paragraph.map { run in
                 var escapedRun = run
                 var units: [UInt16] = []
                 for unit in run.text.utf16 {
+                    if escapes.before.contains(offset) { units.append(0x5C) }
                     units.append(unit)
-                    for _ in 0..<escapes[offset] { units.append(unit) }
+                    for _ in 0..<escapes.after[offset] { units.append(unit) }
                     offset += 1
                 }
                 escapedRun.text = String(decoding: units, as: UTF16.self)

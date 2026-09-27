@@ -26,7 +26,7 @@ enum MarkdownLiteral {
                     lists.removeLast(); exitedList = true
                 }
                 if exitedList { flushProse() }
-                if let item = DocumentRenderer.literalListIndent(line) { lists.append(item) }
+                if let item = DocumentRenderer.literalListIndent(lines, index: index) { lists.append(item) }
             }
             followsBlank = blank
             if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
@@ -103,6 +103,21 @@ enum MarkdownLiteral {
             } else { i += 1; j += 1 }
         }
         return counts
+    }
+
+    /// Keep the punctuation escape next to its source character when style or
+    /// link delimiters will be inserted between it and the preceding slash.
+    static func escapeProjection(_ text: String, boundaries: Set<Int>, paragraphSeparators: Set<UInt16> = []) -> (after: [Int], before: Set<Int>) {
+        var after = backslashEscapeCounts(text, paragraphSeparators: paragraphSeparators)
+        let source = Array(text.utf16)
+        var before: Set<Int> = []
+        for offset in boundaries where offset > 0 && offset < source.count {
+            if source[offset - 1] == 0x5C, after[offset - 1] >= 2 {
+                after[offset - 1] -= 1
+                before.insert(offset)
+            }
+        }
+        return (after, before)
     }
 
     /// Escape the same joined stream that ConverterResult renders, retaining

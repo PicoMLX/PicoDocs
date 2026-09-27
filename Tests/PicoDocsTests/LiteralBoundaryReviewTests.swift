@@ -3,6 +3,23 @@ import Testing
 @testable import PicoDocs
 
 struct LiteralBoundaryReviewTests {
+    @Test func confirmedBareListsFlushAtTheirExit() async throws {
+        for marker in ["-", "1."] {
+            let source = marker + "\n" + String(repeating: " ", count: marker.count + 1) + "`open\noutside " + #"\* `close"#
+            let result = try await PicoDocsEngine.convert(data: Data(source.utf8), filename: "bare.txt")
+            for format in [ExportFileType.html, .plaintext] { #expect(try DocumentRenderer.render(result, to: format).contains(#"outside \* `close"#)) }
+        }
+    }
+
+    @Test func RTFPunctuationEscapesStayInsideTheirStyleRun() async throws {
+        let rtf = #"{\rtf1\ansi \\\b *\b0 }"#
+        let result = try await PicoDocsEngine.convert(data: Data(rtf.utf8), filename: "styles.rtf")
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == #"\*"#)
+        #expect(try DocumentRenderer.render(result, to: .html).contains(#"\<strong>*</strong>"#))
+        let projection = MarkdownLiteral.escapeProjection(#"\*"#, boundaries: [1])
+        #expect(projection.after == [1, 0]); #expect(projection.before == [1])
+    }
+
     @Test func leavingListsEndsInlineCodeButIndentedContinuationKeepsIt() async throws {
         for marker in ["- ", "1. ", "123. "] {
             let source = marker + "`open\noutside " + #"\* `close"#

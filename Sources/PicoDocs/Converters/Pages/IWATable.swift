@@ -205,7 +205,7 @@ enum IWATable {
     /// needs no further object lookups.
     private struct BodyStorage {
         let units: [UInt16]
-        let escapedBackslashes: [Int]
+        let escapedBackslashes: (after: [Int], before: Set<Int>)
         let paragraphStyles: [(offset: Int, id: UInt64?)]
         let characterStyles: [(offset: Int, id: UInt64?)]
         let smartFields: [(offset: Int, id: UInt64?)]
@@ -236,7 +236,7 @@ enum IWATable {
             guard remainingStyleWork > 0 else { break }
             if let marker = listMarker(of: id, in: objects, remainingWork: &remainingStyleWork) { listMarkers[id] = marker }
         }
-        return BodyStorage(units: Array(text.utf16), escapedBackslashes: MarkdownLiteral.backslashEscapeCounts(text, paragraphSeparators: [0x0A, 0x0D, 0x2029]),
+        return BodyStorage(units: Array(text.utf16), escapedBackslashes: MarkdownLiteral.escapeProjection(text, boundaries: Set(characterStyles.map(\.offset) + smartFields.map(\.offset)), paragraphSeparators: [0x0A, 0x0D, 0x2029]),
                            paragraphStyles: indexedReferences(in: storage, field: 5),
                            characterStyles: characterStyles, smartFields: smartFields,
                            listStyles: listStyles, listRestarts: listRestarts(in: storage),
@@ -515,8 +515,9 @@ enum IWATable {
             var trait: (bold: Bool, italic: Bool)?
             if emphasis { trait = referenceID(at: index, in: body.characterStyles).flatMap { body.traits[$0] } }
             let url = referenceID(at: index, in: body.smartFields).flatMap { body.links[$0] }
+            if body.escapedBackslashes.before.contains(index) { items.append((0x5C, trait?.bold ?? false, trait?.italic ?? false, url)) }
             items.append((unit, trait?.bold ?? false, trait?.italic ?? false, url))
-            for _ in 0..<body.escapedBackslashes[index] { items.append((unit, trait?.bold ?? false, trait?.italic ?? false, url)) }
+            for _ in 0..<body.escapedBackslashes.after[index] { items.append((unit, trait?.bold ?? false, trait?.italic ?? false, url)) }
         }
         var output = ""
         var i = 0
