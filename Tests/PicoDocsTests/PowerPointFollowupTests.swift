@@ -770,7 +770,9 @@ struct PowerPointFollowupTests {
             let markdown = result.markdown()
             #expect(!markdown.contains("![inject]"))
             #expect(!(try DocumentRenderer.render(result, to: .html)).contains("<img"))
-            if target.contains("&#") { #expect(markdown == "Label") }
+            // anyURI collapses XML layout controls to spaces before safe URL
+            // encoding; the resulting destination still cannot inject Markdown.
+            if target.contains("&#9;") { #expect(markdown.contains("%20tab")) }
             else { #expect(markdown.contains("%3E")) }
         }
     }

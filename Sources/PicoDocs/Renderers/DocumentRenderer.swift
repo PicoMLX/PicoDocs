@@ -33,25 +33,30 @@ public enum DocumentRenderer {
         case .html:
             return try renderHTML(result)
         case .xml:
-            return renderXML(result)
+            return try renderXML(result)
         case .csv:
-            return renderCSV(result)
+            return try renderCSV(result)
         }
     }
 
     /// Charge line-array/string slots before footnote and block parsing split
     /// input. Both passes retain line strings; byte-only limits miss empty lines.
-    static func preflightRenderInput(_ result: ConverterResult, maximumBytes: Int = 64 * 1024 * 1024, maximumLines: Int = 100_000) throws {
+    static func preflightRenderInput(_ result: ConverterResult, maximumBytes: Int = 64 * 1024 * 1024, maximumLines: Int = 100_000, markdownFallbackOnly: Bool = false) throws {
         guard maximumBytes >= 0, maximumLines > 0 else { throw PicoDocsError.fileCorrupted }
         var remaining = maximumBytes, lines = 1, sections = 0
         for section in result.sections where section.kind != .image {
             try Task.checkCancellation()
+            if markdownFallbackOnly, let csv = section.metadata["csv"], !csv.isEmpty { continue }
             let bytes = section.markdown.utf8.count
             guard bytes <= remaining else { throw PicoDocsError.fileCorrupted }
             remaining -= bytes
-            for byte in section.markdown.utf8 where byte == 10 {
-                guard lines < maximumLines else { throw PicoDocsError.fileCorrupted }
-                lines += 1
+            var previousWasCR = false
+            for byte in section.markdown.utf8 {
+                if byte == 13 || (byte == 10 && !previousWasCR) {
+                    guard lines < maximumLines else { throw PicoDocsError.fileCorrupted }
+                    lines += 1
+                }
+                previousWasCR = byte == 13
             }
             if sections > 0 {
                 guard lines <= maximumLines - 2, remaining >= 2 else { throw PicoDocsError.fileCorrupted }
@@ -579,7 +584,29 @@ public enum DocumentRenderer {
 
     // MARK: - XML
 
-    private static func renderXML(_ result: ConverterResult) -> String {
+    static func renderXML(_ result: ConverterResult, maximumBytes: Int = 64 * 1024 * 1024) throws -> String {
+        // Admit the entire escaped document, including attributes and wrappers,
+        // before constructing any expanded text. XML uses the HTML entity map.
+        var remaining = max(0, maximumBytes)
+        func charge(_ text: String, escaped: Bool = false) throws {
+            let bytes = escaped ? try htmlEscapedByteCount(text, maximumBytes: remaining) : text.utf8.count
+            guard bytes <= remaining else { throw PicoDocsError.fileCorrupted }
+            remaining -= bytes
+        }
+        try charge("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<document")
+        for (key, value) in [("title", result.title), ("author", result.author)] {
+            if let value { try charge(" " + key + "=\"\""); try charge(value, escaped: true) }
+        }
+        try charge(">\n")
+        for section in result.sections {
+            try Task.checkCancellation()
+            try charge("  <section kind=\"" + section.kind.rawValue + "\"")
+            if let title = section.title { try charge(" title=\"\""); try charge(title, escaped: true) }
+            try charge(">\n    ")
+            try charge(section.markdown, escaped: true)
+            try charge("\n  </section>\n")
+        }
+        try charge("</document>")
         var out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<document"
         if let title = result.title { out += " title=\"\(escapeXMLAttribute(title))\"" }
         if let author = result.author { out += " author=\"\(escapeXMLAttribute(author))\"" }
@@ -602,7 +629,8 @@ public enum DocumentRenderer {
     /// table can't hold embedded newlines/whitespace) is emitted verbatim;
     /// otherwise pipe-table rows become CSV rows and any other non-blank line
     /// becomes a single-field row, so prose isn't silently dropped.
-    private static func renderCSV(_ result: ConverterResult) -> String {
+    private static func renderCSV(_ result: ConverterResult) throws -> String {
+        try preflightRenderInput(result, markdownFallbackOnly: true)
         var parts: [String] = []
         var markdown: [String] = []
         func flush() {
