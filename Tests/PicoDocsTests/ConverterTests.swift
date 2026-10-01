@@ -179,6 +179,92 @@ struct ConverterTests {
             == "word/media/image1.png")
     }
 
+    @Test("DOCX reads paragraph, run, and cell properties from the element itself")
+    func docxOwnProperties() async throws {
+        // An anchor paragraph whose run holds a text box: the box's paragraph is a
+        // bold Heading 1 list item, and a cell holds a nested table with a gridSpan.
+        // None of that may leak onto the anchor paragraph or the outer cell.
+        let document = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" \
+        xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" \
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" \
+        xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body>
+        <w:p><w:r><w:t>Anchor text</w:t><w:drawing><wp:anchor><a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent>\
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>\
+        <w:r><w:rPr><w:b/></w:rPr><w:t>Box heading</w:t></w:r></w:p>\
+        </w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>
+        <w:tbl>\
+        <w:tr><w:tc><w:p><w:r><w:t>Outer A</w:t></w:r></w:p>\
+        <w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val="3"/></w:tcPr><w:p><w:r><w:t>Inner</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:tc>\
+        <w:tc><w:p><w:r><w:t>Outer B</w:t></w:r></w:p></w:tc></w:tr>\
+        <w:tr><w:tc><w:p><w:r><w:t>1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>2</w:t></w:r></w:p></w:tc></w:tr>\
+        </w:tbl>
+        </w:body></w:document>
+        """
+        let docx = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8))])
+        let markdown = try await PicoDocsEngine.convert(data: docx, filename: "anchor.docx").markdown()
+        let blocks = markdown.components(separatedBy: "\n\n")
+        #expect(blocks.first == "Anchor text")                       // not "# **Anchor text**"
+        #expect(blocks.contains("# **Box heading**"))                // the box keeps its own style
+        #expect(markdown.contains("| Outer A<br>Inner | Outer B |\n| --- | --- |\n| 1 | 2 |"))
+    }
+
+    @Test("XLSX keeps each value in its column across blank cells")
+    func xlsxSparseCells() async throws {
+        // Blank cells are absent from a worksheet row. B2, A3, D* and row 4 are
+        // empty; E1/E2 sit past an entirely empty column D.
+        func cell(_ ref: String, _ text: String) -> String {
+            "<c r=\"\(ref)\" t=\"inlineStr\"><is><t>\(text)</t></is></c>"
+        }
+        let sheet = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+        <row r="1">\(cell("A1", "Name"))\(cell("B1", "Team"))\(cell("C1", "Score"))\(cell("E1", "Note"))</row>
+        <row r="2">\(cell("A2", "Alice"))<c r="C2"><v>42</v></c>\(cell("E2", "late"))</row>
+        <row r="3">\(cell("B3", "Ops"))<c r="C3"><v>7</v></c></row>
+        <row r="5"><c r="A5" s="1"/></row>
+        </sheetData></worksheet>
+        """
+        let workbook = Self.xlsx(sheetXML: sheet)
+        let markdown = try await PicoDocsEngine.convert(data: workbook, filename: "sparse.xlsx").markdown()
+        #expect(markdown.contains("""
+        | Name | Team | Score | Note |
+        | --- | --- | --- | --- |
+        | Alice |  | 42 | late |
+        |  | Ops | 7 |  |
+        """))
+        // The empty styled row adds nothing.
+        #expect(!markdown.contains("|  |  |  |  |"))
+    }
+
+    /// A minimal single-sheet XLSX package ("Sheet1") around `sheetXML`.
+    static func xlsx(sheetXML: String) -> Data {
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>\
+        </Relationships>
+        """
+        let workbook = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">\
+        <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>
+        """
+        let workbookRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>\
+        </Relationships>
+        """
+        return PagesConverterTests.makeZip([
+            (name: "_rels/.rels", data: Array(rels.utf8)),
+            (name: "xl/workbook.xml", data: Array(workbook.utf8)),
+            (name: "xl/_rels/workbook.xml.rels", data: Array(workbookRels.utf8)),
+            (name: "xl/worksheets/sheet1.xml", data: Array(sheetXML.utf8)),
+        ])
+    }
+
     @Test("XLSX converts each sheet's cells to Markdown")
     func xlsx() async throws {
         let md = try await PicoDocsEngine.convert(data: Fixture.data("sample", "xlsx"), filename: "sample.xlsx").markdown()
@@ -424,6 +510,33 @@ struct DocumentRendererTests {
         let html = try DocumentRenderer.render(result, to: .html)
         #expect(!html.contains("a\" onmouseover=\"alert"))   // the raw quote cannot close href
         #expect(html.contains("&quot;"))
+    }
+
+    @Test("HTML rendering neutralizes script URLs in links and images")
+    func htmlScriptURLsNeutralized() throws {
+        let markdown = """
+        [a](javascript:alert) [**b**](JaVaScRiPt:alert) [c](java\tscript:alert)
+        [d](vbscript:msgbox) [e](data:text/html;base64,PHNjcmlwdD4=)
+        ![f](javascript:alert) ![g](data:image/svg+xml;base64,PHN2Zz4=)
+        [ok](https://example.com) [mail](mailto:a@example.com) [rel](docs/a:b.html) [frag](#top)
+        ![pic](chart.png)
+        """
+        let html = try DocumentRenderer.render(ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: markdown),
+        ]), to: .html)
+        #expect(!html.lowercased().contains("javascript:"))
+        #expect(!html.contains("java\tscript"))
+        #expect(!html.contains("vbscript:"))
+        #expect(!html.contains("data:text/html"))
+        // The visible text (and its emphasis) survives; only the URL is dropped.
+        #expect(html.contains("<p>a <strong>b</strong> c<br>\nd e<br>\nf <img"))
+        // Safe destinations still render as live links/images.
+        #expect(html.contains("<img src=\"data:image/svg+xml;base64,PHN2Zz4=\" alt=\"g\">"))
+        #expect(html.contains("<a href=\"https://example.com\">ok</a>"))
+        #expect(html.contains("<a href=\"mailto:a@example.com\">mail</a>"))
+        #expect(html.contains("<a href=\"docs/a:b.html\">rel</a>"))
+        #expect(html.contains("<a href=\"#top\">frag</a>"))
+        #expect(html.contains("<img src=\"chart.png\" alt=\"pic\">"))
     }
 
     @Test("Table cells round-trip backslashes and escaped pipes")

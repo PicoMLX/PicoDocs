@@ -189,8 +189,12 @@ public struct WordConverter: DocumentConverter {
     // MARK: - Paragraphs
 
     static func renderParagraph(_ paragraph: Element, relationships: [String: String]) -> String? {
-        let style = try? paragraph.getElementsByTag("w:pStyle").first()?.attr("w:val")
-        let isListItem = (try? paragraph.getElementsByTag("w:numPr").first()) != nil
+        // Read the paragraph's *own* properties: a descendant search would also
+        // reach paragraphs inside a text box anchored in this one, making the
+        // anchor paragraph inherit the box's heading style or list membership.
+        let properties = child(of: paragraph, named: "w:ppr")
+        let style = properties.flatMap { child(of: $0, named: "w:pstyle") }.flatMap { try? $0.attr("w:val") }
+        let isListItem = properties.flatMap { child(of: $0, named: "w:numpr") } != nil
         let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return nil }
 
@@ -257,7 +261,8 @@ public struct WordConverter: DocumentConverter {
     }
 
     static func renderRun(_ run: Element, relationships: [String: String]) -> String {
-        let properties = try? run.getElementsByTag("w:rPr").first()
+        // The run's own `w:rPr` only — not one from a text box drawn inside it.
+        let properties = child(of: run, named: "w:rpr")
         let bold = isFormattingEnabled(properties, tag: "w:b")
         let italic = isFormattingEnabled(properties, tag: "w:i")
 
@@ -381,11 +386,18 @@ public struct WordConverter: DocumentConverter {
         return md
     }
 
-    /// Number of grid columns a table cell spans (`w:gridSpan`); 1 if absent.
+    /// Number of grid columns a table cell spans (`w:tcPr/w:gridSpan`); 1 if
+    /// absent. Only the cell's own properties count, not a nested table's.
     private static func gridSpan(of cell: Element) -> Int {
-        guard let value = try? cell.getElementsByTag("w:gridSpan").first()?.attr("w:val"),
+        guard let properties = child(of: cell, named: "w:tcpr"),
+              let value = child(of: properties, named: "w:gridspan").flatMap({ try? $0.attr("w:val") }),
               let span = Int(value) else { return 1 }
         return max(1, span)
+    }
+
+    /// The first direct child of `element` with the given (lowercased) tag name.
+    private static func child(of element: Element, named tag: String) -> Element? {
+        element.children().first { $0.tagName().lowercased() == tag }
     }
 
     // MARK: - Relationships (hyperlink targets)
@@ -630,18 +642,10 @@ public struct WordConverter: DocumentConverter {
     }
 
     // MARK: - Archive helpers
-    // (mirror EPUBConverter's; candidates for a shared ZIP utility later.)
+    // (entry reads go through the shared, size-hardened ZIPEntryReader.)
 
     static func readEntry(_ archive: Archive, path: String) -> Data? {
-        let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        guard let entry = archive[cleanPath] else { return nil }
-        var data = Data(capacity: Int(entry.uncompressedSize))
-        do {
-            _ = try archive.extract(entry) { data.append($0) }
-        } catch {
-            return nil
-        }
-        return data
+        ZIPEntryReader.read(archive, path: path)
     }
 
     static func decodeText(_ data: Data) -> String? {
