@@ -35,17 +35,20 @@ enum ZIPEntryReader {
     ///   ZIPFoundation read past the end of the archive, handing back empty chunks
     ///   for up to `size / chunkSize` iterations; the first empty chunk of a
     ///   non-empty entry ends the read instead.
-    static func read(_ archive: Archive, path: String) -> Data? {
+    static func read(_ archive: Archive, path: String, maxBytes: Int = Int.max) -> Data? {
         let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
         guard let entry = archive[cleanPath] else { return nil }
         let archiveSize = UInt64(archive.data?.count ?? Int.max)
         guard entry.compressedSize <= archiveSize,
               entry.isCompressed || entry.uncompressedSize <= archiveSize else { return nil }
+        guard maxBytes >= 0, entry.uncompressedSize <= UInt64(maxBytes) else { return nil }
         let declaredSize = entry.uncompressedSize
         var data = Data(capacity: Int(min(declaredSize, maxReservation)))
         do {
             _ = try archive.extract(entry) { chunk in
                 if chunk.isEmpty, declaredSize > 0 { throw TruncatedEntry() }
+                try Task.checkCancellation()
+                guard chunk.count <= maxBytes - data.count else { throw TruncatedEntry() }
                 data.append(chunk)
             }
         } catch {

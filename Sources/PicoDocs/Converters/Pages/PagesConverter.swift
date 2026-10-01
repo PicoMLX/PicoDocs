@@ -136,13 +136,24 @@ public struct PagesConverter: DocumentConverter {
     /// failing that — from a nested `Index.zip`. A present-but-unreadable main
     /// story (`Document.iwa`) is treated as corruption; auxiliary entries that
     /// fail to extract are skipped leniently.
-    static func iwaComponents(in archive: Archive) throws -> [Component] {
+    static func iwaComponents(in archive: Archive, maximumEntryBytes: Int = Int.max, maximumTotalBytes: Int = Int.max) throws -> [Component] {
         var components: [Component] = []
+        var remaining = maximumTotalBytes
+        func readBounded(_ archive: Archive, path: String) throws -> Data? {
+            try Task.checkCancellation()
+            guard let entry = archive[path] else { return nil }
+            let limit = min(maximumEntryBytes, remaining)
+            guard limit >= 0, entry.uncompressedSize <= UInt64(limit) else { throw PicoDocsError.fileCorrupted }
+            let data = ZIPEntryReader.read(archive, path: path, maxBytes: limit)
+            try Task.checkCancellation()
+            if let data { remaining -= data.count }
+            return data
+        }
         // Loose layout is `Index/*.iwa`; scope the scan to that path so a stray
         // outer `.iwa` can't shadow the nested `Index.zip` body below.
         for entry in archive where entry.type == .file
             && entry.path.hasPrefix("Index/") && entry.path.hasSuffix(".iwa") {
-            guard let data = Self.readEntry(archive, path: entry.path) else {
+            guard let data = try readBounded(archive, path: entry.path) else {
                 if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
                 continue
             }
@@ -154,12 +165,12 @@ public struct PagesConverter: DocumentConverter {
         // is present but can't be read/opened, the file is corrupt — not an
         // unsupported layout — so surface that distinctly.
         if archive["Index.zip"] != nil {
-            guard let indexZip = Self.readEntry(archive, path: "Index.zip"),
+            guard let indexZip = try readBounded(archive, path: "Index.zip"),
                   let inner = Archive(data: indexZip, accessMode: .read) else {
                 throw PicoDocsError.fileCorrupted
             }
             for entry in inner where entry.type == .file && entry.path.hasSuffix(".iwa") {
-                guard let data = Self.readEntry(inner, path: entry.path) else {
+                guard let data = try readBounded(inner, path: entry.path) else {
                     if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
                     continue
                 }

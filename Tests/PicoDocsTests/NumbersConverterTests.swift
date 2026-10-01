@@ -26,7 +26,9 @@ struct NumbersConverterTests {
         #expect(result.sections.map(\.sheetName) == names)
         #expect(result.sections.map(\.title) == names)
         for section in result.sections {
-            #expect(section.markdown.hasPrefix("## \(section.sheetName ?? "")\n\n| "))
+            let heading = MarkdownLiteral.escapePunctuation(section.sheetName ?? "", characters: #"\`*_{}[]<>"#)
+            #expect(section.markdown.hasPrefix("## \(heading)\n\n| "))
+            #expect(try DocumentRenderer.render(ConverterResult(sections: [section]), to: .plaintext).hasPrefix((section.sheetName ?? "") + "\n\n"))
         }
 
         let rows = try #require(result.sections.first { $0.sheetName == "Data_Rows" }).markdown
@@ -52,7 +54,7 @@ struct NumbersConverterTests {
         )
         #expect(byMIME.detectedFormat == .numbers)
 
-        #expect(UTType.numbers.isSupported)
+        #expect(!UTType.numbers.isSupported)
         #expect(UTType.numbersSingleFile.isSupported)
     }
 

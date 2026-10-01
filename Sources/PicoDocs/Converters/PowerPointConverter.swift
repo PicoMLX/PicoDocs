@@ -87,7 +87,7 @@ public struct PowerPointConverter: DocumentConverter {
         parts.styles.register(presentation)
         for (index, slidePath) in slidePaths.enumerated() {
             try Task.checkCancellation()
-            guard let slide = Self.xml(archive, path: slidePath), slide.children().first()?.tagName().lowercased() == "p:sld" else { try archive.check(); throw PicoDocsError.fileCorrupted }
+            guard let slide = parts.document(slidePath, root: "p:sld", cache: false), slide.children().first()?.tagName().lowercased() == "p:sld" else { try archive.check(); throw PicoDocsError.fileCorrupted }
             let relationships = Self.relationships(archive, forPart: slidePath)
             var context = SlideContext(archive: archive, partPath: slidePath, relationships: relationships, images: images)
             let renderBudget = RenderBudget(maximumBytes: remainingRenderedBytes - slidePath.utf8.count, archive: archive)
@@ -323,7 +323,7 @@ public struct PowerPointConverter: DocumentConverter {
         var styles = StyleChildCache()
     }
 
-    /// Parses each shared part (layouts, masters) once per deck.
+    /// Caches shared parts and charges every slide/notes parse to one deck budget.
     struct PartCache {
         let archive: PowerPointPackage
         private var documents: [String: Document?] = [:]
@@ -339,7 +339,7 @@ public struct PowerPointConverter: DocumentConverter {
             let parsed: Document?
             if cache, let cached = documents[path] { parsed = cached }
             else {
-                parsed = PowerPointConverter.xml(archive, path: path, budget: cache ? budget : nil)
+                parsed = PowerPointConverter.xml(archive, path: path, budget: budget)
                 if cache { documents[path] = parsed; if let parsed { styles.register(parsed) } }
             }
             guard let parsed, parsed.children().first()?.tagName().lowercased() == root else {
@@ -954,14 +954,14 @@ public struct PowerPointConverter: DocumentConverter {
         if let budget {
             var bytes = text.utf8.count
             guard budget.fits(bytes) else { return "" }
-            for character in text where #"\`*_{}[]<>&"#.contains(character) {
+            for scalar in text.unicodeScalars where #"\`*_{}[]<>&"#.unicodeScalars.contains(scalar) {
                 guard budget.admit(1, retained: &bytes) else { return "" }
             }
         }
         var out = ""
-        for character in text {
-            if #"\`*_{}[]<>&"#.contains(character) { out.append("\\") }
-            out.append(character)
+        for scalar in text.unicodeScalars {
+            if #"\`*_{}[]<>&"#.unicodeScalars.contains(scalar) { out.append("\\") }
+            out.unicodeScalars.append(scalar)
         }
         return out
     }

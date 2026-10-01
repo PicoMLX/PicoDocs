@@ -80,9 +80,16 @@ enum IWATable {
     /// Keynote place each table with its slide instead of appending all at the end.
     static func tablesBySlide(slideIDs: [UInt64], in streams: [[UInt8]],
                               excludingSubgraphs blocked: Set<UInt64>) -> [UInt64: [String]] {
+        attributedTables(rootIDs: slideIDs, in: streams, excludingSubgraphs: blocked).byRoot
+    }
+
+    /// Preserve unclaimed tile identities as well as attributed ones. Identical
+    /// rendered tables can belong to different physical table objects.
+    static func attributedTables(rootIDs slideIDs: [UInt64], in streams: [[UInt8]],
+                                 excludingSubgraphs blocked: Set<UInt64>) -> (byRoot: [UInt64: [String]], unclaimed: [String]) {
         let objects = buildObjects(streams)
         let tableMarkdown = reconstructTables(objects)
-        guard !tableMarkdown.isEmpty else { return [:] }
+        guard !tableMarkdown.isEmpty else { return ([:], []) }
         let tiles = Set(tableMarkdown.keys)
 
         var result: [UInt64: [String]] = [:]
@@ -95,7 +102,7 @@ enum IWATable {
             }
             if !markdowns.isEmpty { result[slideID] = markdowns }
         }
-        return result
+        return (result, tableMarkdown.keys.sorted().filter { !claimed.contains($0) }.compactMap { tableMarkdown[$0] })
     }
 
     /// Bounded breadth-first walk from a root object collecting every

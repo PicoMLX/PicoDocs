@@ -33,10 +33,11 @@ public struct NumbersConverter: DocumentConverter {
     }
 
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
+        try Task.checkCancellation()
         guard let archive = Archive(data: data, accessMode: .read) else {
             throw PicoDocsError.fileCorrupted
         }
-        let components = try PagesConverter.iwaComponents(in: archive)
+        let components = try PagesConverter.iwaComponents(in: archive, maximumEntryBytes: 32 * 1024 * 1024, maximumTotalBytes: 128 * 1024 * 1024)
         guard !components.isEmpty else {
             // Likely a legacy iWork '09 package — not supported.
             throw PicoDocsError.documentTypeNotSupported
@@ -46,13 +47,17 @@ public struct NumbersConverter: DocumentConverter {
         // list, so its failure is corruption; auxiliary streams are skipped
         // leniently (a table whose tiles are lost is simply not reconstructed).
         var streams: [[UInt8]] = []
+        var remainingDecodedBytes = 128 * 1024 * 1024
         var documentStream: [UInt8]?
         for component in components {
             try Task.checkCancellation()
             do {
-                let stream = try Snappy.decompressIWA(component.bytes)
+                let stream = try Snappy.decompressIWA(component.bytes, maximumOutputBytes: min(32 * 1024 * 1024, remainingDecodedBytes))
                 if component.name.hasSuffix("Document.iwa") { documentStream = stream }
+                remainingDecodedBytes -= stream.count
                 streams.append(stream)
+            } catch Snappy.SnappyError.outputLimitExceeded { throw PicoDocsError.fileCorrupted
+            } catch is CancellationError { throw CancellationError()
             } catch {
                 if component.name.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
             }
@@ -60,20 +65,17 @@ public struct NumbersConverter: DocumentConverter {
         guard let documentStream else { throw PicoDocsError.fileCorrupted }
 
         let sheets = Self.sheets(in: IWAArchive.objects(in: documentStream))
-        let tablesBySheet = IWATable.tablesBySlide(slideIDs: sheets.map(\.id), in: streams, excludingSubgraphs: [])
+        let attribution = IWATable.attributedTables(rootIDs: sheets.map(\.id), in: streams, excludingSubgraphs: [])
 
         var sections: [DocumentSection] = []
         for sheet in sheets {
-            guard let tables = tablesBySheet[sheet.id], !tables.isEmpty else { continue }
+            guard let tables = attribution.byRoot[sheet.id], !tables.isEmpty else { continue }
             var markdown = tables.joined(separator: "\n\n")
-            if let name = sheet.name { markdown = "## \(name)\n\n" + markdown }
+            if let name = sheet.name { markdown = "## " + MarkdownLiteral.escapePunctuation(name, characters: #"\`*_{}[]<>"#).replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ") + "\n\n" + markdown }
             sections.append(DocumentSection(title: sheet.name, kind: .sheet, markdown: markdown, sheetName: sheet.name))
         }
-        // Sheets couldn't be resolved (unexpected layout): keep every table
-        // rather than dropping the workbook's content.
-        if sections.isEmpty {
-            sections = IWATable.markdownTables(from: streams).map { DocumentSection(kind: .sheet, markdown: $0) }
-        }
+        // Partial reachability must not drop the remaining physical tables.
+        sections += attribution.unclaimed.map { DocumentSection(kind: .sheet, markdown: $0) }
 
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
         let title = (info.filename?.isEmpty == false) ? info.filename : nil

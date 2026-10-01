@@ -759,12 +759,23 @@ public enum DocumentRenderer {
     private static let htmlWhitespaceReference = try! NSRegularExpression(pattern: #"&amp;#([0-9]{1,7});"#)
     private static func restoreWhitespaceReferences(_ text: String, html: Bool) -> String {
         let source = text as NSString
-        var output = "", last = 0
+        var output = "", last = 0, inTag = false
         (html ? htmlWhitespaceReference : whitespaceReference).enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, _ in
             guard let match, let value = UInt32(source.substring(with: match.range(at: 1))),
                   let scalar = UnicodeScalar(value), CharacterSet.whitespaces.contains(scalar) else { return }
-            output += source.substring(with: NSRange(location: last, length: match.range.location - last))
-            output += html ? "&#\(value);" : String(scalar)
+            let preceding = source.substring(with: NSRange(location: last, length: match.range.location - last))
+            if html {
+                // References in href/src/IDs are attribute data, never text spans.
+                for character in preceding {
+                    if character == "<" { inTag = true }
+                    else if character == ">" { inTag = false }
+                }
+            }
+            output += preceding
+            if html {
+                output += inTag ? source.substring(with: match.range)
+                    : "<span style=\"white-space:pre-wrap\">&#\(value);</span>"
+            } else { output.unicodeScalars.append(scalar) }
             last = match.range.location + match.range.length
         }
         output += source.substring(from: last)
