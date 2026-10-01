@@ -40,32 +40,41 @@ enum HTMLToMarkdown {
 
     // MARK: - Walking
 
-    private static func renderChildren(of node: Node, into out: inout String, preserveWhitespace: Bool = false) {
+    private static func renderChildren(of node: Node, into out: inout String, preserveWhitespace: Bool = false, inList: Bool = false, depth: Int = 0) {
         for child in node.getChildNodes() {
-            render(child, into: &out, preserveWhitespace: preserveWhitespace)
+            render(child, into: &out, preserveWhitespace: preserveWhitespace, inList: inList, depth: depth + 1)
         }
     }
 
     /// Renders an element's children to a trimmed inline string (whitespace
     /// collapsed — used for headings, links, emphasis, etc.).
-    private static func inlineString(_ element: Element) -> String {
+    private static func inlineString(_ element: Element, inList: Bool, depth: Int) -> String {
         var s = ""
-        renderChildren(of: element, into: &s)
-        return collapseWhitespace(s).trimmingCharacters(in: .whitespaces)
+        renderChildren(of: element, into: &s, inList: inList, depth: depth)
+        return collapseWhitespace(consumeListBoundaries(s)).trimmingCharacters(in: .whitespaces)
     }
 
-    private static func render(_ node: Node, into out: inout String, preserveWhitespace: Bool = false) {
+    /// Flattened contexts cannot carry block metadata. Literal source text is
+    /// already escaped; semantic code must retain a marker-looking literal.
+    private static func consumeListBoundaries(_ markdown: String) -> String {
+        MarkdownTableCell.mapCodeSpans(markdown, code: { $0 }, plain: {
+            $0.replacingOccurrences(of: MarkdownLiteral.listRestartBoundary, with: "")
+        })
+    }
+
+    private static func render(_ node: Node, into out: inout String, preserveWhitespace: Bool = false, inList: Bool = false, depth: Int = 0) {
+        // Bound semantic recursion while retaining all visible text from an
+        // unusually deep subtree. The fallback traversal itself is iterative.
+        guard depth < 64 else {
+            let text = flattenedText(node)
+            out += preserveWhitespace ? text : escapeLiteral(collapseWhitespace(text), blockSyntax: inList)
+            return
+        }
         if let text = node as? TextNode {
             let whole = text.getWholeText()
-            if preserveWhitespace { out += whole }
-            else {
-                var escaped = ""
-                for scalar in collapseWhitespace(whole).unicodeScalars {
-                    if #"\`*_{}[]<>"#.unicodeScalars.contains(scalar) { escaped.append("\\") }
-                    escaped.unicodeScalars.append(scalar)
-                }
-                out += MarkdownList.escapeBareMarkerText(escaped)
-            }
+            // Canonical Markdown must distinguish literal source characters
+            // from markup emitted by semantic HTML tags.
+            out += preserveWhitespace ? whole : escapeLiteral(collapseWhitespace(whole), blockSyntax: inList)
             return
         }
         guard let element = node as? Element else { return }
@@ -76,7 +85,7 @@ enum HTMLToMarkdown {
 
         case "h1", "h2", "h3", "h4", "h5", "h6":
             let level = Int(element.tagName().dropFirst()) ?? 1
-            let text = inlineString(element)
+            let text = inlineString(element, inList: inList, depth: depth)
             if !text.isEmpty { out += "\n\n\(String(repeating: "#", count: level)) \(text)\n\n" }
 
         case "br":
@@ -86,16 +95,16 @@ enum HTMLToMarkdown {
             out += "\n\n---\n\n"
 
         case "strong", "b":
-            let t = inlineString(element)
+            let t = inlineString(element, inList: inList, depth: depth)
             if !t.isEmpty { out += "**\(t)**" }
 
         case "em", "i":
-            let t = inlineString(element)
+            let t = inlineString(element, inList: inList, depth: depth)
             if !t.isEmpty { out += "*\(t)*" }
 
         case "code":
             if element.parent()?.tagName().lowercased() == "pre" {
-                renderChildren(of: element, into: &out, preserveWhitespace: true) // inside a fenced block
+                renderChildren(of: element, into: &out, preserveWhitespace: true, inList: inList, depth: depth) // inside a fenced block
             } else {
                 let t = (try? element.text()) ?? ""
                 if !t.isEmpty { out += "`\(t)`" }
@@ -103,29 +112,32 @@ enum HTMLToMarkdown {
 
         case "pre":
             out += "\n\n```\n"
-            renderChildren(of: element, into: &out, preserveWhitespace: true)
+            renderChildren(of: element, into: &out, preserveWhitespace: true, inList: inList, depth: depth)
             out += "\n```\n\n"
 
         case "a":
-            let text = inlineString(element)
-            let href = resolvedURL(element, attribute: "href")
+            let text = inlineString(element, inList: inList, depth: depth)
+            let href = canonicalDestination(resolvedURL(element, attribute: "href"))
             out += (href.isEmpty || text.isEmpty) ? text : "[\(text)](\(href))"
 
         case "img":
-            let alt = (try? element.attr("alt")) ?? ""
-            let src = resolvedURL(element, attribute: "src")
+            let alt = escapeLiteral((try? element.attr("alt")) ?? "", blockSyntax: false)
+            let src = canonicalDestination(resolvedURL(element, attribute: "src"))
             if !src.isEmpty { out += "![\(alt)](\(src))" }
 
-        case "ul":
-            out += "\n\n" + renderList(element, ordered: false) + "\n\n"
-
-        case "ol":
-            out += "\n\n" + renderList(element, ordered: true) + "\n\n"
+        case "ul", "ol":
+            let list = renderList(element, ordered: element.tagName().lowercased() == "ol", depth: depth)
+            guard !list.isEmpty else { return }
+            // Each semantic element starts a distinct list, including lists in
+            // transparent containers or adjacent child lists inside one item.
+            // Emit the signal without rescanning accumulated output per list.
+            // Normalization drops it at the beginning of a new block scope.
+            out += "\n\n" + MarkdownLiteral.listRestartBoundary + "\n\n" + list + "\n\n"
 
         case "blockquote":
             var inner = ""
-            renderChildren(of: element, into: &inner, preserveWhitespace: preserveWhitespace)
-            let quoted = normalizeBlankLines(inner)
+            renderChildren(of: element, into: &inner, preserveWhitespace: preserveWhitespace, inList: inList, depth: depth)
+            let quoted = normalizeBlankLines(consumeListBoundaries(inner))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .components(separatedBy: "\n")
                 .map { $0.isEmpty ? ">" : "> \($0)" }
@@ -133,17 +145,58 @@ enum HTMLToMarkdown {
             if !quoted.isEmpty { out += "\n\n\(quoted)\n\n" }
 
         case "table":
-            let table = renderTable(element)
+            let table = renderTable(element, inList: inList, depth: depth)
             if !table.isEmpty { out += "\n\n\(table)\n\n" }
 
         case "p", "div", "section", "article", "main", "header", "footer", "figure", "figcaption":
-            var content = ""
-            renderChildren(of: element, into: &content, preserveWhitespace: preserveWhitespace)
-            out += "\n\n" + MarkdownList.escapeBareMarkerText(content) + "\n\n"
+            out += "\n\n"
+            renderChildren(of: element, into: &out, preserveWhitespace: preserveWhitespace, inList: inList, depth: depth)
+            out += "\n\n"
 
         default:
-            renderChildren(of: element, into: &out, preserveWhitespace: preserveWhitespace)
+            renderChildren(of: element, into: &out, preserveWhitespace: preserveWhitespace, inList: inList, depth: depth)
         }
+    }
+
+    private static func flattenedText(_ root: Node) -> String {
+        // Enter/exit events preserve separation on both sides of block elements
+        // without recursively walking an adversarially deep tree.
+        let boundaries: Set<String> = ["address", "article", "aside", "blockquote", "br", "caption", "dd", "details", "dialog", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr", "legend", "li", "main", "menu", "nav", "ol", "p", "pre", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul"]
+        var pending: [(Node, Bool)] = [(root, false)], output = ""
+        while let (node, exiting) = pending.popLast() {
+            if exiting { output += " "; continue }
+            if let text = node as? TextNode { output += text.getWholeText(); continue }
+            if let element = node as? Element {
+                let tag = element.tagName().lowercased()
+                if ["script", "style", "noscript", "head", "title", "meta", "link", "svg"].contains(tag) { continue }
+                if boundaries.contains(tag) { output += " "; pending.append((node, true)) }
+                if tag == "img" { output += (try? element.attr("alt")) ?? "" }
+            }
+            pending.append(contentsOf: node.getChildNodes().reversed().map { ($0, false) })
+        }
+        return output
+    }
+
+    private static func canonicalDestination(_ url: String) -> String {
+        let escaped = url.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E")
+        return escaped.contains(where: { $0.isWhitespace || $0 == "(" || $0 == ")" }) ? "<\(escaped)>" : escaped
+    }
+
+    private static func escapeLiteral(_ text: String, blockSyntax: Bool) -> String {
+        let punctuation = blockSyntax ? #"\`*_{}[]<>()#+-.!|"# : #"\`*_{}[]<>"#
+        return MarkdownLiteral.escapePunctuation(text, characters: punctuation)
+    }
+
+    /// Cell content already carries canonical inline escapes. Add only missing
+    /// pipe escapes; doubling existing backslashes would create visible slashes.
+    private static func escapeTablePipes(_ text: String) -> String {
+        var output = "", escaped = false
+        for character in text.unicodeScalars {
+            if character == "|", !escaped { output.append("\\") }
+            output.unicodeScalars.append(character)
+            escaped = character == "\\" && !escaped
+        }
+        return output
     }
 
     /// Resolves an element attribute to an absolute URL (against the parse base
@@ -155,12 +208,12 @@ enum HTMLToMarkdown {
         return (try? element.attr(attribute)) ?? ""
     }
 
-    private static func renderList(_ element: Element, ordered: Bool) -> String {
+    private static func renderList(_ element: Element, ordered: Bool, depth: Int) -> String {
         var lines: [String] = []
         var index = 1
         for child in element.children().array() where child.tagName().lowercased() == "li" {
             var itemBody = ""
-            renderChildren(of: child, into: &itemBody)
+            renderChildren(of: child, into: &itemBody, inList: true, depth: depth)
             let text = normalizeBlankLines(itemBody).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { continue }
             let marker = ordered ? "\(index). " : "- "
@@ -174,7 +227,7 @@ enum HTMLToMarkdown {
         return lines.joined(separator: "\n")
     }
 
-    private static func renderTable(_ element: Element) -> String {
+    private static func renderTable(_ element: Element, inList: Bool, depth: Int) -> String {
         var rows: [[String]] = []
         let trs = (try? element.select("tr"))?.array() ?? []
         for tr in trs {
@@ -185,8 +238,13 @@ enum HTMLToMarkdown {
                 // images / emphasis survive; collapse to a single line (table
                 // cells can't contain newlines) and escape pipes.
                 var rendered = ""
-                renderChildren(of: cell, into: &rendered)
-                return MarkdownTableCell.escapeCanonicalDelimiters(collapseWhitespace(rendered).trimmingCharacters(in: .whitespaces))
+                renderChildren(of: cell, into: &rendered, inList: inList, depth: depth)
+                // A table cell flattens block structure to inline text. Consume
+                // generated list metadata before that marker can become visible.
+                rendered = consumeListBoundaries(rendered)
+                return MarkdownTableCell.escapeCanonicalDelimiters(
+                    collapseWhitespace(rendered).trimmingCharacters(in: .whitespaces)
+                )
             })
         }
         guard !rows.isEmpty else { return "" }
@@ -210,6 +268,11 @@ enum HTMLToMarkdown {
 
     /// Collapses 3+ consecutive newlines down to a paragraph break.
     private static func normalizeBlankLines(_ s: String) -> String {
-        s.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+        var output = s.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+        if let start = output.firstIndex(where: { !$0.isWhitespace }), output[start...].hasPrefix(MarkdownLiteral.listRestartBoundary) {
+            let end = output.index(start, offsetBy: MarkdownLiteral.listRestartBoundary.count)
+            output.removeSubrange(start..<end)
+        }
+        return output
     }
 }

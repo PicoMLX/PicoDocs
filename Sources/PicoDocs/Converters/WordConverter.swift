@@ -35,10 +35,8 @@ public struct WordConverter: DocumentConverter {
             throw PicoDocsError.emptyDocument
         }
 
-        var blocks = try Self.renderBlocks(in: body, relationships: relationships)
-        // Text boxes (shapes with text) store their content in `w:txbxContent`
-        // outside the normal block flow; extract it and append as body blocks.
-        blocks += try Self.extractTextBoxes(from: body, relationships: relationships)
+        let numbering = WordListNumbering(archive: archive)
+        let blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering)
         var markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Footnote/endnote text lives in separate parts; append the referenced
@@ -47,7 +45,7 @@ public struct WordConverter: DocumentConverter {
         //
         // NOTE: these are CommonMark footnote markers in the canonical Markdown;
         // DocumentRenderer also renders them for the HTML and plaintext exports.
-        let notes = Self.parseNotes(archive)
+        let notes = try Self.parseNotes(archive)
         let definitions = Self.referencedNoteIDs(in: body).compactMap { id in
             notes[id].map { text in
                 // Indent continuation lines (from a manual w:br inside the note) so
@@ -95,22 +93,35 @@ public struct WordConverter: DocumentConverter {
     /// Renders the block-level children of a container (the body, or a content
     /// control's content) to Markdown blocks, recursing into `w:sdt` content
     /// controls (forms/templates wrap paragraphs and tables in them).
-    static func renderBlocks(in container: Element, relationships: [String: String]) throws -> [String] {
+    static func renderBlocks(in container: Element, relationships: [String: String],
+                             numbering: WordListNumbering? = nil) throws -> [String] {
         var blocks: [String] = []
         for element in container.children().array() {
             try Task.checkCancellation()
             switch element.tagName().lowercased() {
             case "w:p":
-                if let markdown = renderParagraph(element, relationships: relationships), !markdown.isEmpty {
+                defer {
+                    if child(of: element, named: "w:ppr").flatMap({ child(of: $0, named: "w:sectpr") }) != nil { numbering?.sectionBreak() }
+                }
+                if let markdown = renderParagraph(element, relationships: relationships, numbering: numbering), !markdown.isEmpty {
                     blocks.append(markdown)
                 }
+                blocks += try extractTextBoxes(from: element, relationships: relationships, numbering: numbering)
+            case "w:sectpr":
+                numbering?.sectionBreak()
             case "w:tbl":
-                let table = renderTable(element, relationships: relationships)
+                var boxes: [String] = []
+                let table = try renderTable(element, relationships: relationships, numbering: numbering) { paragraph in
+                    boxes += try extractTextBoxes(from: paragraph, relationships: relationships, numbering: numbering)
+                }
                 if !table.isEmpty { blocks.append(table) }
+                blocks += boxes
             case "w:sdt":
                 if let content = try? element.getElementsByTag("w:sdtContent").first() {
-                    blocks.append(contentsOf: try renderBlocks(in: content, relationships: relationships))
+                    blocks.append(contentsOf: try renderBlocks(in: content, relationships: relationships, numbering: numbering))
                 }
+            case "w:customxml", "w:ins", "w:moveto", "w:smarttag":
+                blocks += try renderBlocks(in: element, relationships: relationships, numbering: numbering)
             default:
                 continue
             }
@@ -123,13 +134,14 @@ public struct WordConverter: DocumentConverter {
     /// blocks. Honors markup-compatibility (`mc:AlternateContent`) semantics by
     /// rendering only one branch per AlternateContent, so a text box isn't
     /// duplicated across `mc:Choice`/`mc:Fallback` (or multiple choices).
-    static func extractTextBoxes(from body: Element, relationships: [String: String]) throws -> [String] {
+    static func extractTextBoxes(from body: Element, relationships: [String: String],
+                                 numbering: WordListNumbering? = nil) throws -> [String] {
         var blocks: [String] = []
         // Iterate the Elements sequence directly (no intermediate array copy).
         guard let textBoxes = try? body.getElementsByTag("w:txbxContent") else { return blocks }
         for txbx in textBoxes {
-            if !shouldRenderTextBox(txbx) { continue }
-            blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships))
+            if !shouldRenderTextBox(txbx) || isInsideTextBox(txbx, before: body) { continue }
+            blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships, numbering: numbering))
         }
         return blocks
     }
@@ -188,23 +200,39 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Paragraphs
 
-    static func renderParagraph(_ paragraph: Element, relationships: [String: String]) -> String? {
+    /// A paragraph as Markdown: a heading (from its style), a list item (marker
+    /// and nesting from `numbering`; without one, any `w:numPr` is a plain bullet),
+    /// or plain text. Nil when it holds no text.
+    static func renderParagraph(_ paragraph: Element, relationships: [String: String],
+                                numbering: WordListNumbering? = nil) -> String? {
         // Read the paragraph's *own* properties: a descendant search would also
         // reach paragraphs inside a text box anchored in this one, making the
         // anchor paragraph inherit the box's heading style or list membership.
         let properties = child(of: paragraph, named: "w:ppr")
         let style = properties.flatMap { child(of: $0, named: "w:pstyle") }.flatMap { try? $0.attr("w:val") }
-        let isListItem = properties.flatMap { child(of: $0, named: "w:numpr") } != nil
+        let numPr = properties.flatMap { child(of: $0, named: "w:numpr") }
         let text = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return nil }
+        let heading: Int?
+        if let numbering { heading = numbering.headingLevel(style: style, paragraphProperties: properties) }
+        else { heading = headingLevel(forStyle: style) }
+        let prefix: String?
+        if let numbering {
+            prefix = numbering.prefix(numPr: numPr, style: style, visibleMarker: heading == nil, paragraphProperties: properties)
+                ?? (numPr?.children().size() == 0 ? "- " : nil)
+        } else { prefix = numPr != nil ? "- " : nil }
+        let boundary = numbering?.listRestartIndent.map {
+            String(repeating: " ", count: $0) + MarkdownLiteral.listRestartBoundary + "\n\n"
+        } ?? ""
+        guard !text.isEmpty else { return heading == nil ? prefix.map { boundary + $0 } : nil }
 
-        if let level = headingLevel(forStyle: style) {
+        if let level = heading {
             return String(repeating: "#", count: level) + " " + text
         }
-        if isListItem {
-            return "- " + text
-        }
-        return MarkdownList.escapeBareMarkerText(text)
+        guard let prefix else { return text }
+        // Preserve Word's marker width while protecting literal continuation blocks.
+        let continuation = "\n" + String(repeating: " ", count: WordListNumbering.displayWidth(prefix))
+        return boundary + prefix + text.components(separatedBy: "\n")
+            .map { MarkdownLiteral.escapeBlockStart($0) }.joined(separator: continuation)
     }
 
     static func headingLevel(forStyle style: String?) -> Int? {
@@ -261,6 +289,8 @@ public struct WordConverter: DocumentConverter {
     }
 
     static func renderRun(_ run: Element, relationships: [String: String]) -> String {
+        // Source text is escaped once before generated inline formatting.
+
         // The run's own `w:rPr` only — not one from a text box drawn inside it.
         let properties = child(of: run, named: "w:rpr")
         let bold = isFormattingEnabled(properties, tag: "w:b")
@@ -320,7 +350,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     private static func escapeLiteralText(_ text: String) -> String {
-        MarkdownTableCell.escapeLiteral(text, punctuation: #"\`*_{}[]<>"#)
+        MarkdownLiteral.escapePunctuation(text, characters: #"\`*_{}[]<>"#)
     }
 
     /// Generated inline content already has escaped source text. Preserve those
@@ -339,11 +369,6 @@ public struct WordConverter: DocumentConverter {
         return result
     }
 
-    private static func escapeLinkLabel(_ text: String) -> String {
-        text.replacingOccurrences(of: "[", with: "\\[")
-            .replacingOccurrences(of: "]", with: "\\]")
-    }
-
     /// Whether `text` is exactly a single Markdown image (produced by an image
     /// run), so a wrapping hyperlink shouldn't escape its brackets. Deliberately
     /// strict (prefix `![` and suffix `)`) so a plain link whose visible text
@@ -353,6 +378,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     private static func escapeLinkDestination(_ url: String) -> String {
+        let url = url.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E")
         // Spaces / parens break inline link destinations; wrap in <> (a valid
         // CommonMark destination form) when present.
         if url.contains(" ") || url.contains("(") || url.contains(")") {
@@ -363,7 +389,7 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Tables
 
-    static func renderTable(_ table: Element, relationships: [String: String]) -> String {
+    static func renderTable(_ table: Element, relationships: [String: String], numbering: WordListNumbering? = nil, textBoxes: ((Element) throws -> Void)? = nil) throws -> String {
         var rows: [[String]] = []
         for tr in table.children().array() where tr.tagName().lowercased() == "w:tr" {
             var cells: [String] = []
@@ -377,8 +403,19 @@ public struct WordConverter: DocumentConverter {
                 // own cells still render — see isInsideTextBox.)
                 for paragraph in (try? tc.getElementsByTag("w:p").array()) ?? [] {
                     if isInsideTextBox(paragraph, before: tc) { continue }
+                    let hidden = paragraph.parents().prefix { $0 !== tc }.contains { ["w:del", "w:movefrom"].contains($0.tagName().lowercased()) }
+                    if hidden { continue }
+                    // Table-cell text is flattened, but list state still participates
+                    // in the document sequence, including empty cell paragraphs.
+                    if let numbering {
+                        let properties = child(of: paragraph, named: "w:ppr")
+                        let numPr = properties.flatMap { child(of: $0, named: "w:numpr") }
+                        let style = properties.flatMap { child(of: $0, named: "w:pstyle") }.flatMap { try? $0.attr("w:val") }
+                        _ = numbering.prefix(numPr: numPr, style: style, visibleMarker: false, paragraphProperties: properties)
+                    }
                     let t = renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty { cellText += (cellText.isEmpty ? "" : "\n") + t }
+                    try textBoxes?(paragraph)
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
                 cells.append(MarkdownTableCell.escapeCanonicalDelimiters(cellText)
@@ -442,7 +479,7 @@ public struct WordConverter: DocumentConverter {
     /// Parses footnote and endnote text (stored in separate parts) into a map
     /// keyed by reference id (`fn<id>` / `en<id>`), skipping the auto separator
     /// and continuation notes.
-    static func parseNotes(_ archive: Archive) -> [String: String] {
+    static func parseNotes(_ archive: Archive) throws -> [String: String] {
         var notes: [String: String] = [:]
         // Resolve each note part from its document relationship Target (falling
         // back to the standard name), then render it against that part's own
@@ -453,7 +490,7 @@ public struct WordConverter: DocumentConverter {
         ] {
             let part = relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
             let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part))
-            for (key, value) in parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships) {
+            for (key, value) in try parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships) {
                 notes[key] = value
             }
         }
@@ -462,7 +499,7 @@ public struct WordConverter: DocumentConverter {
 
     /// The Target of the first `document.xml.rels` relationship whose Type ends
     /// with `typeSuffix` (e.g. "/footnotes"); relative to `word/`.
-    private static func relationshipTarget(_ archive: Archive, typeSuffix: String) -> String? {
+    static func relationshipTarget(_ archive: Archive, typeSuffix: String) -> String? {
         guard let data = readEntry(archive, path: "word/_rels/document.xml.rels"),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
@@ -488,22 +525,22 @@ public struct WordConverter: DocumentConverter {
         "separator", "continuationSeparator", "continuationNotice",
     ]
 
-    private static func parseNotePart(_ archive: Archive, path: String, tag: String, prefix: String, relationships: [String: String]) -> [String: String] {
+    private static func parseNotePart(_ archive: Archive, path: String, tag: String, prefix: String, relationships: [String: String]) throws -> [String: String] {
         guard let data = readEntry(archive, path: path),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
             return [:]
         }
+        // Each note part has independent counters from the body and other stories.
+        let numbering = WordListNumbering(archive: archive)
         var notes: [String: String] = [:]
         for note in (try? doc.getElementsByTag(tag).array()) ?? [] {
             guard let id = try? note.attr("w:id"), !id.isEmpty else { continue }
             // Skip only the auto separator/continuation notes; keep ordinary
             // referenced notes even when explicitly typed "normal".
             if let type = try? note.attr("w:type"), separatorNoteTypes.contains(type) { continue }
-            let text = ((try? note.getElementsByTag("w:p").array()) ?? [])
-                .map { renderInline($0, relationships: relationships).trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-                .joined(separator: " ")
+            let text = try renderBlocks(in: note, relationships: relationships, numbering: numbering)
+                .joined(separator: "\n\n")
             guard !text.isEmpty else { continue }
             notes["\(prefix)\(id)"] = text
         }
@@ -563,7 +600,7 @@ public struct WordConverter: DocumentConverter {
     static func imageMarkdown(in drawing: Element, relationships: [String: String]) -> String {
         guard let target = imageTarget(in: drawing, relationships: relationships) else { return "" }
         let filename = (target as NSString).lastPathComponent
-        return "![\(escapeLinkLabel(imageAltText(in: drawing)))](\(escapeLinkDestination(filename)))"
+        return "![\(escapeLiteralText(imageAltText(in: drawing)))](\(escapeLinkDestination(filename)))"
     }
 
     /// The relationship Target (e.g. "media/image1.png") an image references via

@@ -1228,8 +1228,9 @@ struct PowerPointFollowupTests {
             let source = "-" + String(repeating: " ", count: spaces) + "parent\n  - sibling"
             var index = 0
             let list = try #require(MarkdownList.parse(source.components(separatedBy: "\n"), index: &index))
-            #expect(list.items.count == 2); #expect(list.items.first?.text == "parent")
-            #expect(list.items.allSatisfy { $0.children.isEmpty })
+            #expect(list.items.count == 2)
+            if case .text(let text) = list.items.first?.content.first { #expect(text == "parent") } else { Issue.record("Missing parent text") }
+            #expect(list.items.allSatisfy { item in item.content.allSatisfy { if case .list = $0 { return false }; return true } })
         }
     }
 
@@ -1313,7 +1314,7 @@ struct PowerPointFollowupTests {
         typealias B = PowerPointConverterTests
         for marker in ["-", "*", "+", "1."] {
             let html = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: marker)]), to: .html)
-            #expect(html.contains("<li></li>"))
+            #expect(!html.contains("<li>")) // A lone marker needs attached content to establish a list.
             let shape = B.shape(placeholder: nil, paragraphs: ["<a:p><a:r><a:t>\(marker)</a:t></a:r></a:p>"])
             let result = try await PicoDocsEngine.convert(data: B.deck(slides: [.init(file: "s.xml", shapes: shape)]), filename: "markers.pptx")
             #expect(try DocumentRenderer.render(result, to: .plaintext) == marker)
@@ -1501,12 +1502,12 @@ struct PowerPointFollowupTests {
         }
     }
 
-    @Test func mixedOrderedMarkersAdvanceAndLooseListsKeepBoundaries() throws {
+    @Test func mixedOrderedMarkersRetainSourceValuesInLooseLists() throws {
         let result = ConverterResult(sections: [.init(markdown: "1. First\n1. Second\n2. Third\n10. Gap\n\n11. Separate")])
-        #expect(try DocumentRenderer.render(result, to: .plaintext) == "1. First\n2. Second\n3. Third\n10. Gap\n\n11. Separate")
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == "1. First\n1. Second\n2. Third\n10. Gap\n11. Separate")
         let html = try DocumentRenderer.render(result, to: .html)
-        #expect(html.components(separatedBy: "<ol").count - 1 == 2)
-        #expect(!html.contains(#"value="2""#))
+        #expect(html.components(separatedBy: "<ol").count - 1 == 1)
+        #expect(html.contains(#"value="1""#))
     }
 
     @Test func numberingSchemeChangesClearStartTracking() async throws {
@@ -1576,11 +1577,11 @@ struct PowerPointFollowupTests {
         }
     }
 
-    @Test func unorderedRunsKeepTheirBlankBoundary() throws {
+    @Test func unorderedLooseItemsShareOneList() throws {
         let result = ConverterResult(sections: [.init(markdown: "- First\n- Second\n\n- Separate\n  - Child")])
-        #expect(try DocumentRenderer.render(result, to: .plaintext) == "- First\n- Second\n\n- Separate\n  - Child")
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == "- First\n- Second\n- Separate\n  - Child")
         let html = try DocumentRenderer.render(result, to: .html)
-        #expect(html.components(separatedBy: "<ul>").count - 1 == 3)
+        #expect(html.components(separatedBy: "<ul>").count - 1 == 2)
     }
 
     @Test func misplacedSlideIDsAndNotesTreesAreRejected() async throws {
@@ -1602,13 +1603,13 @@ struct PowerPointFollowupTests {
         await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(entries), filename: "bad-order.pptx") }
     }
 
-    @Test func repeatedMarkersContinueWithinOneMarkdownList() throws {
+    @Test func repeatedMarkersRetainExplicitSourceNumbers() throws {
         let result = ConverterResult(sections: [.init(markdown: "1. First\n1. Second\n1. Third\n10. Gap\n10. Next")])
-        #expect(try DocumentRenderer.render(result, to: .plaintext) == "1. First\n2. Second\n3. Third\n10. Gap\n11. Next")
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == "1. First\n1. Second\n1. Third\n10. Gap\n10. Next")
         let html = try DocumentRenderer.render(result, to: .html)
-        #expect(!html.contains(#"value="1""#)); #expect(html.contains(#"value="10""#))
+        #expect(html.contains(#"value="1""#)); #expect(html.contains(#"value="10""#))
         let restarted = ConverterResult(sections: [.init(markdown: "1. First\n1. Second\n\n1. Restart")])
-        #expect(try DocumentRenderer.render(restarted, to: .plaintext) == "1. First\n2. Second\n\n1. Restart")
+        #expect(try DocumentRenderer.render(restarted, to: .plaintext) == "1. First\n1. Second\n\n1. Restart")
     }
 
     @Test func missingOrMisplacedShapeTreesAreCorrupt() async throws {

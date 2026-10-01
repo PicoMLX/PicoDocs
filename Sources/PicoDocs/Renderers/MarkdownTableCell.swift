@@ -12,19 +12,83 @@
 import Foundation
 
 enum MarkdownTableCell {
-    /// Escape literal scalar punctuation without allocating a String per character.
-    static func escapeLiteral(_ text: String, punctuation: String) -> String {
+    static func escapeCanonicalPipes(_ text: String) -> String {
+        MarkdownLiteral.escapeStructural(text, characters: "|")
+    }
+
+    static func decodeBreaks(_ text: String, breakText: String = "\n") -> String {
+        var brackets = 0, destinationDepth = 0
+        return mapCodeSpans(text, code: { codePipes($0, encoding: false) }, plain: { plain in
+            var output = "", index = plain.startIndex
+            while index < plain.endIndex {
+                let character = plain[index]
+                let next = plain.index(after: index)
+                if character == "\\" {
+                    output.append(character); index = next
+                    if index < plain.endIndex { output.append(plain[index]); index = plain.index(after: index) }
+                    continue
+                }
+                if destinationDepth > 0 {
+                    if character == "(" { destinationDepth += 1 }
+                    if character == ")" { destinationDepth -= 1 }
+                } else if character == "[" { brackets += 1 }
+                else if character == "]", brackets > 0 {
+                    brackets -= 1
+                    if next < plain.endIndex, plain[next] == "(" {
+                        destinationDepth = 1; output += "]("; index = plain.index(after: next); continue
+                    }
+                } else if plain[index...].hasPrefix("<br>") {
+                    output += breakText; index = plain.index(index, offsetBy: 4); continue
+                }
+                output.append(character); index = next
+            }
+            return output
+        })
+    }
+
+    static func inlineText(_ text: String, breakText: String = "\n", inline: (String) -> String) -> String {
+        let protected = protectBreakSentinels(text)
+        return restoreBreakSentinels(inline(decodeBreaks(protected, breakText: breakToken)), breakText: breakText)
+    }
+
+    static func protectBreakSentinels(_ text: String) -> String {
         var output = ""
         for scalar in text.unicodeScalars {
-            if punctuation.unicodeScalars.contains(scalar) { output.append("\\") }
+            output.unicodeScalars.append(scalar)
+            if scalar == "\u{E042}" { output.unicodeScalars.append(scalar) }
+        }
+        return output
+    }
+
+    static func restoreBreakSentinels(_ text: String, breakText: String) -> String {
+        let scalars = text.unicodeScalars
+        var output = "", index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            index = scalars.index(after: index)
+            if scalar == "\u{E042}", index < scalars.endIndex {
+                let next = scalars[index]
+                if next == "\u{E042}" || next == "\u{E044}" {
+                    if next == "\u{E042}" { output.unicodeScalars.append(scalar) }
+                    else { output += breakText }
+                    index = scalars.index(after: index)
+                    continue
+                }
+            }
             output.unicodeScalars.append(scalar)
         }
         return output
     }
 
+    static let breakToken = "\u{E042}\u{E044}"
+
+    static func escapeLiteral(_ text: String, punctuation: String) -> String {
+        MarkdownLiteral.escapePunctuation(text, characters: punctuation)
+    }
+
     /// Transform semantic code spans separately from canonical literal text.
     static func mapCodeSpans(_ text: String, keepDelimiters: Bool = true, code: (String) -> String, plain: (String) -> String) -> String {
-        guard text.contains("`") else { return plain(text) }
+        guard text.unicodeScalars.contains("`") else { return plain(text) }
         let scalars = text.unicodeScalars
         var index = scalars.startIndex, plainStart = index
         var output = ""
@@ -71,6 +135,33 @@ enum MarkdownTableCell {
 
 
 
+    /// Add table structure to already canonical inline Markdown without doubling
+    /// prose escapes or changing literal backslashes inside code.
+    static func escapeCanonicalDelimiters(_ text: String) -> String {
+        mapCodeSpans(text, code: { codePipes($0, encoding: true) }, plain: { MarkdownLiteral.escapeStructural($0, characters: "|") })
+    }
+
+    /// Only runs immediately before pipes need a table layer inside code.
+    /// Backslashes elsewhere are source text and must remain untouched.
+    static func codePipes(_ text: String, encoding: Bool) -> String {
+        var output = "", slashes = 0
+        for character in text.unicodeScalars {
+            if character == "\\" { slashes += 1; continue }
+            let count: Int
+            if character == "|" {
+                count = encoding ? slashes * 2 + 1 : (slashes.isMultiple(of: 2) ? slashes : (slashes - 1) / 2)
+            } else { count = slashes }
+            output += String(repeating: "\\", count: count)
+            output.unicodeScalars.append(character); slashes = 0
+        }
+        return output + String(repeating: "\\", count: slashes)
+    }
+
+    static func decodeCodePipes(_ text: String) -> String {
+        mapCodeSpans(text, code: { codePipes($0, encoding: false) }, plain: { $0 })
+    }
+
+
     /// Escapes the characters that are structural in a pipe-table cell: a literal
     /// backslash (`\` -> `\\`, done first) and the pipe delimiter (`|` -> `\|`).
     /// Newlines are handled separately by callers (some join with spaces, some
@@ -79,106 +170,6 @@ enum MarkdownTableCell {
         value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "|", with: "\\|")
-    }
-
-    static func escapeCanonicalDelimiters(_ text: String) -> String {
-        mapCodeSpans(text, code: { codePipes($0, encoding: true) }, plain: escapeCanonicalPipes)
-    }
-
-    /// Add only the missing pipe escapes to already escaped Markdown.
-    static func escapeCanonicalPipes(_ text: String) -> String {
-        var output = "", slashes = 0
-        for character in text {
-            if character == "|", slashes.isMultiple(of: 2) { output.append("\\") }
-            output.append(character)
-            slashes = character == "\\" ? slashes + 1 : 0
-        }
-        return output
-    }
-
-    /// Only runs immediately before pipes need a table layer inside code.
-    /// Backslashes elsewhere are source text and must remain untouched.
-    static func codePipes(_ text: String, encoding: Bool) -> String {
-        var output = "", slashes = 0
-        for character in text {
-            if character == "\\" { slashes += 1; continue }
-            let count: Int
-            if character == "|" {
-                count = encoding ? slashes * 2 + 1 : (slashes.isMultiple(of: 2) ? slashes : (slashes - 1) / 2)
-            } else { count = slashes }
-            output += String(repeating: "\\", count: count)
-            output.append(character); slashes = 0
-        }
-        return output + String(repeating: "\\", count: slashes)
-    }
-
-    /// Decode canonical breaks without interpreting an escaped literal marker.
-    static func decodeBreaks(_ text: String, breakText: String = "\n") -> String {
-        var brackets = 0, destinationDepth = 0
-        return mapCodeSpans(text, code: { codePipes($0, encoding: false) }, plain: { plain in
-            var output = "", index = plain.startIndex
-            while index < plain.endIndex {
-                let character = plain[index]
-                let next = plain.index(after: index)
-                if character == "\\" {
-                    output.append(character); index = next
-                    if index < plain.endIndex { output.append(plain[index]); index = plain.index(after: index) }
-                    continue
-                }
-                if destinationDepth > 0 {
-                    if character == "(" { destinationDepth += 1 }
-                    if character == ")" { destinationDepth -= 1 }
-                } else if character == "[" { brackets += 1 }
-                else if character == "]", brackets > 0 {
-                    brackets -= 1
-                    if next < plain.endIndex, plain[next] == "(" {
-                        destinationDepth = 1; output += "]("; index = plain.index(after: next); continue
-                    }
-                } else if plain[index...].hasPrefix("<br>") {
-                    output += breakText; index = plain.index(index, offsetBy: 4); continue
-                }
-                output.append(character); index = next
-            }
-            return output
-        })
-    }
-
-    /// Keep breaks opaque while emphasis/link parsing runs so a formatted run
-    /// can span a native cell break without leaking Markdown delimiters.
-    static func inlineText(_ text: String, breakText: String = "\n", inline: (String) -> String) -> String {
-        let protected = protectBreakSentinels(text)
-        return restoreBreakSentinels(inline(decodeBreaks(protected, breakText: breakToken)), breakText: breakText)
-    }
-
-    static let breakToken = "\u{E042}\u{E044}"
-
-    static func protectBreakSentinels(_ text: String) -> String {
-        var output = ""
-        for scalar in text.unicodeScalars {
-            output.unicodeScalars.append(scalar)
-            if scalar == "\u{E042}" { output.unicodeScalars.append(scalar) }
-        }
-        return output
-    }
-
-    static func restoreBreakSentinels(_ text: String, breakText: String) -> String {
-        let scalars = text.unicodeScalars
-        var output = "", index = scalars.startIndex
-        while index < scalars.endIndex {
-            let scalar = scalars[index]
-            index = scalars.index(after: index)
-            if scalar == "\u{E042}", index < scalars.endIndex {
-                let next = scalars[index]
-                if next == "\u{E042}" || next == "\u{E044}" {
-                    if next == "\u{E042}" { output.unicodeScalars.append(scalar) }
-                    else { output += breakText }
-                    index = scalars.index(after: index)
-                    continue
-                }
-            }
-            output.unicodeScalars.append(scalar)
-        }
-        return output
     }
 
     /// Inverse of `escapeDelimiters`: turns `\\` back into `\` and `\|` into `|`,

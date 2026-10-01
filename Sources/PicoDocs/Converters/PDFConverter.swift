@@ -120,7 +120,7 @@ public struct PDFConverter: DocumentConverter {
         return ConverterResult(
             title: (title?.isEmpty == false) ? title : info.filename,
             author: (author?.isEmpty == false) ? author : nil,
-            sections: sections
+            sections: MarkdownLiteral.escapeSectionBackslashes(sections)
         )
     }
 
