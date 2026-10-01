@@ -673,15 +673,9 @@ public enum DocumentRenderer {
                         var next = i + 1
                         while next < lines.count, isBlank(lines[next]) { next += 1 }
                         guard next < lines.count else { break }
-                        let nextText = lines[next].trimmingCharacters(in: .whitespaces)
-                        let nextMarker = listMarker(nextText) ?? bareListMarker(nextText)
-                        // Native inline tables insert blank separators but do not
-                        // restart their enclosing list. Explicit list restarts do.
-                        let endsTable = items.last.map(listItemText)?.split(separator: "\n").last?.trimmingCharacters(in: .whitespaces).hasPrefix("|") == true
-                        let resumesList = (endsTable || ordered) && indentWidth(lines[next]) < base + 2
-                            && nextMarker.map { ($0 == .ordered) == ordered } == true
-                            && (!ordered || (listStart(nextText) == (items.last?.number ?? start) + 1
-                                && MarkdownList.item(from: lines[next])?.delimiter == items.first?.delimiter))
+                        // Blank lines separate loose items as well as nested
+                        // blocks. Native restarts carry an explicit boundary.
+                        let resumesList = resumesLooseList(lines[next], after: items[items.count - 1], base: base)
                         guard resumesList || indentWidth(lines[next]) >= contentColumn else { break }
                         if !resumesList { items[items.count - 1].appendText("") }
                         i = next
@@ -778,7 +772,20 @@ public enum DocumentRenderer {
             && (listMarker(lines[next].trimmingCharacters(in: .whitespaces)) ?? bareListMarker(lines[next].trimmingCharacters(in: .whitespaces))) == marker
         var following = next
         while following < lines.count, lines[following].trimmingCharacters(in: .whitespaces).isEmpty { following += 1 }
-        return adjacent || (following < lines.count && indentWidth(lines[following]) >= content) ? marker : nil
+        let looseSibling = following > next && following < lines.count
+            && MarkdownList.item(from: line).map { resumesLooseList(lines[following], after: $0, base: base) } == true
+        return adjacent || looseSibling || (following < lines.count && indentWidth(lines[following]) >= content) ? marker : nil
+    }
+
+    /// The same continuation rule confirms a leading empty item and resumes an
+    /// open list. Sequential ordered markers avoid turning `2020.\n\n1. item`
+    /// into a list; unordered siblings need no numbering evidence.
+    private static func resumesLooseList(_ line: String, after previous: MarkdownList.Item, base: Int) -> Bool {
+        guard indentWidth(line) < base + 2, let next = MarkdownList.item(from: line) else { return false }
+        if let number = previous.number {
+            return next.number == number + 1 && next.delimiter == previous.delimiter
+        }
+        return next.number == nil
     }
 
     static func literalListIndent(_ lines: [String], index: Int) -> (base: Int, content: Int)? {

@@ -2,7 +2,7 @@ import Foundation
 
 /// Protect literal source text from being reinterpreted as nested Markdown blocks.
 enum MarkdownLiteral {
-    /// An HTML comment records a native restart after an inline table. It also
+    /// An HTML comment records a native list restart. It also
     /// separates lists in ordinary Markdown renderers without adding visible text.
     static let listRestartBoundary = "<!-- PicoDocs:list-restart -->"
 

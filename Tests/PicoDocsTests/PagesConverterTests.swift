@@ -14,6 +14,37 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func nativeListRestartsRemainSeparateFromLooseContinuations() async throws {
+        for style in [ListKind.ordered, .bullet] {
+            let restarted = try await PicoDocsEngine.convert(data: Self.makeListPagesFile(
+                text: "a\nb\nc\nd", style: style,
+                restarts: [(0, 1), (2, 0), (4, style == .ordered ? 3 : 1), (6, 0)]), filename: "restart.pages")
+            let continued = try await PicoDocsEngine.convert(data: Self.makeListPagesFile(
+                text: "a\nb\nc\nd", style: style, restarts: [(0, 1), (2, 0), (4, 0), (6, 0)]), filename: "continue.pages")
+            let tag = style == .ordered ? "<ol" : "<ul"
+            #expect(try DocumentRenderer.render(restarted, to: .html).components(separatedBy: tag).count - 1 == 2)
+            #expect(try DocumentRenderer.render(continued, to: .html).components(separatedBy: tag).count - 1 == 1)
+            #expect(restarted.markdown().contains(MarkdownLiteral.listRestartBoundary))
+            #expect(!continued.markdown().contains(MarkdownLiteral.listRestartBoundary))
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                #expect(!(try DocumentRenderer.render(restarted, to: format)).contains(MarkdownLiteral.listRestartBoundary))
+            }
+        }
+    }
+
+    @Test func looseBareItemsRequireMatchingContinuationEvidence() throws {
+        for source in ["-\n\n-\n\n- body", "1.\n\n2.\n\n3. body", "1)\n\n2)\n\n3) body"] {
+            let html = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: source)]), to: .html)
+            #expect(html.components(separatedBy: "<li>").count - 1 == 3)
+            #expect(html.components(separatedBy: "<li></li>").count - 1 == 2)
+        }
+        for source in ["1.\n\n2) body", "1.\n\n- body", "1.\n\n" + MarkdownLiteral.listRestartBoundary + "\n\n2. body"] {
+            let html = try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: source)]), to: .html)
+            #expect(html.contains("<p>1.</p>"))
+            #expect(!html.contains("<li></li>"))
+        }
+    }
+
     @Test func sourceInlineCodeStopsAtParagraphBoundaries() async throws {
         let source = "`a\\*\n\nb`"
         let inputs = [("literal.txt",Data(source.utf8)),("literal.rtf",Data(#"{\rtf1\ansi `a\\*\par b`}"#.utf8)),("literal.pages",Self.makePagesFile(paragraphs:["`a\\*","","b`"]))]
@@ -683,10 +714,10 @@ struct PagesConverterTests {
         }
         // A second adjacent list restarted at 1 is its own list, not "3. c".
         let restarted = try await render([(0, 1), (2, 0), (4, 1), (6, 0)])
-        #expect(restarted == "1. a\n2. b\n\n1. c\n2. d")
+        #expect(restarted == "1. a\n2. b\n\n" + MarkdownLiteral.listRestartBoundary + "\n\n1. c\n2. d")
         // "Start at 5" keeps the author's numbering.
         let startAt = try await render([(0, 1), (2, 0), (4, 5), (6, 0)])
-        #expect(startAt == "1. a\n2. b\n\n5. c\n6. d")
+        #expect(startAt == "1. a\n2. b\n\n" + MarkdownLiteral.listRestartBoundary + "\n\n5. c\n6. d")
         // No paragraph data (older/other encoders): one running count.
         let plain = try await render([])
         #expect(plain == "1. a\n2. b\n3. c\n4. d")
@@ -839,10 +870,10 @@ struct PagesConverterTests {
         #expect(try await convert("a\r\nb").markdown() == "1. a\n2. b")
         let bullets = try await convert("a\nb\nc\nd", style: .bullet,
             restarts: [(0, 1), (2, 0), (4, 1), (6, 0)])
-        #expect(bullets.markdown() == "- a\n- b\n\n- c\n- d")
+        #expect(bullets.markdown() == "- a\n- b\n\n" + MarkdownLiteral.listRestartBoundary + "\n\n- c\n- d")
         #expect(try DocumentRenderer.render(bullets, to: .html).components(separatedBy: "<ul>").count == 3)
         #expect(try await convert("a\nb", restarts: [(0, 1), (2, 0)], styleChange: 2).markdown() == "1. a\n2. b")
-        #expect(try await convert("a\nb", styleChange: 2).markdown() == "1. a\n\n1. b")
+        #expect(try await convert("a\nb", styleChange: 2).markdown() == "1. a\n\n" + MarkdownLiteral.listRestartBoundary + "\n\n1. b")
         let literal = try await convert("# heading\n> quote\n| a |\n```\n---", style: .bullet)
         let html = try DocumentRenderer.render(literal, to: .html)
         for tag in ["<h1", "<blockquote", "<table", "<hr", "<pre", "<code"] { #expect(!html.contains(tag)) }

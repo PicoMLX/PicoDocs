@@ -360,11 +360,11 @@ enum IWATable {
     private static func renderParagraphs(_ body: BodyStorage, _ range: Range<Int>,
                                          objects: [UInt64: IWAArchive.Object],
                                          lists: inout ListState, continuesParagraph: Bool, flushEmptyAtEnd: Bool = false) throws -> String {
-        var parts: [(text: String, tight: Bool)] = []   // tight = join to previous with one newline
+        var parts: [(text: String, tight: Bool, inList: Bool)] = []   // tight = join to previous with one newline
         // Empty list items (a bare marker, still numbered) wait here until their list
         // continues with a nonempty item, so an interior blank item keeps its place
         // while trailing ones don't leave dangling markers.
-        var pendingEmpty: [(text: String, tight: Bool)] = []
+        var pendingEmpty: [(text: String, tight: Bool, inList: Bool)] = []
         var start = range.lowerBound
         var index = range.lowerBound
         var fragment = continuesParagraph
@@ -377,7 +377,7 @@ enum IWATable {
                     let rendered = lists.lastList == nil ? text : listLines(text).map {
                         String(repeating: " ", count: lists.markerWidth) + escapingListMarker($0)
                     }.joined(separator: "\n")
-                    parts.append((rendered, false))
+                    parts.append((rendered, false, lists.lastList != nil))
                 case nil: break
                 }
                 start = index + 1
@@ -397,19 +397,19 @@ enum IWATable {
                 let listKind = isHeading ? nil : listStyle.flatMap { body.listMarkers[$0] }
                 switch renderParagraph(body, start ..< index, objects: objects) {
                 case .heading(let text)?:
-                    parts.append((text, false))
+                    parts.append((text, false, false))
                     pendingEmpty = []
                     lists.lastList = nil; lists.orderedList = nil; lists.afterInlineTable = false
                 case .body(let text)?:
                     if let listKind {
                         let afterTable = lists.afterInlineTable
                         let (marker, tight) = try nextListMarker(listKind, style: listStyle, at: visibleStart ?? start, body, &lists)
-                        if afterTable, !tight { parts.append((MarkdownLiteral.listRestartBoundary, false)) }
+                        if afterTable, !tight { parts.append((MarkdownLiteral.listRestartBoundary, false, false)) }
                         if tight { parts += pendingEmpty }
                         pendingEmpty = []
-                        parts.append((listItem(marker + " ", text), tight))
+                        parts.append((listItem(marker + " ", text), tight, lists.lastList != nil))
                     } else {
-                        parts.append((text, false))
+                        parts.append((text, false, false))
                         pendingEmpty = []
                         lists.lastList = nil; lists.orderedList = nil; lists.afterInlineTable = false
                     }
@@ -418,9 +418,9 @@ enum IWATable {
                         // An empty list item still takes a number (Pages shows its marker).
                         let afterTable = lists.afterInlineTable
                         let (marker, tight) = try nextListMarker(listKind, style: listStyle, at: visibleStart ?? start, body, &lists)
-                        if afterTable, !tight { parts.append((MarkdownLiteral.listRestartBoundary, false)) }
+                        if afterTable, !tight { parts.append((MarkdownLiteral.listRestartBoundary, false, false)) }
                         if !tight { pendingEmpty = [] }
-                        pendingEmpty.append((marker, tight))
+                        pendingEmpty.append((marker, tight, lists.lastList != nil))
                     } else {
                         // An empty paragraph that isn't a list item breaks the run: a
                         // following same-style list restarts its numbering and is set
@@ -443,7 +443,14 @@ enum IWATable {
         if flushEmptyAtEnd { parts += pendingEmpty }
         var output = ""
         for (i, part) in parts.enumerated() {
-            if i > 0 { output += part.tight ? "\n" : "\n\n" }
+            if i > 0 {
+                if !part.tight, part.inList, parts[i - 1].inList {
+                    // A blank alone also permits loose-list continuation. Keep
+                    // native restarts distinct even without an inline table.
+                    output += "\n\n" + MarkdownLiteral.listRestartBoundary
+                }
+                output += part.tight ? "\n" : "\n\n"
+            }
             output += part.text
         }
         return output

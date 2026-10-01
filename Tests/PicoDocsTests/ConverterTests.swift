@@ -213,6 +213,39 @@ struct ConverterTests {
         """)
     }
 
+    @Test("DOCX loose lists retain bullet siblings and leading empty items")
+    func docxLooseListReviewRegressions() async throws {
+        let namespace = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\""
+        for ordered in [false, true] {
+            let numbering = """
+            <w:numbering \(namespace)><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0">\
+            <w:start w:val="1"/><w:numFmt w:val="\(ordered ? "decimal" : "bullet")"/><w:suff w:val="space"/>\
+            </w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>
+            """
+            for emptyCount in [0, 1, 2] {
+                let items = Array(repeating: "", count: emptyCount) + ["First", "Second"]
+                let paragraphs = items.map {
+                    "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>\($0)</w:t></w:r></w:p>"
+                }.joined()
+                let document = "<w:document \(namespace)><w:body>\(paragraphs)</w:body></w:document>"
+                let data = PagesConverterTests.makeZip([
+                    (name: "word/document.xml", data: Array(document.utf8)),
+                    (name: "word/numbering.xml", data: Array(numbering.utf8)),
+                ])
+                let result = try await PicoDocsEngine.convert(data: data, filename: "loose.docx")
+                let expected = items.enumerated().map { index, text in
+                    (ordered ? "\(index + 1)." : "-") + (text.isEmpty ? "" : " " + text)
+                }.joined(separator: "\n")
+                let html = try DocumentRenderer.render(result, to: .html)
+                let opening = ordered ? "<ol>" : "<ul>"
+                #expect(html.components(separatedBy: opening).count - 1 == 1)
+                #expect(html.components(separatedBy: "<li>").count - 1 == items.count)
+                #expect(html.components(separatedBy: "<li></li>").count - 1 == emptyCount)
+                #expect(try DocumentRenderer.render(result, to: .plaintext) == expected)
+            }
+        }
+    }
+
     @Test("DOCX lists: style numbering, start overrides, unnumbered levels, missing definitions")
     func docxListEdgeCases() async throws {
         let w = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\""
