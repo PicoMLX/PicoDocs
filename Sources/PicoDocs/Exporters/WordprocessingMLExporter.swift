@@ -672,7 +672,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
     private static func numberingXML(usedBullet: Bool, orderedNumIds: [(id: Int, level: Int, start: Int)], continuationNumID: Int?) -> String {
         func levels(ordered: Bool) -> String {
             (0..<9).map { level in
-                "<w:lvl w:ilvl=\"\(level)\"><w:start w:val=\"1\"/><w:numFmt w:val=\"\(ordered ? "decimal" : "bullet")\"/><w:lvlText w:val=\"\(ordered ? "%\(level + 1)." : "•")\"/><w:pPr><w:ind w:left=\"\((level + 1) * 720)\" w:hanging=\"360\"/></w:pPr></w:lvl>"
+                "<w:lvl w:ilvl=\"\(level)\"><w:start w:val=\"1\"/><w:numFmt w:val=\"\(ordered ? "decimal" : "bullet")\"/><w:suff w:val=\"space\"/><w:lvlText w:val=\"\(ordered ? "%\(level + 1)." : "•")\"/><w:pPr><w:ind w:left=\"\((level + 1) * 720)\" w:hanging=\"360\"/></w:pPr></w:lvl>"
             }.joined()
         }
         var definitions = "", instances = ""
@@ -685,7 +685,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         }
         if let continuationNumID {
             let markerless = (0..<9).map { level in
-                "<w:lvl w:ilvl=\"\(level)\"><w:numFmt w:val=\"none\"/><w:lvlText w:val=\"\"/><w:pPr><w:ind w:left=\"\((level + 1) * 720)\"/></w:pPr></w:lvl>"
+                "<w:lvl w:ilvl=\"\(level)\"><w:numFmt w:val=\"none\"/><w:suff w:val=\"space\"/><w:lvlText w:val=\"\"/><w:pPr><w:ind w:left=\"\((level + 1) * 720)\"/></w:pPr></w:lvl>"
             }.joined()
             definitions += "<w:abstractNum w:abstractNumId=\"2\">\(markerless)</w:abstractNum>"
             instances += "<w:num w:numId=\"\(continuationNumID)\"><w:abstractNumId w:val=\"2\"/></w:num>"

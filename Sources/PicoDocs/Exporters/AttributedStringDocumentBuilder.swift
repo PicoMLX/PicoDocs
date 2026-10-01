@@ -111,7 +111,7 @@ enum AttributedStringDocumentBuilder {
         case .table(let rows):
             if preserveBlockMarkers {
                 for (index, row) in rows.enumerated() {
-                    let cells = row.map { MarkdownTableCell.escapeDelimiters(tableMarkup(MarkdownInlineParser.parse($0, tableCell: true))) }
+                    let cells = row.map { MarkdownTableCell.escapeCanonicalPipes(tableMarkup(MarkdownInlineParser.parse($0, tableCell: true))) }
                     output.append(NSAttributedString(string: "| " + cells.joined(separator: " | ") + " |\n", attributes: [.font: bodyFont()]))
                     if index == 0 {
                         output.append(NSAttributedString(string: "| " + Array(repeating: "---", count: row.count).joined(separator: " | ") + " |\n", attributes: [.font: bodyFont()]))

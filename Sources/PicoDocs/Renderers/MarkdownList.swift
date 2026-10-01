@@ -2,15 +2,37 @@ import Foundation
 
 /// A list retains source markers and the reading order of text and child lists.
 struct MarkdownList: Equatable {
+    static func escapeBareMarkerText(_ text: String) -> String {
+        guard !text.contains("\n") else { return text }
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard let parsed = marker(trimmed), parsed.text.isEmpty else { return text }
+        let leading = text.prefix { $0 == " " || $0 == "\t" }
+        let trailing = text.reversed().prefix { $0 == " " || $0 == "\t" }.reversed()
+        let escaped = parsed.number == nil ? "\\" + trimmed : String(trimmed.dropLast()) + "\\."
+        return String(leading) + escaped + String(trailing)
+    }
+
+    static func inlineText(_ text: String, breakText: String, inline: (String) -> String) -> String {
+        let hardBreak = MarkdownTableCell.breakToken
+        let protected = MarkdownTableCell.mapCodeSpans(MarkdownTableCell.protectBreakSentinels(text), code: { $0 }, plain: {
+            $0.replacingOccurrences(of: " {2,}\n", with: hardBreak, options: .regularExpression)
+        })
+        return MarkdownTableCell.restoreBreakSentinels(inline(protected).replacingOccurrences(of: "\n", with: " "), breakText: breakText)
+    }
+
     struct Item: Equatable {
         let number: Int?
+        let padding: String
+        let delimiter: Character
         enum Content: Equatable {
             case text(String)
             case list(MarkdownList)
         }
         var content: [Content]
-        init(number: Int?, text: String) {
+        init(number: Int?, text: String, padding: String = " ", delimiter: Character = ".") {
             self.number = number
+            self.padding = padding
+            self.delimiter = delimiter
             content = [.text(text)]
         }
         mutating func appendText(_ text: String) {
@@ -27,10 +49,8 @@ struct MarkdownList: Equatable {
         let contentIndent: Int
         let number: Int?
         let text: String
-    }
-
-    private static func indentation(_ line: String) -> Int {
-        line.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
+        let padding: String
+        let delimiter: Character
     }
 
     private static func marker(_ line: String) -> Marker? {
@@ -39,12 +59,13 @@ struct MarkdownList: Equatable {
         let content = line.dropFirst(whitespace.count)
         let number: Int?
         let markerWidth: Int
+        let delimiter: Character
         if let first = content.first, "-*+".contains(first) {
-            number = nil; markerWidth = 1
+            number = nil; markerWidth = 1; delimiter = first
         } else {
             let digits = content.prefix { $0.isASCII && $0.isNumber }
-            guard !digits.isEmpty, let value = Int(digits), content.dropFirst(digits.count).first == "." else { return nil }
-            number = value; markerWidth = digits.count + 1
+            guard (1...9).contains(digits.count), let value = Int(digits), let ending = content.dropFirst(digits.count).first, ending == "." || ending == ")" else { return nil }
+            number = value; markerWidth = digits.count + 1; delimiter = ending
         }
         let tail = content.dropFirst(markerWidth)
         guard tail.isEmpty || tail.first == " " || tail.first == "\t" else { return nil }
@@ -52,8 +73,16 @@ struct MarkdownList: Equatable {
         let contentIndent = padding.isEmpty ? indent + markerWidth + 1 : padding.reduce(indent + markerWidth) {
             $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1
         }
-        return Marker(indent: indent, contentIndent: contentIndent, number: number, text: String(tail.dropFirst(padding.count)))
+        return Marker(indent: indent, contentIndent: contentIndent, number: number, text: String(tail.dropFirst(padding.count)), padding: padding.isEmpty ? " " : String(padding), delimiter: delimiter)
     }
+
+    /// Preserve source numbering, delimiter and padding in the block renderer.
+    static func item(from line: String) -> Item? {
+        guard let marker = marker(line) else { return nil }
+        return Item(number: marker.number, text: marker.text, padding: marker.padding, delimiter: marker.delimiter)
+    }
+
+    static func contentIndent(of line: String) -> Int? { marker(line)?.contentIndent }
 
     static func isOrderedMarker(_ line: String) -> Bool? { marker(line).map { $0.number != nil } }
 
@@ -69,11 +98,11 @@ struct MarkdownList: Equatable {
             if let current = marker(lines[next]) {
                 if current.indent < minimumIndent { break }
                 if current.indent < contentIndent {
-                    guard (current.number != nil) == list.ordered else { break }
+                    guard (current.number != nil) == list.ordered, !list.ordered || current.delimiter == first.delimiter else { break }
                     // An explicit restart following a blank line opens a new list.
-                    if blank, !list.items.isEmpty, current.number == first.number, list.ordered { break }
+                    if blank, let previous = list.items.last?.number, list.ordered, current.number != min(previous, Int.max - 1) + 1 { break }
                     index = next + 1
-                    list.items.append(Item(number: current.number, text: current.text))
+                    list.items.append(Item(number: current.number, text: current.text, padding: current.padding, delimiter: current.delimiter))
                     contentIndent = current.contentIndent
                 } else {
                     guard !list.items.isEmpty else { break }
@@ -83,11 +112,9 @@ struct MarkdownList: Equatable {
                     index = childIndex
                 }
             } else {
-                let indent = indentation(lines[next])
-                guard indent >= contentIndent, !list.items.isEmpty else { break }
-                let text = String(lines[next].drop { $0 == " " || $0 == "\t" })
-                if blank { list.items[list.items.count - 1].content.append(.text(text)) }
-                else { list.items[list.items.count - 1].appendText(text) }
+                let indent = lines[next].prefix { $0 == " " || $0 == "\t" }.reduce(0) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
+                guard !blank, indent >= contentIndent, !list.items.isEmpty else { break }
+                list.items[list.items.count - 1].appendText(lines[next].trimmingCharacters(in: .whitespaces))
                 index = next + 1
             }
         }
@@ -96,8 +123,9 @@ struct MarkdownList: Equatable {
 
     func plaintext(indent: String = "", inline: (String) -> String) -> String {
         items.map { item in
-            let marker = item.number.map { "\($0). " } ?? "- "
-            let continuation = indent + String(repeating: " ", count: marker.count)
+            let marker = item.number.map { "\($0)\(item.delimiter)" + item.padding } ?? "-" + item.padding
+            let width = (indent + marker).reduce(0) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
+            let continuation = String(repeating: " ", count: width)
             return item.content.enumerated().map { index, content in
                 switch content {
                 case .text(let text):
@@ -116,12 +144,9 @@ struct MarkdownList: Equatable {
         let body = items.map { item in
             let value = item.number.map { $0 == expected ? "" : " value=\"\($0)\"" } ?? ""
             if let number = item.number { expected = min(number, Int.max - 1) + 1 }
-            let loose = item.content.filter { if case .text = $0 { return true }; return false }.count > 1
             let content = item.content.map { content in
                 switch content {
-                case .text(let text):
-                    let rendered = inline(text).replacingOccurrences(of: "\n", with: " ")
-                    return loose ? "<p>" + rendered + "</p>" : rendered
+                case .text(let text): return inline(text).replacingOccurrences(of: "\n", with: " ")
                 case .list(let child): return child.html(inline: inline)
                 }
             }.joined(separator: "\n")
@@ -130,6 +155,14 @@ struct MarkdownList: Equatable {
         return "<\(tag)\(attribute)>\n\(body)\n</\(tag)>"
     }
 
+    var texts: [String] {
+        items.flatMap { $0.content.flatMap { content in
+            switch content {
+            case .text(let text): return [text]
+            case .list(let child): return child.texts
+            }
+        } }
+    }
     struct Paragraph {
         let level: Int
         let ordered: Bool
@@ -146,12 +179,28 @@ struct MarkdownList: Equatable {
         } }
     }
 
-    var texts: [String] {
-        items.flatMap { $0.content.flatMap { content in
-            switch content {
-            case .text(let text): return [text]
-            case .list(let child): return child.texts
+    func structured(depth: Int) -> MarkdownList {
+        var result = self
+        for index in result.items.indices {
+            let raw = result.items[index].content.compactMap { if case .text(let text) = $0 { return text }; return nil }.joined(separator: "\n")
+            let blocks = MarkdownBlockParser.parse(raw, depth: depth)
+            var content: [Item.Content] = []
+            for block in blocks {
+                switch block {
+                case .paragraph(let text): content.append(.text(text))
+                case .list(let child): content.append(.list(child))
+                // These were already retained as text by the export list model.
+                case .heading(let level, let text): content.append(.text(String(repeating: "#", count: level) + " " + text))
+                case .code(let text): content.append(.text("```\n" + text + "\n```"))
+                case .blockquote(let lines): content.append(.text(lines.map { "> " + $0 }.joined(separator: "\n")))
+                case .rule: content.append(.text("---"))
+                case .table(let rows): content.append(.text(rows.map { "| " + $0.joined(separator: " | ") + " |" }.joined(separator: "\n")))
+                }
             }
-        } }
+            if content.isEmpty { content = [.text("")] }
+            if case .list? = content.first { content.insert(.text(""), at: 0) }
+            result.items[index].content = content
+        }
+        return result
     }
 }

@@ -28,10 +28,19 @@ public struct AttributedStringRTFExporter: DocumentExporter {
         if let title = result.title { properties[.title] = title }
         if let author = result.author { properties[.author] = author }
         do {
-            return try attributed.data(
+            let data = try attributed.data(
                 from: NSRange(location: 0, length: attributed.length),
                 documentAttributes: properties
             )
+            // The writer retains canonical block markers for round trips. Native
+            // RTF text has no such provenance and must be escaped as source text.
+            guard data.starts(with: Data("{\\rtf".utf8)) else { return data }
+            var headerEnd = 5
+            while headerEnd < data.count, (0x30...0x39).contains(data[headerEnd]) { headerEnd += 1 }
+            var marked = Data(data[..<headerEnd])
+            marked.append(Data("{\\*\\picodocsmarkdown1}".utf8))
+            marked.append(data[headerEnd...])
+            return marked
         } catch {
             throw ExporterError.serializationFailed("RTF serialization failed: \(error.localizedDescription)")
         }

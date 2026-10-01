@@ -735,9 +735,9 @@ struct ExporterFollowupTests {
         }
         for interrupted in [false, true] {
             let reader = WordListNumbering(archive: archive)
-            #expect(reader.prefix(numPr: try properties(1, 0), style: nil) == "100. ")
+            #expect(reader.prefix(numPr: try properties(1, 0), style: nil) == "100.\t")
             if interrupted { #expect(reader.prefix(numPr: nil, style: nil) == nil) }
-            #expect(reader.prefix(numPr: try properties(2, 1), style: nil) == "  - ")
+            #expect(reader.prefix(numPr: try properties(2, 1), style: nil) == "-\t")
         }
     }
 
@@ -924,7 +924,7 @@ struct ExporterFollowupTests {
         let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId='1'><w:lvl w:ilvl='0'><w:numFmt w:val='decimal'/></w:lvl></w:abstractNum><w:num w:numId='1'><w:abstractNumId w:val='1'/></w:num></w:numbering>"
         let input = PagesConverterTests.makeZip([("word/document.xml", Array(document.utf8)), ("word/numbering.xml", Array(numbering.utf8))])
         let result = try await PicoDocsEngine.convert(data: input, filename: "bookmarks.docx")
-        #expect(result.markdown().contains("[Forward](#1-intro)")); #expect(result.markdown().contains("# 1. Intro")); #expect(result.markdown().contains("2. Item"))
+        #expect(result.markdown().contains("[Forward](#intro)")); #expect(result.markdown().contains("# Intro")); #expect(result.markdown().contains("1.\tItem"))
         #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains("<w:hyperlink w:anchor="))
     }
 
@@ -1007,8 +1007,8 @@ struct ExporterFollowupTests {
             let document = "<w:document \(ns)><w:body>\(content)</w:body></w:document>"
             let data = PagesConverterTests.makeZip([("word/document.xml", Array(document.utf8)), ("word/numbering.xml", Array(numbering.utf8))])
             let result = try await PicoDocsEngine.convert(data: data, filename: "numbered.docx")
-            if table { #expect(result.markdown().contains("1. Parent<br>   1. Child")) }
-            else { #expect(result.markdown().contains("# 1. Intro")); #expect(result.markdown().contains("2. Item")) }
+            if table { #expect(result.markdown().contains("Parent<br>Child")); #expect(!result.markdown().contains("0.\tParent")) }
+            else { #expect(result.markdown().contains("# Intro")); #expect(result.markdown().contains("1.\tItem")) }
         }
     }
 
@@ -1623,7 +1623,7 @@ struct ExporterFollowupTests {
         let data = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8))])
         let result = try await PicoDocsEngine.convert(data: data, filename: "list.docx")
         let markdown = result.sections.map(\.markdown).joined(separator: "\n")
-        #expect(markdown.contains("1. Parent\n\n   Continuation\n2. Next"))
+        #expect(markdown.contains("1.\tParent\n\n    Continuation\n\n2.\tNext"))
         let html = try DocumentRenderer.render(result, to: .html)
         #expect(html.contains("Continuation")); #expect(!html.contains("</ol>\n<p>Continuation"))
         let pptx = try xml(PicoDocsEngine.write(result, to: .pptx), "ppt/slides/slide1.xml")
@@ -2101,7 +2101,7 @@ struct ExporterFollowupTests {
         let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"decimal\"/></w:lvl><w:lvl w:ilvl=\"1\"><w:numFmt w:val=\"bullet\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>"
         let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8))]), filename: "structure.docx")
         #expect(result.markdown().contains("| Cell Heading1 | Cell Quote | Cell PicoCodeBlock |"))
-        #expect(result.markdown().contains("1. Parent\n   - Child\n2. Next"))
+        #expect(result.markdown().contains("0.\tParent\n\n    -\tChild\n\n1.\tNext"))
         let output = try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml")
         #expect(output.contains(#"<w:ilvl w:val="1"/>"#)); #expect(!output.contains("# Cell")); #expect(!output.contains("&gt; Cell")); #expect(!output.contains("```"))
     }
@@ -2111,7 +2111,7 @@ struct ExporterFollowupTests {
             let result = try await PicoDocsEngine.convert(data: PicoDocsEngine.write(markdown: source, to: .docx), filename: "empty-item.docx")
             let second = try PicoDocsEngine.write(result, to: .docx)
             let count = try xml(second, "word/document.xml").components(separatedBy: "<w:numPr>").count - 1
-            #expect(count == (source.contains("first") ? 3 : 1))
+            #expect(count == (source.contains("first") ? 3 : 0))
         }
     }
 
@@ -2401,8 +2401,10 @@ struct ExporterFollowupTests {
         let document = "<w:document \(ns)><w:body>" + paragraph("Before") + "<w:tbl><w:tr><w:tc>" + paragraph("Inside") + "</w:tc></w:tr></w:tbl>" + paragraph("After") + "</w:body></w:document>"
         let data = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8)), (name: "word/numbering.xml", data: Array(numbering.utf8))])
         let numbered = try await PicoDocsEngine.convert(data: data, filename: "table.docx").markdown()
-        #expect(numbered.contains("2. Inside"))
-        #expect(numbered.contains("3. After"))
+        // Native table labels are suppressed, but still advance the instance.
+        #expect(numbered.contains("0.\tBefore"))
+        #expect(numbered.contains("| Inside |"))
+        #expect(numbered.contains("2.\tAfter"))
     }
 
     @Test func completeCodeDelimitersAndMalformedDestinations() async throws {

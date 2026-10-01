@@ -14,6 +14,17 @@ import Testing
 @testable import PicoDocs
 
 struct KeynoteConverterTests {
+    @Test func codeContextCrossesSlideBoundaries() async throws {
+        let result = try await PicoDocsEngine.convert(data:Self.makeKeynoteFile(slides:["```",#"a\*b"#,"```"]),filename:"code.key")
+        #expect(result.sections.map(\.slideNumber) == [1,2,3])
+        for format in [ExportFileType.html,.plaintext] {
+            let text = try DocumentRenderer.render(result,to:format)
+            #expect(text.contains(#"a\*b"#)); #expect(!text.contains(#"a\\*b"#))
+        }
+        let table = DocumentSection(kind:.table,markdown:#"| a\|b |"#)
+        #expect(MarkdownLiteral.escapeSectionBackslashes([table])[0] == table)
+    }
+
 
     /// A synthetic `.key`: loose `Index/Slide<N>.iwa`, each a Snappy-framed IWA
     /// holding one body (kind-absent → 0) TSWP storage with `text`.

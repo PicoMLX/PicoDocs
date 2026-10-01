@@ -181,7 +181,9 @@ enum MarkdownInlineParser {
                 let hard = !slashes.isMultiple(of: 2) || spaces >= 2
                 if !slashes.isMultiple(of: 2) { run.removeLast() }
                 else { while run.last == " " || run.last == "\t" { run.removeLast() } }
-                append(.lineBreak(hard: hard)); i += 1; continue
+                append(.lineBreak(hard: hard)); i += 1
+                if !hard { while i < chars.count, chars[i] == " " || chars[i] == "\t" { i += 1 } }
+                continue
             }
             if tableCell, c == "<", chars[i...].starts(with: Array("<br>")) {
                 append(.lineBreak(hard: true)); i += 4; continue

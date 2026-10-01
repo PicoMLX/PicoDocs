@@ -13,7 +13,6 @@ import Testing
 
 @Suite("Tier A converters")
 struct ConverterTests {
-
     @Test("DOCX converts to Markdown with heading and body text")
     func docx() async throws {
         let result = try await PicoDocsEngine.convert(data: Fixture.data("sample", "docx"), filename: "sample.docx")
@@ -177,6 +176,231 @@ struct ConverterTests {
         // A package-absolute target (leading "/") ignores the base directory.
         #expect(WordConverter.resolvePartPath("/word/media/image1.png", relativeTo: "word/notes")
             == "word/media/image1.png")
+    }
+
+    @Test("DOCX lists: numbered, bulleted, nested, restarted, and numbering switched off")
+    func docxLists() async throws {
+        // Saved by LibreOffice Writer's Word exporter: paragraphs outside a list
+        // carry `w:numId="0"`, and the restart is a new `w:num` with a
+        // `startOverride` whose follow-up item returns to the original `w:num`.
+        let markdown = try await PicoDocsEngine.convert(data: Fixture.data("lists", "docx"), filename: "lists.docx").markdown()
+        #expect(markdown == """
+        # Lists
+
+        1.\tFirst step
+
+        2.\tSecond step
+
+            1.\tSub-step a
+
+            2.\tSub-step b
+
+        3.\tThird step
+
+        An interlude paragraph.
+
+        \(MarkdownLiteral.listRestartBoundary)
+
+        -\tApples
+
+            -\tConference
+
+        -\tPears
+
+        \(MarkdownLiteral.listRestartBoundary)
+
+        1.\tRestarted one
+
+        2.\tRestarted two
+
+        End.
+        """)
+    }
+
+    @Test("DOCX loose lists retain bullet siblings and leading empty items")
+    func docxLooseListReviewRegressions() async throws {
+        let namespace = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\""
+        for ordered in [false, true] {
+            let numbering = """
+            <w:numbering \(namespace)><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0">\
+            <w:start w:val="1"/><w:numFmt w:val="\(ordered ? "decimal" : "bullet")"/><w:suff w:val="space"/>\
+            </w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>
+            """
+            for emptyCount in [0, 1, 2] {
+                let items = Array(repeating: "", count: emptyCount) + ["First", "Second"]
+                let paragraphs = items.map {
+                    "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>\($0)</w:t></w:r></w:p>"
+                }.joined()
+                let document = "<w:document \(namespace)><w:body>\(paragraphs)</w:body></w:document>"
+                let data = PagesConverterTests.makeZip([
+                    (name: "word/document.xml", data: Array(document.utf8)),
+                    (name: "word/numbering.xml", data: Array(numbering.utf8)),
+                ])
+                let result = try await PicoDocsEngine.convert(data: data, filename: "loose.docx")
+                let expected = items.enumerated().map { index, text in
+                    (ordered ? "\(index + 1)." : "-") + (text.isEmpty ? "" : " " + text)
+                }.joined(separator: "\n")
+                let html = try DocumentRenderer.render(result, to: .html)
+                let opening = ordered ? "<ol>" : "<ul>"
+                #expect(html.components(separatedBy: opening).count - 1 == 1)
+                #expect(html.components(separatedBy: "<li>").count - 1 == items.count)
+                #expect(html.components(separatedBy: "<li></li>").count - 1 == emptyCount)
+                #expect(try DocumentRenderer.render(result, to: .plaintext) == expected)
+            }
+        }
+    }
+
+    @Test("DOCX lists: style numbering, start overrides, unnumbered levels, missing definitions")
+    func docxListEdgeCases() async throws {
+        let w = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\""
+        func paragraph(_ text: String, style: String? = nil, numID: String? = nil, level: Int? = nil) -> String {
+            var properties = style.map { "<w:pStyle w:val=\"\($0)\"/>" } ?? ""
+            if numID != nil || level != nil {
+                properties += "<w:numPr>" + (level.map { "<w:ilvl w:val=\"\($0)\"/>" } ?? "")
+                    + (numID.map { "<w:numId w:val=\"\($0)\"/>" } ?? "") + "</w:numPr>"
+            }
+            let runs = text.components(separatedBy: "\n").map { "<w:r><w:t>\($0)</w:t></w:r>" }.joined(separator: "<w:r><w:br/></w:r>")
+            return "<w:p><w:pPr>\(properties)</w:pPr>\(runs)</w:p>"
+        }
+        let document = "<?xml version=\"1.0\"?><w:document \(w)><w:body>" + [
+            paragraph("Styled one", style: "ListNumber"),             // numbering from the style…
+            paragraph("Styled two", style: "MyList"),                 // …or its basedOn parent
+            paragraph("Styled nested", style: "ListNumber", level: 1),
+            paragraph("From five", numID: "7"),                       // startOverride 5
+            paragraph("Six\nwith a manual break", numID: "7"),
+            paragraph("Unnumbered level", numID: "8"),                // numFmt none
+        ].joined() + "</w:body></w:document>"
+        let numbering = """
+        <?xml version="1.0"?><w:numbering \(w)>\
+        <w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:suff w:val="space"/></w:lvl>\
+        <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:suff w:val="space"/></w:lvl></w:abstractNum>\
+        <w:abstractNum w:abstractNumId="2"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:suff w:val="space"/></w:lvl></w:abstractNum>\
+        <w:abstractNum w:abstractNumId="3"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="none"/><w:suff w:val="space"/></w:lvl></w:abstractNum>\
+        <w:num w:numId="5"><w:abstractNumId w:val="1"/></w:num>\
+        <w:num w:numId="7"><w:abstractNumId w:val="2"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride></w:num>\
+        <w:num w:numId="8"><w:abstractNumId w:val="3"/></w:num>\
+        </w:numbering>
+        """
+        let styles = """
+        <?xml version="1.0"?><w:styles \(w)>\
+        <w:style w:type="paragraph" w:styleId="ListNumber"><w:pPr><w:numPr><w:numId w:val="5"/></w:numPr></w:pPr></w:style>\
+        <w:style w:type="paragraph" w:styleId="MyList"><w:basedOn w:val="ListNumber"/></w:style>\
+        </w:styles>
+        """
+        let docx = PagesConverterTests.makeZip([
+            (name: "word/document.xml", data: Array(document.utf8)),
+            (name: "word/numbering.xml", data: Array(numbering.utf8)),
+            (name: "word/styles.xml", data: Array(styles.utf8)),
+        ])
+        let markdown = try await PicoDocsEngine.convert(data: docx, filename: "edge.docx").markdown()
+        #expect(markdown == """
+        1. Styled one
+
+        2. Styled two
+
+           - a. Styled nested
+
+        \(MarkdownLiteral.listRestartBoundary)
+
+        5. From five
+
+        6. Six\u{20}\u{20}
+           with a manual break
+
+        Unnumbered level
+        """)
+
+        // Without numbering.xml or styles.xml, a paragraph naming a `w:numId`
+        // still reads as a (bullet) list item; one relying on its style doesn't.
+        let bare = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8))])
+        let bareMarkdown = try await PicoDocsEngine.convert(data: bare, filename: "bare.docx").markdown()
+        #expect(bareMarkdown.hasPrefix("Styled one\n\nStyled two\n\nStyled nested\n\n- From five\n\n- Six"))
+    }
+
+    @Test("DOCX reads paragraph, run, and cell properties from the element itself")
+    func docxOwnProperties() async throws {
+        // An anchor paragraph whose run holds a text box: the box's paragraph is a
+        // bold Heading 1 list item, and a cell holds a nested table with a gridSpan.
+        // None of that may leak onto the anchor paragraph or the outer cell.
+        let document = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" \
+        xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" \
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" \
+        xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body>
+        <w:p><w:r><w:t>Anchor text</w:t><w:drawing><wp:anchor><a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent>\
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>\
+        <w:r><w:rPr><w:b/></w:rPr><w:t>Box heading</w:t></w:r></w:p>\
+        </w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>
+        <w:tbl>\
+        <w:tr><w:tc><w:p><w:r><w:t>Outer A</w:t></w:r></w:p>\
+        <w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val="3"/></w:tcPr><w:p><w:r><w:t>Inner</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:tc>\
+        <w:tc><w:p><w:r><w:t>Outer B</w:t></w:r></w:p></w:tc></w:tr>\
+        <w:tr><w:tc><w:p><w:r><w:t>1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>2</w:t></w:r></w:p></w:tc></w:tr>\
+        </w:tbl>
+        </w:body></w:document>
+        """
+        let docx = PagesConverterTests.makeZip([(name: "word/document.xml", data: Array(document.utf8))])
+        let markdown = try await PicoDocsEngine.convert(data: docx, filename: "anchor.docx").markdown()
+        let blocks = markdown.components(separatedBy: "\n\n")
+        #expect(blocks.first == "Anchor text")                       // not "# **Anchor text**"
+        #expect(blocks.contains("# **Box heading**"))                // the box keeps its own style
+        #expect(markdown.contains("| Outer A<br>Inner | Outer B |\n| --- | --- |\n| 1 | 2 |"))
+    }
+
+    @Test("XLSX keeps each value in its column across blank cells")
+    func xlsxSparseCells() async throws {
+        // Blank cells are absent from a worksheet row. B2, A3, D* and row 4 are
+        // empty; E1/E2 sit past an entirely empty column D.
+        func cell(_ ref: String, _ text: String) -> String {
+            "<c r=\"\(ref)\" t=\"inlineStr\"><is><t>\(text)</t></is></c>"
+        }
+        let sheet = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+        <row r="1">\(cell("A1", "Name"))\(cell("B1", "Team"))\(cell("C1", "Score"))\(cell("E1", "Note"))</row>
+        <row r="2">\(cell("A2", "Alice"))<c r="C2"><v>42</v></c>\(cell("E2", "late"))</row>
+        <row r="3">\(cell("B3", "Ops"))<c r="C3"><v>7</v></c></row>
+        <row r="5"><c r="A5" s="1"/></row>
+        </sheetData></worksheet>
+        """
+        let workbook = Self.xlsx(sheetXML: sheet)
+        let markdown = try await PicoDocsEngine.convert(data: workbook, filename: "sparse.xlsx").markdown()
+        #expect(markdown.contains("""
+        | Name | Team | Score |  | Note |
+        | --- | --- | --- | --- | --- |
+        | Alice |  | 42 |  | late |
+        |  | Ops | 7 |  |  |
+        """))
+        // Lossless export keeps empty column D and explicit row positions.
+        #expect(markdown.components(separatedBy: "|  |  |  |  |  |").count - 1 == 2)
+    }
+
+    /// A minimal single-sheet XLSX package ("Sheet1") around `sheetXML`.
+    static func xlsx(sheetXML: String) -> Data {
+        let rels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>\
+        </Relationships>
+        """
+        let workbook = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">\
+        <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>
+        """
+        let workbookRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>\
+        </Relationships>
+        """
+        return PagesConverterTests.makeZip([
+            (name: "_rels/.rels", data: Array(rels.utf8)),
+            (name: "xl/workbook.xml", data: Array(workbook.utf8)),
+            (name: "xl/_rels/workbook.xml.rels", data: Array(workbookRels.utf8)),
+            (name: "xl/worksheets/sheet1.xml", data: Array(sheetXML.utf8)),
+        ])
     }
 
     @Test("XLSX converts each sheet's cells to Markdown")
@@ -424,6 +648,33 @@ struct DocumentRendererTests {
         let html = try DocumentRenderer.render(result, to: .html)
         #expect(!html.contains("a\" onmouseover=\"alert"))   // the raw quote cannot close href
         #expect(html.contains("&quot;"))
+    }
+
+    @Test("HTML rendering neutralizes script URLs in links and images")
+    func htmlScriptURLsNeutralized() throws {
+        let markdown = """
+        [a](javascript:alert) [**b**](JaVaScRiPt:alert) [c](java\tscript:alert)
+        [d](vbscript:msgbox) [e](data:text/html;base64,PHNjcmlwdD4=)
+        ![f](javascript:alert) ![g](data:image/svg+xml;base64,PHN2Zz4=)
+        [ok](https://example.com) [mail](mailto:a@example.com) [rel](docs/a:b.html) [frag](#top)
+        ![pic](chart.png)
+        """
+        let html = try DocumentRenderer.render(ConverterResult(sections: [
+            DocumentSection(kind: .body, markdown: markdown),
+        ]), to: .html)
+        #expect(!html.lowercased().contains("javascript:"))
+        #expect(!html.contains("java\tscript"))
+        #expect(!html.contains("vbscript:"))
+        #expect(!html.contains("data:text/html"))
+        // The visible text (and its emphasis) survives; only the URL is dropped.
+        #expect(html.contains("<p>a <strong>b</strong> c<br>\nd e<br>\nf <img"))
+        // Safe destinations still render as live links/images.
+        #expect(html.contains("<img src=\"data:image/svg+xml;base64,PHN2Zz4=\" alt=\"g\">"))
+        #expect(html.contains("<a href=\"https://example.com\">ok</a>"))
+        #expect(html.contains("<a href=\"mailto:a@example.com\">mail</a>"))
+        #expect(html.contains("<a href=\"docs/a:b.html\">rel</a>"))
+        #expect(html.contains("<a href=\"#top\">frag</a>"))
+        #expect(html.contains("<img src=\"chart.png\" alt=\"pic\">"))
     }
 
     @Test("Table cells round-trip backslashes and escaped pipes")
@@ -675,5 +926,36 @@ struct DocumentRendererTests {
         let csv = try DocumentRenderer.render(result, to: .csv)
         #expect(csv.contains("| grep foo | wc -l |"))
         #expect(!csv.contains("grep foo,wc -l"))
+    }
+
+    @Test("Renderers keep nested lists nested and honor list start numbers")
+    func renderNestedLists() throws {
+        let markdown = "3. Three\n   - sub a\n   - sub b\n4. Four\n   1. deep\n      more\n5.\n6. Six"
+        let result = ConverterResult(title: "T", sections: [DocumentSection(kind: .body, markdown: markdown)])
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == """
+        3. Three
+           - sub a
+           - sub b
+        4. Four
+           1. deep more
+        5.
+        6. Six
+        """)
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("""
+        <ol start="3">
+        <li>Three
+        <ul>
+        <li>sub a</li>
+        <li>sub b</li>
+        </ul></li>
+        <li>Four
+        <ol>
+        <li>deep more</li>
+        </ol></li>
+        <li></li>
+        <li>Six</li>
+        </ol>
+        """))
     }
 }

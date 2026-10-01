@@ -10,12 +10,14 @@
 //
 //  Scope (v1): extracts the document's text from the flat, single-file `.pages`
 //  ZIP — the common transport form (downloads, mail, Files exports) — as
-//  paragraphs with Markdown heading levels mapped from their paragraph styles and
+//  paragraphs with Markdown heading levels mapped from their paragraph styles,
 //  inline bold/italic emphasis and hyperlinks from their character styles and
-//  smart fields, plus table content reconstructed as Markdown grids and placed
-//  inline at their attachment points in reading order (falling back to appending
-//  them after the body when attachments can't be mapped 1:1; see IWATable).
-//  Remaining rich structure (underline, footnotes, inline images),
+//  smart fields, and bullet/numbered lists from their list styles, plus table
+//  content reconstructed as Markdown grids and placed inline at their attachment
+//  points in reading order (falling back to appending them after the body when
+//  attachments can't be mapped 1:1; see IWATable).
+//  Remaining rich structure (underline, nested list levels, footnotes, inline
+//  images),
 //  duration table cells (text, dates, numbers, and formula results are decoded),
 //  the legacy iWork '09 XML format, and
 //  ingesting a `.pages` *package directory* (an on-disk bundle, which the
@@ -46,7 +48,7 @@ public struct PagesConverter: DocumentConverter {
 
         // Gather the IWA component streams. Two common on-disk layouts: loose
         // `Index/*.iwa` entries, or a nested `Index.zip` containing them.
-        let components = try iwaComponents(in: archive)
+        let components = try Self.iwaComponents(in: archive)
         guard !components.isEmpty else {
             // Likely a legacy iWork '09 package (index.xml[.gz]) or an unexpected
             // layout — not supported yet.
@@ -80,11 +82,11 @@ public struct PagesConverter: DocumentConverter {
         // reading order. Falls back to body text + tables appended after it when
         // the attachments can't be mapped 1:1 (so a table is never dropped).
         if let documentStream,
-           let blocks = IWATable.inlineBlocks(documentStream: documentStream, in: allStreams) {
+           let blocks = try IWATable.inlineBlocks(documentStream: documentStream, in: allStreams) {
             for block in blocks {
                 switch block {
                 case .text(let raw):
-                    let cleaned = Self.normalize(raw)
+                    let cleaned = Self.normalize(raw, preservingLeadingIndent: raw.hasPrefix("  "))
                     if !cleaned.isEmpty {
                         sections.append(DocumentSection(kind: .body, markdown: cleaned, sourcePath: "Index/Document.iwa"))
                     }
@@ -99,13 +101,13 @@ public struct PagesConverter: DocumentConverter {
             if let documentStream {
                 // Render headings even on the fallback path; degrade to plain text
                 // extraction only if the style-aware renderer yields nothing.
-                let rendered = IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams)
-                bodyText = rendered.isEmpty ? IWAArchive.text(in: documentStream) : rendered
+                let rendered = try IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams)
+                bodyText = rendered.isEmpty ? MarkdownLiteral.escapeBackslashes(Self.normalize(IWAArchive.text(in: documentStream))) : rendered
             } else {
                 var firstText = ""
                 for entry in streams.sorted(by: { $0.name < $1.name }) {
                     let extracted = IWAArchive.text(in: entry.stream)
-                    if !extracted.isEmpty { firstText = extracted; break }
+                    if !extracted.isEmpty { firstText = MarkdownLiteral.escapeBackslashes(Self.normalize(extracted)); break }
                 }
                 bodyText = firstText
             }
@@ -125,7 +127,7 @@ public struct PagesConverter: DocumentConverter {
 
     // MARK: - IWA gathering
 
-    private struct Component {
+    struct Component {
         let name: String
         let bytes: [UInt8]
     }
@@ -134,7 +136,7 @@ public struct PagesConverter: DocumentConverter {
     /// failing that — from a nested `Index.zip`. A present-but-unreadable main
     /// story (`Document.iwa`) is treated as corruption; auxiliary entries that
     /// fail to extract are skipped leniently.
-    private func iwaComponents(in archive: Archive) throws -> [Component] {
+    static func iwaComponents(in archive: Archive) throws -> [Component] {
         var components: [Component] = []
         // Loose layout is `Index/*.iwa`; scope the scan to that path so a stray
         // outer `.iwa` can't shadow the nested `Index.zip` body below.
@@ -170,8 +172,12 @@ public struct PagesConverter: DocumentConverter {
     // MARK: - Text normalization
 
     /// Folds iWork's line/paragraph separators to `\n`, trims each line, and
-    /// collapses runs of blank lines so the body reads as clean paragraphs.
-    static func normalize(_ text: String) -> String {
+    /// collapses runs of blank lines so the body reads as clean paragraphs. The one
+    /// exception to trimming: an indented continuation under a list item keeps
+    /// its leading spaces, including blank-separated paragraphs in loose items.
+    /// `IWATable` also emits this indentation for multi-line list content; trimming
+    /// it would split the item. The renderer validates the actual content column.
+    static func normalize(_ text: String, preservingLeadingIndent: Bool = false) -> String {
         var unified = text
         for separator in ["\r\n", "\r", "\u{2028}", "\u{2029}", "\u{000B}", "\u{000C}"] {
             unified = unified.replacingOccurrences(of: separator, with: "\n")
@@ -190,34 +196,34 @@ public struct PagesConverter: DocumentConverter {
         let inlineWhitespace = CharacterSet(charactersIn: " \t")
         var out: [String] = []
         var pendingBlank = false
+        var inListItem = preservingLeadingIndent   // the previous kept line is a list item or its continuation
         for rawLine in unified.components(separatedBy: "\n") {
             let line = rawLine.trimmingCharacters(in: inlineWhitespace)
             if line.isEmpty {
                 pendingBlank = true
             } else {
+                let indent = rawLine.prefix { $0 == " " }
+                let continuation = inListItem && indent.count >= 2
                 if pendingBlank && !out.isEmpty { out.append("") }
                 pendingBlank = false
-                out.append(line)
+                out.append(continuation ? String(indent) + line : line)
+                inListItem = continuation || isListItem(line)
             }
         }
         return out.joined(separator: "\n")
     }
 
+    /// Whether a trimmed line opens a Markdown list item (`- x` or `N. x`), the
+    /// markers `IWATable` renders for Pages list styles.
+    private static func isListItem(_ line: String) -> Bool {
+        if line == "-" || line.hasPrefix("- ") { return true }
+        let digits = line.prefix { $0.isASCII && $0.isNumber }
+        return !digits.isEmpty && (line.dropFirst(digits.count) == "." || line.dropFirst(digits.count).hasPrefix(". "))
+    }
+
     // MARK: - ZIP helper
 
     static func readEntry(_ archive: Archive, path: String) -> Data? {
-        let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        guard let entry = archive[cleanPath] else { return nil }
-        // Cap the reservation hint: `uncompressedSize` is untrusted central-
-        // directory data, only validated during extract. Clamp in UInt64 before
-        // the Int cast so a ZIP64 size > Int.max can't trap.
-        let reserve = Int(min(UInt64(entry.uncompressedSize), 16 * 1024 * 1024))
-        var data = Data(capacity: reserve)
-        do {
-            _ = try archive.extract(entry) { data.append($0) }
-        } catch {
-            return nil
-        }
-        return data
+        ZIPEntryReader.read(archive, path: path)
     }
 }

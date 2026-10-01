@@ -88,10 +88,14 @@ public struct ImageOCRConverter: DocumentConverter {
             throw PicoDocsError.emptyDocument
         }
 
+        return ConverterResult(title: info.filename, sections: Self.sections(from: frameTexts, filename: info.filename))
+    }
+
+    static func sections(from frameTexts: [String], filename: String?) -> [DocumentSection] {
         let sections: [DocumentSection]
         if frameTexts.count == 1 {
             sections = [DocumentSection(
-                title: info.filename,
+                title: filename,
                 kind: .body,
                 markdown: frameTexts[0],
                 metadata: ["extractionMethod": "vision-ocr"]
@@ -108,7 +112,7 @@ public struct ImageOCRConverter: DocumentConverter {
                 )
             }
         }
-        return ConverterResult(title: info.filename, sections: sections)
+        return MarkdownLiteral.escapeSectionBackslashes(sections)
     }
 
     /// Longest-side pixel cap for the decoded image. Mirrors the PDF OCR

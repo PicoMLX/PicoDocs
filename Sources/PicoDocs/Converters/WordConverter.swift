@@ -56,10 +56,7 @@ public struct WordConverter: DocumentConverter {
         let numbering = WordListNumbering(archive: archive)
         if let failure = numbering.failure { throw failure }
         let tableBudget = TableBudget()
-        var blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering, tableBudget: tableBudget)
-        // Text boxes (shapes with text) store their content in `w:txbxContent`
-        // outside the normal block flow; extract it and append as body blocks.
-        blocks += try Self.extractTextBoxes(from: body, relationships: relationships, numbering: numbering, tableBudget: tableBudget)
+        let blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering, tableBudget: tableBudget)
         var markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Footnote/endnote text lives in separate parts; append the referenced
@@ -68,7 +65,7 @@ public struct WordConverter: DocumentConverter {
         //
         // NOTE: these are CommonMark footnote markers in the canonical Markdown;
         // DocumentRenderer also renders them for the HTML and plaintext exports.
-        let notes = Self.parseNotes(archive, bookmarks: relationships.filter { $0.key.hasPrefix("#") })
+        let notes = try Self.parseNotes(archive, bookmarks: relationships.filter { $0.key.hasPrefix("#") })
         let definitions = Self.referencedNoteIDs(in: body).compactMap { id in
             notes[id].map { text in
                 // Indent continuation lines (from a manual w:br inside the note) so
@@ -158,11 +155,13 @@ public struct WordConverter: DocumentConverter {
             try Task.checkCancellation()
             switch element.tagName().lowercased() {
             case "w:p":
+                defer { if child(of: element, named: "w:ppr").flatMap({ child(of: $0, named: "w:sectpr") }) != nil { numbering?.sectionBreak() } }
                 if let markdown = renderParagraph(element, relationships: relationships, numbering: numbering, headingObserver: headingObserver), !markdown.isEmpty {
                     let marker = MarkdownBlockParser.listMarker(markdown.trimmingCharacters(in: .whitespaces))
                     let continuation = numbering?.lastParagraphIsContinuation == true
                     let identity = marker == nil && !continuation ? nil : numbering?.lastParagraphList
-                    let joins = identity.map { continuation ? ($0.instance == rootListInstance || numbering?.lastParagraphIsExportedContinuation == true) : ($0.level > 0 || $0.instance == rootListInstance) } ?? (marker != nil && marker == previousList)
+                    let exportedItem = child(of: element, named: "w:ppr").flatMap { child(of: $0, named: "w:pstyle") }.flatMap { try? $0.attr("w:val") } == "PicoListItem"
+                    let joins = (exportedItem || continuation) && (identity.map { continuation ? ($0.instance == rootListInstance || numbering?.lastParagraphIsExportedContinuation == true) : ($0.level > 0 || $0.instance == rootListInstance) } ?? (marker != nil && marker == previousList))
                     if joins, previousList != nil, !blocks.isEmpty {
                         blocks[blocks.count - 1] += (continuation ? "\n\n" : "\n") + markdown
                     } else { blocks.append(markdown) }
@@ -170,14 +169,23 @@ public struct WordConverter: DocumentConverter {
                     if !continuation, let identity, identity.level == 0 { rootListInstance = identity.instance }
                     if marker == nil && !continuation { rootListInstance = nil }
                 }
+                blocks += try extractTextBoxes(from: element, relationships: relationships, numbering: numbering, tableBudget: tableBudget)
+            case "w:sectpr":
+                numbering?.sectionBreak()
             case "w:tbl":
                 previousList = nil
-                let table = try renderTable(element, relationships: relationships, numbering: numbering, budget: tableBudget)
+                var boxes: [String] = []
+                let table = try renderTable(element, relationships: relationships, numbering: numbering, budget: tableBudget) { paragraph in
+                    boxes += try extractTextBoxes(from: paragraph, relationships: relationships, numbering: numbering, tableBudget: tableBudget)
+                }
                 if !table.isEmpty { blocks.append(table) }
+                blocks += boxes
             case "w:sdt":
                 if let content = element.children().first(where: { $0.tagName().lowercased() == "w:sdtcontent" }) {
                     pending.append(contentsOf: content.children().array().reversed())
                 }
+            case "w:customxml", "w:ins", "w:moveto", "w:smarttag":
+                pending.append(contentsOf: element.children().array().reversed())
             default:
                 continue
             }
@@ -195,7 +203,7 @@ public struct WordConverter: DocumentConverter {
         // Iterate the Elements sequence directly (no intermediate array copy).
         guard let textBoxes = try? body.getElementsByTag("w:txbxContent") else { return blocks }
         for txbx in textBoxes {
-            if !shouldRenderTextBox(txbx) { continue }
+            if !shouldRenderTextBox(txbx) || isInsideTextBox(txbx, before: body) { continue }
             blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships, numbering: numbering, tableBudget: tableBudget))
         }
         return blocks
@@ -264,17 +272,19 @@ public struct WordConverter: DocumentConverter {
             return fence + "\n" + code + "\n" + fence
         }
         let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
-        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style) } ?? (numPr != nil ? "- " : nil)
+        let heading = numbering?.headingLevel(style: style, paragraphProperties: properties) ?? headingLevel(forStyle: style)
+        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style, visibleMarker: heading == nil, paragraphProperties: properties) ?? (numPr?.children().size() == 0 ? "- " : nil) } ?? (numPr != nil ? "- " : nil)
+        let boundary = numbering?.listRestartIndent.map { String(repeating: " ", count: $0) + MarkdownLiteral.listRestartBoundary + "\n\n" } ?? ""
         let text = escapeBlockStarts(renderInline(paragraph, relationships: relationships).trimmingCharacters(in: .whitespaces))
         guard !text.isEmpty else {
             if let borders = properties?.children().first(where: { $0.tagName().lowercased() == "w:pbdr" }),
                let bottom = borders.children().first(where: { $0.tagName().lowercased() == "w:bottom" }),
                let value = try? bottom.attr("w:val"), !value.isEmpty, !["nil", "none"].contains(value) { return "---" }
-            return prefix
+            return heading == nil ? prefix.map { boundary + $0 } : nil
         }
 
-        if let level = headingLevel(forStyle: style) {
-            let title = (prefix ?? "") + text
+        if let level = heading {
+            let title = text
             headingObserver?(paragraph, title)
             return String(repeating: "#", count: level) + " " + title
         }
@@ -284,8 +294,8 @@ public struct WordConverter: DocumentConverter {
         if let prefix {
             // Every hard-break line belongs at the item's content column. This
             // also handles markerless continuation paragraphs and nested lists.
-            let continuationIndent = String(repeating: " ", count: prefix.count)
-            return prefix + text.replacingOccurrences(of: "\n", with: "\n" + continuationIndent)
+            let continuationIndent = String(repeating: " ", count: WordListNumbering.displayWidth(prefix))
+            return boundary + prefix + text.replacingOccurrences(of: "\n", with: "\n" + continuationIndent)
         }
         return text
     }
@@ -346,7 +356,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     static func renderRun(_ run: Element, relationships: [String: String], hardBreak: String = "  \n") -> String {
-        let properties = try? run.getElementsByTag("w:rPr").first()
+        let properties = child(of: run, named: "w:rpr")
         let bold = isFormattingEnabled(properties, tag: "w:b")
         let italic = isFormattingEnabled(properties, tag: "w:i")
         if (try? properties?.getElementsByTag("w:rStyle").first()?.attr("w:val")) == "PicoFootnoteMarker" {
@@ -448,7 +458,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     private static func escapeLiteralText(_ text: String) -> String {
-        text.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+        MarkdownLiteral.escapePunctuation(text, characters: #"\`*_{}[]<>"#)
     }
 
     private static func escapeCanonicalLabel(_ text: String) -> String {
@@ -478,10 +488,21 @@ public struct WordConverter: DocumentConverter {
     }
 
     private static func escapeLinkDestination(_ url: String) -> String {
+        let url = url.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E")
         // Spaces / parens break inline link destinations; wrap in <> (a valid
         // CommonMark destination form) when present.
-        let escaped = url.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "\\<").replacingOccurrences(of: ">", with: "\\>")
-        if url.contains(where: \.isWhitespace) || url.contains("(") || url.contains(")") || url.contains("<") || url.contains(">") {
+        if url.contains(" ") || url.contains("(") || url.contains(")") {
+            return "<\(url)>"
+        }
+        return url
+    }
+
+    // Local image identities must decode back to their carrier path. URI percent
+    // encoding belongs to hyperlinks; canonical Markdown escapes preserve names.
+    private static func escapeImageDestination(_ path: String) -> String {
+        let escaped = path.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "<", with: "\\<").replacingOccurrences(of: ">", with: "\\>")
+        if path.contains(where: \.isWhitespace) || path.contains("(") || path.contains(")") || path.contains("<") || path.contains(">") {
             return "<\(escaped)>"
         }
         return escaped
@@ -508,7 +529,7 @@ public struct WordConverter: DocumentConverter {
         }
     }
 
-    static func renderTable(_ table: Element, relationships: [String: String], numbering: WordListNumbering? = nil, budget: TableBudget = TableBudget()) throws -> String {
+    static func renderTable(_ table: Element, relationships: [String: String], numbering: WordListNumbering? = nil, budget: TableBudget = TableBudget(), textBoxes: ((Element) throws -> Void)? = nil) throws -> String {
         // Reserve the padded grid across the whole conversion before allocating
         // any span placeholders or serialized Markdown for this table.
         var rowCount = 0, columnCount = 0
@@ -540,19 +561,20 @@ public struct WordConverter: DocumentConverter {
                 // duplicate them. (A table inside a text box is not skipped, so its
                 // own cells still render — see isInsideTextBox.)
                 for paragraph in (try? tc.getElementsByTag("w:p").array()) ?? [] {
-                    if isInsideTextBox(paragraph, before: tc) { continue }
+                    if isInsideTextBox(paragraph, before: tc) || paragraph.parents().prefix(while: { $0 !== tc }).contains(where: { ["w:del", "w:movefrom"].contains($0.tagName().lowercased()) }) { continue }
                     let properties = paragraph.children().first { $0.tagName().lowercased() == "w:ppr" }
                     let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
                     let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
-                    let prefix = numbering?.prefix(numPr: numPr, style: style)
-                    let t = (prefix ?? "") + renderInline(paragraph, relationships: relationships, hardBreak: "\n").trimmingCharacters(in: .whitespaces)
+                    let prefix = numbering?.prefix(numPr: numPr, style: style, visibleMarker: false, paragraphProperties: properties)
+                    let t = (style == "PicoListItem" ? (prefix ?? "") : "") + renderInline(paragraph, relationships: relationships, hardBreak: "\n").trimmingCharacters(in: .whitespaces)
                     if !t.isEmpty {
                         try budget.reserveText(t)
                         cellText += (cellText.isEmpty ? "" : "\n") + t
                     }
+                    try textBoxes?(paragraph)
                 }
                 // Single-line Markdown cells: escape delimiters; CR/LF become <br>.
-                cells.append(MarkdownTableCell.escapeDelimiters(cellText)
+                cells.append(MarkdownTableCell.escapeCanonicalDelimiters(cellText)
                     .replacingOccurrences(of: "\r\n", with: "<br>")
                     .replacingOccurrences(of: "\r", with: "<br>")
                     .replacingOccurrences(of: "\n", with: "<br>"))
@@ -584,6 +606,11 @@ public struct WordConverter: DocumentConverter {
         return span
     }
 
+    /// The first direct child of `element` with the given (lowercased) tag name.
+    private static func child(of element: Element, named tag: String) -> Element? {
+        element.children().first { $0.tagName().lowercased() == tag }
+    }
+
     // MARK: - Relationships (hyperlink targets)
 
     static func parseRelationships(_ archive: Archive, path: String = "word/_rels/document.xml.rels") -> [String: String] {
@@ -610,7 +637,7 @@ public struct WordConverter: DocumentConverter {
     /// Parses footnote and endnote text (stored in separate parts) into a map
     /// keyed by reference id (`fn<id>` / `en<id>`), skipping the auto separator
     /// and continuation notes.
-    static func parseNotes(_ archive: Archive, bookmarks: [String: String] = [:]) -> [String: String] {
+    static func parseNotes(_ archive: Archive, bookmarks: [String: String] = [:]) throws -> [String: String] {
         var notes: [String: String] = [:]
         // Resolve each note part from its document relationship Target (falling
         // back to the standard name), then render it against that part's own
@@ -621,7 +648,7 @@ public struct WordConverter: DocumentConverter {
         ] {
             let part = relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
             let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part)).merging(bookmarks) { _, canonical in canonical }
-            for (key, value) in parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships) {
+            for (key, value) in try parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships) {
                 notes[key] = value
             }
         }
@@ -656,22 +683,22 @@ public struct WordConverter: DocumentConverter {
         "separator", "continuationSeparator", "continuationNotice",
     ]
 
-    private static func parseNotePart(_ archive: Archive, path: String, tag: String, prefix: String, relationships: [String: String]) -> [String: String] {
+    private static func parseNotePart(_ archive: Archive, path: String, tag: String, prefix: String, relationships: [String: String]) throws -> [String: String] {
         guard let data = readEntry(archive, path: path),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
             return [:]
         }
+        // Each note part has independent counters from the body and other stories.
+        let numbering = WordListNumbering(archive: archive)
         var notes: [String: String] = [:]
         for note in (try? doc.getElementsByTag(tag).array()) ?? [] {
             guard let id = try? note.attr("w:id"), !id.isEmpty else { continue }
             // Skip only the auto separator/continuation notes; keep ordinary
             // referenced notes even when explicitly typed "normal".
             if let type = try? note.attr("w:type"), separatorNoteTypes.contains(type) { continue }
-            let text = ((try? note.getElementsByTag("w:p").array()) ?? [])
-                .map { renderInline($0, relationships: relationships).trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-                .joined(separator: " ")
+            let text = try renderBlocks(in: note, relationships: relationships, numbering: numbering)
+                .joined(separator: "\n\n")
             guard !text.isEmpty else { continue }
             notes["\(prefix)\(id)"] = text
         }
@@ -731,7 +758,7 @@ public struct WordConverter: DocumentConverter {
     static func imageMarkdown(in drawing: Element, relationships: [String: String]) -> String {
         guard let target = imageTarget(in: drawing, relationships: relationships) else { return "" }
         let path = target.hasPrefix("/") ? String(target.dropFirst()) : resolvePartPath(target, relativeTo: "word")
-        return "![\(escapeLiteralText(imageAltText(in: drawing)))](\(escapeLinkDestination(path)))"
+        return "![\(escapeLiteralText(imageAltText(in: drawing)))](\(escapeImageDestination(path)))"
     }
 
     /// The relationship Target (e.g. "media/image1.png") an image references via
@@ -835,7 +862,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     // MARK: - Archive helpers
-    // (mirror EPUBConverter's; candidates for a shared ZIP utility later.)
+    // (entry reads go through the shared, size-hardened ZIPEntryReader.)
 
     static func readEntry(_ archive: Archive, path: String, maxBytes: Int = 32 * 1024 * 1024) -> Data? {
         let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path

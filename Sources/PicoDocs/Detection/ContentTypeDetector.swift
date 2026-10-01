@@ -50,8 +50,8 @@ public enum ContentTypeDetector {
             let zipFormat = classifyZip(data)
             if zipFormat == .zip {
                 // iWork '13+ packages are ZIPs without OOXML/EPUB markers. Route to
-                // the Pages converter when the filename/UTType says Pages, raising
-                // confidence when the archive's IWA layout confirms it.
+                // the Pages/Keynote/Numbers converter the filename/UTType names,
+                // raising confidence when the archive's IWA layout confirms it.
                 if let iwork = iworkFormatFromHints(info) {
                     return (iwork, isIWorkArchive(data) ? 0.95 : 0.5)
                 }
@@ -81,8 +81,8 @@ public enum ContentTypeDetector {
         // 3. Document formats identified by hint but lacking magic bytes (corrupt
         //    or mislabeled). Honor the hint so they reach the right converter (or
         //    report unsupported) instead of being mis-read as text.
-        // iWork hints without ZIP magic (corrupt/mislabeled). Pages routes by any
-        // hint (its extension is unambiguous).
+        // iWork hints without ZIP magic (corrupt/mislabeled). Pages and Numbers
+        // route by any hint (their extensions are unambiguous).
         if let iwork = iworkFormatFromHints(info), iwork != .keynote {
             return (iwork, 0.4)
         }
@@ -226,21 +226,23 @@ public enum ContentTypeDetector {
         }
     }
 
-    /// Resolves iWork formats from hints (Pages, Keynote). Numbers will get its
-    /// own `DetectedFormat` case when supported.
+    /// Resolves iWork formats from hints (Pages, Keynote, Numbers).
     static func iworkFormatFromHints(_ info: StreamInfo) -> DetectedFormat? {
         if let ut = info.utType {
             if ut.conforms(to: .pages) || ut.conforms(to: .pagesSingleFile) { return .pages }
             if ut.conforms(to: .keynote) || ut.conforms(to: .keynoteSingleFile) { return .keynote }
+            if ut.conforms(to: .numbers) || ut.conforms(to: .numbersSingleFile) { return .numbers }
         }
         switch info.fileExtension?.lowercased() {
         case "pages": return .pages
         case "key": return .keynote
+        case "numbers": return .numbers
         default: break
         }
         // Extensionless web downloads: route by the iWork MIME type.
         if isPagesMIME(info.mimeType) { return .pages }
         if isKeynoteMIME(info.mimeType) { return .keynote }
+        if isNumbersMIME(info.mimeType) { return .numbers }
         return nil
     }
 
@@ -252,6 +254,12 @@ public enum ContentTypeDetector {
     static func isPagesMIME(_ mimeType: String?) -> Bool {
         let m = baseMIME(mimeType)
         return m == "application/vnd.apple.pages" || m == "application/x-iwork-pages-sffpages"
+    }
+
+    /// True for the current/legacy Numbers MIME types.
+    static func isNumbersMIME(_ mimeType: String?) -> Bool {
+        let m = baseMIME(mimeType)
+        return m == "application/vnd.apple.numbers" || m == "application/x-iwork-numbers-sffnumbers"
     }
 
     /// True for the current/legacy Keynote MIME types.
