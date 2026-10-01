@@ -242,9 +242,10 @@ public struct PowerPointConverter: DocumentConverter {
                 let link = click == nil ? inheritedLink : hyperlink(click, context: context)
                 if shape.tagName().lowercased() == "p:grpsp" {
                     appendNotes(in: shape, inheritedLink: link)
-                } else if shape.tagName().lowercased() == "p:sp",
-                          placeholderType(of: shape) == nil || placeholderType(of: shape) == "body" {
+                } else if shape.tagName().lowercased() == "p:sp" {
+                    if let type = placeholderType(of: shape), skippedPlaceholders.contains(type) { continue }
                     context.defaultLink = link
+                    if let image = pictureMarkdown(shape, context: &context) { context.appendBlock(image, to: &paragraphs) }
                     context.runDefaults = inheritedRunDefaults(for: shape, context: context)
                     if let body = textBody(of: shape) {
                         let rendered = renderParagraphs(body, inherited: inheritedBullets(for: shape, context: context), context: &context)
@@ -265,7 +266,7 @@ public struct PowerPointConverter: DocumentConverter {
                 }
             }
         }
-        if !["0", "false"].contains((try? root.attr("showMasterSp")) ?? ""),
+        if !["0", "false"].contains(booleanValue((try? root.attr("showMasterSp")) ?? "")),
            let master = context.master, let path = context.masterPath,
            let masterRoot = master.children().first(),
            let common = context.styles.child(of: masterRoot, named: "p:csld"),
@@ -432,8 +433,8 @@ public struct PowerPointConverter: DocumentConverter {
         }
         var title: String?
         var blocks: [String] = []
-        let showInherited = !["0", "false"].contains((try? root.attr("showMasterSp")) ?? "")
-        let showMaster = !["0", "false"].contains((try? context.layout?.children().first()?.attr("showMasterSp")) ?? "")
+        let showInherited = !["0", "false"].contains(booleanValue((try? root.attr("showMasterSp")) ?? ""))
+        let showMaster = !["0", "false"].contains(booleanValue((try? context.layout?.children().first()?.attr("showMasterSp")) ?? ""))
         if showInherited {
             let inherited = [(showMaster ? context.master : nil, context.masterPath), (context.layout, context.layoutPath)]
             for (part, path) in inherited {
@@ -512,6 +513,7 @@ public struct PowerPointConverter: DocumentConverter {
             case "p:sp":
                 let type = placeholderType(of: shape)
                 if let type, skippedPlaceholders.contains(type) { continue }
+                if let image = pictureMarkdown(shape, context: &context) { context.appendBlock(image, to: &blocks) }
                 guard let body = context.styles.child(of: shape, named: "p:txbody") else { continue }
                 context.runDefaults = inheritedRunDefaults(for: shape, context: context)
                 if type == "title" || type == "ctrTitle" {
@@ -675,10 +677,9 @@ public struct PowerPointConverter: DocumentConverter {
             }
             if let master = context.master {
                 sources.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap { listStyle($0, cache: context.styles) })
-                let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
-                sources.append(masterTextStyle(master, named: style, cache: context.styles))
             }
         }
+        sources.append(applicableMasterTextStyle(for: shape, context: context))
         sources.append(context.defaultTextStyle)
         return (0..<9).map { level in
             for source in sources {
@@ -701,10 +702,9 @@ public struct PowerPointConverter: DocumentConverter {
             if let layout = context.layout { styles.append(matchingPlaceholder(in: layout, type: type, index: index, cache: context.placeholders).flatMap { listStyle($0, cache: context.styles) }) }
             if let master = context.master {
                 styles.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap { listStyle($0, cache: context.styles) })
-                let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
-                styles.append(masterTextStyle(master, named: style, cache: context.styles))
             }
         }
+        styles.append(applicableMasterTextStyle(for: shape, context: context))
         styles.append(context.defaultTextStyle)
         return (0..<9).map { level in
             styles.flatMap { source -> [Element] in
@@ -713,6 +713,22 @@ public struct PowerPointConverter: DocumentConverter {
                     .compactMap { $0.flatMap { context.styles.child(of: $0, named: "a:defrpr") } }
             }
         }
+    }
+
+    private static func applicableMasterTextStyle(for shape: Element, context: SlideContext) -> Element? {
+        guard let master = context.master else { return nil }
+        let style: String
+        if master.children().first()?.tagName().lowercased() == "p:notesmaster" {
+            style = "p:notesStyle"
+        } else {
+            let raw = placeholder(of: shape).flatMap { try? $0.attr("type") }
+            let type = raw.map { $0.isEmpty ? "obj" : $0 }
+            let nonvisual = context.styles.child(of: shape, named: "p:nvsppr")
+            let properties = nonvisual.flatMap { context.styles.child(of: $0, named: "p:cnvsppr") }
+            let bodyLike = type.map { ["obj", "body", "subTitle"].contains($0) } ?? isOn(properties, "txBox")
+            style = bodyLike ? "p:bodyStyle" : (type.map { ["title", "ctrTitle"].contains($0) } == true ? "p:titleStyle" : "p:otherStyle")
+        }
+        return masterTextStyle(master, named: style, cache: context.styles)
     }
 
     private static func masterTextStyle(_ master: Document, named name: String, cache: StyleChildCache) -> Element? {
@@ -981,7 +997,14 @@ public struct PowerPointConverter: DocumentConverter {
                 if let budget, !budget.admit(text.utf8.count, retained: &retainedRunBytes) { return "" }
                 let click = properties.flatMap { selectedChild(of: $0, named: "a:hlinkclick") }
                 let link = hyperlink(click, context: context)
-                runs.append(Run(text: text, bold: isOn(properties, "b", defaults: defaults), italic: isOn(properties, "i", defaults: defaults), link: click == nil ? context.defaultLink : link))
+                let bold = isOn(properties, "b", defaults: defaults), italic = isOn(properties, "i", defaults: defaults)
+                let destination = click == nil ? context.defaultLink : link
+                let last = runs.count - 1
+                if last >= 0, runs[last].bold == bold, runs[last].italic == italic, runs[last].link == destination {
+                    runs[last].text += text
+                } else {
+                    runs.append(Run(text: text, bold: bold, italic: italic, link: destination))
+                }
             case "a:br":
                 if let budget, !budget.admit(1, retained: &retainedRunBytes) { return "" }
                 runs.append(Run(text: "\n", bold: false, italic: false, link: nil))
@@ -1050,9 +1073,13 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// Whether a run-property toggle (`b`/`i`) is on (`"1"` / `"true"`).
     private static func isOn(_ properties: Element?, _ attribute: String, defaults: [Element] = []) -> Bool {
-        let direct = (try? properties?.attr(attribute)) ?? ""
-        let value = direct.isEmpty ? defaults.compactMap { try? $0.attr(attribute) }.first(where: { !$0.isEmpty }) ?? "" : direct
+        let direct = booleanValue((try? properties?.attr(attribute)) ?? "")
+        let value = direct.isEmpty ? defaults.compactMap { try? $0.attr(attribute) }.map(booleanValue).first(where: { !$0.isEmpty }) ?? "" : direct
         return value == "1" || value == "true"
+    }
+
+    private static func booleanValue(_ value: String) -> String {
+        value.trimmingCharacters(in: CharacterSet(charactersIn: " \t\r\n"))
     }
 
     private static func preservesSpace(_ node: Element?) -> Bool {
@@ -1110,7 +1137,13 @@ public struct PowerPointConverter: DocumentConverter {
             }
             let line = String(slice)
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard let first = trimmed.unicodeScalars.first, "#-+|0123456789".unicodeScalars.contains(first) else { output += line; return }
+            guard let first = trimmed.unicodeScalars.first, "#-+|0123456789~".unicodeScalars.contains(first) else { output += line; return }
+            if trimmed.hasPrefix("~~~") {
+                let leading = line.prefix { $0 == " " || $0 == "\t" }
+                let escaped = String(leading) + "\\" + line.dropFirst(leading.count)
+                if let budget { _ = budget.append(escaped, to: &output) } else { output += escaped }
+                return
+            }
             if trimmed.count >= 3, trimmed.allSatisfy({ $0 == "-" || $0 == " " }) {
                 if let budget {
                     var bytes = output.utf8.count
@@ -1282,7 +1315,9 @@ public struct PowerPointConverter: DocumentConverter {
     /// An inline image reference for a picture (alt text from `descr`, then
     /// `title`, then `name`), registering its bytes as an `.image` section.
     static func pictureMarkdown(_ picture: Element, context: inout SlideContext) -> String? {
-        guard let fill = selectedChildren(in: picture).first(where: { $0.tagName().lowercased() == "p:blipfill" }),
+        let fill = selectedChild(of: picture, named: "p:blipfill")
+            ?? selectedChild(of: picture, named: "p:sppr").flatMap { selectedChild(of: $0, named: "a:blipfill") }
+        guard let fill,
               let blip = selectedDescendant(in: fill, named: "a:blip") else { return nil }
         let embedded = (try? blip.attr("r:embed")) ?? ""
         let linked = (try? blip.attr("r:link")) ?? ""
@@ -1301,7 +1336,8 @@ public struct PowerPointConverter: DocumentConverter {
                 ? (context.images.add(path: mediaPath, filename: filename, archive: context.archive) ?? filename)
                 : filename
         }
-        let properties = selectedChild(of: picture, named: "p:nvpicpr").flatMap { selectedChild(of: $0, named: "p:cnvpr") }
+        let nonvisual = selectedChild(of: picture, named: "p:nvpicpr") ?? selectedChild(of: picture, named: "p:nvsppr")
+        let properties = nonvisual.flatMap { selectedChild(of: $0, named: "p:cnvpr") }
         let description = (try? properties?.attr("descr")) ?? ""
         let title = (try? properties?.attr("title")) ?? ""
         let name = (try? properties?.attr("name")) ?? ""

@@ -192,19 +192,14 @@ public enum DocumentRenderer {
 
     /// Charge every projected occurrence before materializing any data URLs.
     static func boundedImageReplacement(_ html: String, reference: String, mime: String, base64: String, maximumBytes: Int = 64 * 1024 * 1024) throws -> String {
-        let needle = "src=\"\(escapeHTML(reference))\""
+        guard maximumBytes >= 19 else { throw PicoDocsError.fileCorrupted }
+        let needle = "src=\"\(try boundedEscapeHTML(reference, maximumBytes: maximumBytes - 6))\""
         var projectedBytes = html.utf8.count
         guard projectedBytes <= maximumBytes else { throw PicoDocsError.fileCorrupted }
         guard html.range(of: needle, options: .literal) != nil else { return html }
         var replacementBytes = 19 // src="data: + ;base64, + closing quote
         for text in [mime, base64] {
-            guard text.utf8.count <= maximumBytes - replacementBytes else { throw PicoDocsError.fileCorrupted }
-            replacementBytes += text.utf8.count
-            for scalar in text.unicodeScalars {
-                let growth = scalar == "&" ? 4 : (scalar == "<" || scalar == ">" ? 3 : (scalar == "\"" ? 5 : 0))
-                guard growth <= maximumBytes - replacementBytes else { throw PicoDocsError.fileCorrupted }
-                replacementBytes += growth
-            }
+            replacementBytes += try htmlEscapedByteCount(text, maximumBytes: maximumBytes - replacementBytes)
         }
         let growth = replacementBytes - needle.utf8.count
         var start = html.startIndex
@@ -237,7 +232,9 @@ public enum DocumentRenderer {
                 let html = try inlineHTML(text, footnoteNumbers: numbers, budget: budget).replacingOccurrences(of: "\n", with: "<br>\n")
                 return "<p>\(html)</p>"
             case .code(let code):
-                return "<pre><code>\(escapeHTML(code))</code></pre>"
+                let escaped = try boundedEscapeHTML(code, maximumBytes: budget.remaining)
+                budget.remaining -= escaped.utf8.count
+                return "<pre><code>\(escaped)</code></pre>"
             case .rule:
                 return "<hr>"
             case .blockquote(let lines):
@@ -699,7 +696,7 @@ public enum DocumentRenderer {
         let (afterCode, spans) = extractCodeSpans(text)
         let protected = try boundedProtectEscapes(afterCode, maximumBytes: budget.remaining)
         let (afterLinks, links) = extractLinks(protected)
-        var result = applyEmphasisHTML(escapeHTML(afterLinks))
+        var result = applyEmphasisHTML(try boundedEscapeHTML(afterLinks, maximumBytes: budget.remaining))
         // Footnote references: `[^id]` -> a superscript link. Done here, where code
         // spans are already placeholders, so markers inside code are not touched
         // (code blocks never reach inlineHTML). The id is HTML-escaped for attribute
@@ -709,23 +706,26 @@ public enum DocumentRenderer {
         for (index, link) in links.enumerated() {
             let tag: String
             if let image = link.imageSource, isSafeURL(image, isImage: true) {
-                let picture = "<img src=\"\(escapeHTML(image))\" alt=\"\(escapeHTML(link.label))\">"
-                tag = isSafeURL(link.url, isImage: false) ? "<a href=\"\(escapeHTML(link.url))\">\(picture)</a>" : picture
+                let picture = "<img src=\"\(try boundedEscapeHTML(image, maximumBytes: budget.remaining))\" alt=\"\(try boundedEscapeHTML(link.label, maximumBytes: budget.remaining))\">"
+                tag = isSafeURL(link.url, isImage: false) ? "<a href=\"\(try boundedEscapeHTML(link.url, maximumBytes: budget.remaining))\">\(picture)</a>" : picture
             } else if !isSafeURL(link.url, isImage: link.isImage) {
                 // A script-capable URL (`javascript:` …) would make the exported
                 // page executable when displayed; keep only the visible text.
-                tag = link.isImage ? escapeHTML(link.label) : applyEmphasisHTML(escapeHTML(link.label))
+                let label = try boundedEscapeHTML(link.label, maximumBytes: budget.remaining)
+                tag = link.isImage ? label : applyEmphasisHTML(label)
             } else if link.isImage {
-                tag = "<img src=\"\(escapeHTML(link.url))\" alt=\"\(escapeHTML(link.label))\">"
+                tag = "<img src=\"\(try boundedEscapeHTML(link.url, maximumBytes: budget.remaining))\" alt=\"\(try boundedEscapeHTML(link.label, maximumBytes: budget.remaining))\">"
             } else {
-                tag = "<a href=\"\(escapeHTML(link.url))\">\(applyEmphasisHTML(escapeHTML(link.label)))</a>"
+                tag = "<a href=\"\(try boundedEscapeHTML(link.url, maximumBytes: budget.remaining))\">\(applyEmphasisHTML(try boundedEscapeHTML(link.label, maximumBytes: budget.remaining)))</a>"
             }
-            result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: tag)
+            result = try boundedHTMLReplacement(result, needle: "\(linkOpen)\(index)\(linkClose)", replacement: tag, maximumBytes: budget.remaining)
         }
         result = try boundedHTMLWhitespaceReferences(result, maximumBytes: budget.remaining)
         result = restoreEscapes(result, html: true)
         for (index, span) in spans.enumerated() {
-            result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
+            guard budget.remaining >= 13 else { throw PicoDocsError.fileCorrupted }
+            let escaped = try boundedEscapeHTML(span, maximumBytes: budget.remaining - 13)
+            result = try boundedHTMLReplacement(result, needle: "\(codeOpen)\(index)\(codeClose)", replacement: "<code>\(escaped)</code>", maximumBytes: budget.remaining)
         }
         guard result.utf8.count <= budget.remaining else { throw PicoDocsError.fileCorrupted }
         budget.remaining -= result.utf8.count
@@ -928,12 +928,53 @@ public enum DocumentRenderer {
 
     // MARK: - Escaping
 
+    private static func htmlEntity(_ scalar: Unicode.Scalar) -> String? {
+        switch scalar {
+        case "&": return "&amp;"
+        case "<": return "&lt;"
+        case ">": return "&gt;"
+        case "\"": return "&quot;"
+        case "'": return "&#39;"
+        default: return nil
+        }
+    }
+
+    /// Use the same entity mapping for projection and emission, before allocating
+    /// an escaped copy of document text or an embedded-image attribute.
+    static func htmlEscapedByteCount(_ text: String, maximumBytes: Int) throws -> Int {
+        var bytes = 0
+        for scalar in text.unicodeScalars {
+            let size = htmlEntity(scalar)?.utf8.count ?? (scalar.value <= 0x7F ? 1 : scalar.value <= 0x7FF ? 2 : scalar.value <= 0xFFFF ? 3 : 4)
+            guard size <= maximumBytes - bytes else { throw PicoDocsError.fileCorrupted }
+            bytes += size
+        }
+        return bytes
+    }
+
+    static func boundedEscapeHTML(_ text: String, maximumBytes: Int) throws -> String {
+        _ = try htmlEscapedByteCount(text, maximumBytes: maximumBytes)
+        return escapeHTML(text)
+    }
+
+    private static func boundedHTMLReplacement(_ text: String, needle: String, replacement: String, maximumBytes: Int) throws -> String {
+        var bytes = text.utf8.count
+        guard bytes <= maximumBytes else { throw PicoDocsError.fileCorrupted }
+        let growth = replacement.utf8.count - needle.utf8.count
+        var start = text.startIndex
+        while let range = text.range(of: needle, options: .literal, range: start..<text.endIndex) {
+            guard growth <= 0 || growth <= maximumBytes - bytes else { throw PicoDocsError.fileCorrupted }
+            bytes += growth; start = range.upperBound
+        }
+        return text.replacingOccurrences(of: needle, with: replacement, options: .literal)
+    }
+
     private static func escapeHTML(_ text: String) -> String {
-        text.replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&#39;")
+        var result = ""
+        for scalar in text.unicodeScalars {
+            if let entity = htmlEntity(scalar) { result += entity }
+            else { result.unicodeScalars.append(scalar) }
+        }
+        return result
     }
 
     private static func escapeXML(_ text: String) -> String {

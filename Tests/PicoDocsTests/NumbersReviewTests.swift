@@ -73,6 +73,25 @@ import ZIPFoundation
         #expect(!UTType.numbers.isSupported)
         #expect(UTType.numbersSingleFile.isSupported)
     }
+
+    @Test(arguments: [" Sheet ", "\tSheet\t", " \tSheet\t "])
+    func sheetBoundaryWhitespaceStaysLiteral(_ name: String) async throws {
+        let result = try await NumbersConverter().convert(Self.workbook(name: name), info: StreamInfo(detectedFormat: .numbers))
+        #expect(String(try AttributedString(markdown: result.markdown()).characters).hasPrefix(name))
+        #expect(try DocumentRenderer.render(result, to: .plaintext).hasPrefix(name + "\n\n"))
+    }
+
+    @Test func partiallyResolvedSheetOrderAppendsRecoveredSheets() async throws {
+        typealias B = PagesConverterTests
+        let document = B.lengthField(1, B.varintField(1, 10)) + B.lengthField(1, [0x08])
+        let objects: [(id: UInt64, type: UInt64, payload: [UInt8], references: [UInt64])] = [
+            (1, 1, document, [10]), (11, 2, B.lengthField(1, Array("Recovered".utf8)), []),
+            (10, 2, B.lengthField(1, Array("Ordered".utf8)), [])
+        ]
+        let data = B.makeZip([(name: "Index/Document.iwa", data: B.snappyFrame(B.makeIWAStream(objects: objects)))])
+        let result = try await NumbersConverter().convert(data, info: StreamInfo(detectedFormat: .numbers))
+        #expect(result.sections.map(\.sheetName) == ["Ordered", "Recovered"])
+    }
     @Test func archiveAndDecodedOutputBudgetsStopExpansion() throws {
         typealias B = PagesConverterTests
         let payload = Array(repeating: UInt8(65), count: 12)
