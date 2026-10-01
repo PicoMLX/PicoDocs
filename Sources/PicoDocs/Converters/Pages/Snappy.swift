@@ -22,12 +22,13 @@ enum Snappy {
 
     enum SnappyError: Error {
         case malformed
+        case outputLimitExceeded
     }
 
     /// Decompresses an iWork `.iwa` payload: concatenated `[0x00, len24-LE, block]`
     /// frames, each `block` a raw Snappy-compressed block. Returns the assembled
     /// protobuf object stream.
-    static func decompressIWA(_ data: [UInt8]) throws -> [UInt8] {
+    static func decompressIWA(_ data: [UInt8], maximumOutputBytes: Int = Int.max) throws -> [UInt8] {
         var output: [UInt8] = []
         var i = 0
         let n = data.count
@@ -42,7 +43,8 @@ enum Snappy {
             // frame type as corruption rather than silently skipping it (which
             // could drop body text); callers decide whether that's fatal.
             guard type == 0x00 else { throw SnappyError.malformed }
-            output.append(contentsOf: try decompressBlock(Array(data[i ..< i + length])))
+            try Task.checkCancellation()
+            output.append(contentsOf: try decompressBlock(Array(data[i ..< i + length]), maximumOutputBytes: maximumOutputBytes - output.count))
             i += length
         }
         return output
@@ -50,9 +52,10 @@ enum Snappy {
 
     /// Decompresses a single raw Snappy block (preamble varint = uncompressed
     /// length, then a stream of literal and copy elements).
-    static func decompressBlock(_ input: [UInt8]) throws -> [UInt8] {
+    static func decompressBlock(_ input: [UInt8], maximumOutputBytes: Int = Int.max) throws -> [UInt8] {
         var pos = 0
         let expectedLength = try readPreambleLength(input, &pos)
+        guard expectedLength <= maximumOutputBytes else { throw SnappyError.outputLimitExceeded }
         var output: [UInt8] = []
         // `expectedLength` is an attacker-controlled hint: cap the pre-allocation
         // so a malformed block can't force a huge reserve (OOM). Real output stays
