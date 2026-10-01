@@ -78,15 +78,15 @@ public struct PowerPointConverter: DocumentConverter {
         // Reserve all external image destinations first, including later slides,
         // so embedded references cannot claim an external occurrence's src.
         var externalReferences: Set<String> = []
-        var pendingParts = Array(Set(slidePaths)), visitedParts: Set<String> = []
+        var pendingParts = PartQueue()
+        for path in slidePaths { try pendingParts.schedule(path) }
         while let path = pendingParts.popLast() {
             try Task.checkCancellation()
-            guard visitedParts.insert(path).inserted else { continue }
             for relation in Self.relationships(archive, forPart: path).values {
                 if relation.external && relation.isType("/image") {
                     externalReferences.insert(Self.linkDestination(relation.target))
                 } else if !relation.external, ["/slideLayout", "/slideMaster", "/notesSlide", "/notesMaster", "/theme"].contains(where: relation.isType) {
-                    pendingParts.append(Self.resolvePartPath(relation.target, relativeTo: Self.directory(of: path)))
+                    try pendingParts.schedule(Self.resolvePartPath(relation.target, relativeTo: Self.directory(of: path)))
                 }
             }
         }
@@ -164,6 +164,23 @@ public struct PowerPointConverter: DocumentConverter {
             author: properties.author,
             sections: sections
         )
+    }
+
+    /// Deduplicate before retention, and admit aggregate resolved path bytes.
+    /// This matches the package index's name/entry envelope even for missing targets.
+    struct PartQueue {
+        private var scheduled: Set<String> = []
+        private var pending: [String] = []
+        private var bytes: Int
+        private let maximumParts: Int
+        init(maximumBytes: Int = 8 * 1024 * 1024, maximumParts: Int = 16_384) { bytes = maximumBytes; self.maximumParts = maximumParts }
+        mutating func schedule(_ path: String) throws {
+            guard !scheduled.contains(path) else { return }
+            guard path.utf8.count <= bytes, scheduled.count < maximumParts else { throw PicoDocsError.fileCorrupted }
+            bytes -= path.utf8.count
+            scheduled.insert(path); pending.append(path)
+        }
+        mutating func popLast() -> String? { pending.popLast() }
     }
 
     // MARK: - Deck structure
@@ -478,16 +495,8 @@ public struct PowerPointConverter: DocumentConverter {
             if let properties = context.styles.child(of: background, named: "p:bgpr") {
                 fill = context.styles.child(of: properties, named: "a:blipfill")
             } else if let reference = context.styles.child(of: background, named: "p:bgref"),
-                      let index = integerValue(try? reference.attr("idx")), index > 0, index != 1000,
-                      let themePath = context.themePath, let root = context.theme?.children().first(),
-                      let elements = context.styles.child(of: root, named: "a:themeelements"),
-                      let scheme = context.styles.child(of: elements, named: "a:fmtscheme"),
-                      let list = context.styles.child(of: scheme, named: index > 1000 ? "a:bgfillstylelst" : "a:fillstylelst") {
-                let entries = selectedChildren(in: list)
-                let offset = index > 1000 ? index - 1001 : index - 1
-                if offset < entries.count, entries[offset].tagName().lowercased() == "a:blipfill" {
-                    fill = entries[offset]; fillPath = themePath
-                }
+                      let resolved = themeFill(reference, context: context) {
+                fill = resolved.fill; fillPath = resolved.path
             }
             if let fill {
                 var ownerContext = context
@@ -497,6 +506,17 @@ public struct PowerPointConverter: DocumentConverter {
             }
             break
         }
+    }
+
+    private static func themeFill(_ reference: Element, context: SlideContext) -> (fill: Element, path: String)? {
+        guard let index = integerValue(try? reference.attr("idx")), index > 0, index != 1000,
+              let path = context.themePath, let root = context.theme?.children().first(),
+              let elements = context.styles.child(of: root, named: "a:themeelements"),
+              let scheme = context.styles.child(of: elements, named: "a:fmtscheme"),
+              let list = context.styles.child(of: scheme, named: index > 1000 ? "a:bgfillstylelst" : "a:fillstylelst") else { return nil }
+        let entries = selectedChildren(in: list), offset = index > 1000 ? index - 1001 : index - 1
+        guard offset < entries.count, entries[offset].tagName().lowercased() == "a:blipfill" else { return nil }
+        return (entries[offset], path)
     }
 
     static func integerValue(_ text: String?) -> Int? {
@@ -629,7 +649,7 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     private static func graphicPayloadTag(uri: String) -> String? {
-        switch uri {
+        switch collapsedXMLURI(uri) {
         case "http://schemas.openxmlformats.org/drawingml/2006/table", "http://purl.oclc.org/ooxml/drawingml/table": return "a:tbl"
         case "http://schemas.openxmlformats.org/presentationml/2006/ole", "http://purl.oclc.org/ooxml/presentationml/ole": return "p:oleobj"
         default: return nil
@@ -824,7 +844,8 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     final class PlaceholderCache {
-        private struct Index { var byID: [String: Element] = [:]; var byType: [String: Element] = [:] }
+        private struct PlaceholderID: Hashable { let type: String; let id: String }
+        private struct Index { var byID: [PlaceholderID: Element] = [:]; var byType: [String: Element] = [:] }
         private var indexes: [ObjectIdentifier: Index] = [:]
         private(set) var buildCount = 0
 
@@ -844,7 +865,8 @@ public struct PowerPointConverter: DocumentConverter {
                             let raw = (try? ph.attr("type")) ?? ""
                             let kind = raw.isEmpty ? "obj" : raw
                             let equivalent = ["title", "ctrTitle"].contains(kind) ? "title" : (["body", "obj"].contains(kind) ? "body" : kind)
-                            if !id.isEmpty, result.byID[id] == nil { result.byID[id] = element }
+                            let typedID = PlaceholderID(type: equivalent, id: id)
+                            if result.byID[typedID] == nil { result.byID[typedID] = element }
                             if result.byType[equivalent] == nil { result.byType[equivalent] = element }
                         case "p:grpsp": collect(element)
                         case "mc:alternatecontent": if let selected = PowerPointConverter.selectedAlternateBranch(element) { collect(selected) }
@@ -858,7 +880,7 @@ public struct PowerPointConverter: DocumentConverter {
                 indexes[key] = result; buildCount += 1
             }
             let equivalent = ["title", "ctrTitle"].contains(type) ? "title" : (["body", "obj"].contains(type) ? "body" : type)
-            return index.isEmpty ? indexes[key]?.byType[equivalent] : indexes[key]?.byID[index]
+            return index.isEmpty ? indexes[key]?.byType[equivalent] : indexes[key]?.byID[PlaceholderID(type: equivalent, id: index)]
         }
     }
 
@@ -1169,7 +1191,14 @@ public struct PowerPointConverter: DocumentConverter {
             }
             let line = String(slice)
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard let first = trimmed.unicodeScalars.first, "#-+|0123456789~".unicodeScalars.contains(first) else { output += line; return }
+            guard let first = trimmed.unicodeScalars.first, "#-+|0123456789~=".unicodeScalars.contains(first) else { output += line; return }
+            if !trimmed.isEmpty, trimmed.allSatisfy({ $0 == "=" }) {
+                if let budget, !budget.fits(output.utf8.count + line.utf8.count + 1) { return }
+                let leading = line.prefix { $0 == " " || $0 == "\t" }
+                let escaped = String(leading) + "\\" + line.dropFirst(leading.count)
+                output += escaped
+                return
+            }
             if trimmed.hasPrefix("~~~") {
                 let leading = line.prefix { $0 == " " || $0 == "\t" }
                 let escaped = String(leading) + "\\" + line.dropFirst(leading.count)
@@ -1353,12 +1382,20 @@ public struct PowerPointConverter: DocumentConverter {
     /// An inline image reference for a picture (alt text from `descr`, then
     /// `title`, then `name`), registering its bytes as an `.image` section.
     static func pictureMarkdown(_ picture: Element, context: inout SlideContext) -> String? {
-        let fill = selectedChild(of: picture, named: "p:blipfill")
-            ?? selectedChild(of: picture, named: "p:sppr").flatMap { selectedChild(of: $0, named: "a:blipfill") }
-        guard let fill else { return nil }
+        let properties = selectedChild(of: picture, named: "p:sppr")
+        let direct = selectedChild(of: picture, named: "p:blipfill")
+            ?? properties.flatMap { selectedChild(of: $0, named: "a:blipfill") }
         let nonvisual = selectedChild(of: picture, named: "p:nvpicpr") ?? selectedChild(of: picture, named: "p:nvsppr")
-        let properties = nonvisual.flatMap { selectedChild(of: $0, named: "p:cnvpr") }
-        return blipMarkdown(fill, properties: properties, context: &context)
+        let common = nonvisual.flatMap { selectedChild(of: $0, named: "p:cnvpr") }
+        if let direct { return blipMarkdown(direct, properties: common, context: &context) }
+        // An explicit solid/gradient/no-fill owns the fill and stops style inheritance.
+        if let properties, selectedChildren(in: properties).contains(where: { ["a:solidfill", "a:gradfill", "a:pattfill", "a:nofill", "a:grpfill"].contains($0.tagName().lowercased()) }) { return nil }
+        guard let style = selectedChild(of: picture, named: "p:style"),
+              let reference = selectedChild(of: style, named: "a:fillref"),
+              let resolved = themeFill(reference, context: context) else { return nil }
+        var owner = context
+        owner.partPath = resolved.path; owner.relationships = relationships(context.archive, forPart: resolved.path)
+        return blipMarkdown(resolved.fill, properties: common, context: &owner)
     }
 
     private static func blipMarkdown(_ fill: Element, properties: Element?, context: inout SlideContext) -> String? {
@@ -1408,9 +1445,16 @@ public struct PowerPointConverter: DocumentConverter {
         private let reserveCarrierBytes: ((Int) -> Bool)?
 
         init(reservedReferences: Set<String> = [], maximumEncodedBytes: Int = 32 * 1024 * 1024, reserveCarrierBytes: ((Int) -> Bool)? = nil) {
-            usedReferences = reservedReferences
+            usedReferences = Set(reservedReferences.map(Self.referenceIdentity))
             self.reserveCarrierBytes = reserveCarrierBytes
             remainingEncodedBytes = max(0, maximumEncodedBytes)
+        }
+
+        static func referenceIdentity(_ reference: String) -> String {
+            guard URLComponents(string: reference)?.scheme == nil, !reference.hasPrefix("//") else { return reference }
+            let end = reference.firstIndex(where: { $0 == "?" || $0 == "#" }) ?? reference.endIndex
+            let path = PowerPointConverter.resolvePartPath(String(reference[..<end]), relativeTo: "")
+            return path + reference[end...]
         }
 
         @discardableResult
@@ -1432,7 +1476,7 @@ public struct PowerPointConverter: DocumentConverter {
             // scheme position of a generated embedded-image URL.
             let needsRelativePrefix = filename.contains(":") || filename.contains("%") || filename.hasPrefix("/") || filename.hasPrefix("\\")
             var reference = needsRelativePrefix ? "./" + filename : filename
-            while usedReferences.contains(PowerPointConverter.linkDestination(reference)) {
+            while usedReferences.contains(Self.referenceIdentity(PowerPointConverter.linkDestination(reference))) {
                 nextReference += 1
                 reference = "picodocs-embedded/\(nextReference)/" + filename
             }
@@ -1443,7 +1487,7 @@ public struct PowerPointConverter: DocumentConverter {
             let carrierBytes = filename.utf8.count + path.utf8.count + labelBytes + 2 * emitted.utf8.count
                 + mime.utf8.count + "mimeType".utf8.count + "markdownReference".utf8.count + 5
             guard reserveCarrierBytes?(carrierBytes) != false else { archive.fail(PicoDocsError.fileCorrupted); return nil }
-            usedReferences.insert(emitted); references[path] = reference
+            usedReferences.insert(Self.referenceIdentity(emitted)); references[path] = reference
             sections.append(DocumentSection(
                 title: filename,
                 kind: .image,

@@ -22,6 +22,9 @@
 //
 
 import Foundation
+#if canImport(FoundationXML)
+import FoundationXML
+#endif
 import UniformTypeIdentifiers
 import ZIPFoundation
 
@@ -138,15 +141,50 @@ public enum ContentTypeDetector {
         guard format == .zip, let zip = try? Archive(data: data, accessMode: .read) else { return format }
         // Detection remains a bounded hint; the converter validates the whole
         // package and its manifest after routing.
-        // Read only the package relationships and main part, with the same
-        // per-part ceiling as conversion and a bounded allowance for both.
+        // Read the bounded root relationships, then only a prefix of the main
+        // part. Routing must not construct a presentation DOM.
         let package = PowerPointPackage(archive: zip, totalLimit: 128 * 1024 * 1024)
         let offices = PowerPointConverter.relationships(package, forPart: "").values.filter { $0.isType("/officeDocument") }
         guard offices.count == 1, let office = offices.first, !office.external else { return .zip }
         let path = PowerPointConverter.resolvePartPath(office.target, relativeTo: "")
-        guard PowerPointConverter.xml(package, path: path)?.children().first()?.tagName().lowercased() == "p:presentation",
-              package.failure == nil else { return .zip }
+        guard sniffPresentationRoot(package, path: path), package.failure == nil else { return .zip }
         return .pptx
+    }
+
+    /// A bounded routing hint: inflate at most 64 KiB and stop SAX parsing at
+    /// the first element. Conversion later validates the complete XML and CRC.
+    static func sniffPresentationRoot(_ package: PowerPointPackage, path: String, maximumBytes: Int = 64 * 1024) -> Bool {
+        guard maximumBytes > 0, package.failure == nil, let entry = package.entry(path),
+              entry.type == .file, entry.uncompressedSize <= 64 * 1024 * 1024 else { return false }
+        enum Stop: Error { case prefixComplete }
+        var prefix = Data()
+        do {
+            _ = try package.archive.extract(entry, bufferSize: min(maximumBytes, 16 * 1024)) { chunk in
+                try Task.checkCancellation()
+                prefix.append(chunk.prefix(maximumBytes - prefix.count))
+                if prefix.count == maximumBytes { throw Stop.prefixComplete }
+            }
+        } catch Stop.prefixComplete { /* enough input for the routing hint */ }
+        catch { return false }
+        guard !Task.isCancelled else { return false }
+        let parser = XMLParser(data: prefix)
+        let root = PresentationRootSniffer()
+        parser.delegate = root
+        parser.shouldProcessNamespaces = true
+        parser.shouldResolveExternalEntities = false
+        _ = parser.parse()
+        return root.presentation && !Task.isCancelled
+    }
+
+    private final class PresentationRootSniffer: NSObject, XMLParserDelegate {
+        var presentation = false
+        func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName: String?, attributes: [String: String]) {
+            presentation = elementName == "presentation" && ["http://schemas.openxmlformats.org/presentationml/2006/main", "http://purl.oclc.org/ooxml/presentationml/main"].contains(namespaceURI ?? "")
+            parser.abortParsing()
+        }
+        func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) { parser.abortParsing() }
+        func parser(_ parser: XMLParser, foundExternalEntityDeclarationWithName name: String, publicID: String?, systemID: String?) { parser.abortParsing() }
+        func parser(_ parser: XMLParser, resolveExternalEntityName name: String, systemID: String?) -> Data? { parser.abortParsing(); return nil }
     }
 
     /// NOTE: a substring search over the central-directory bytes, not a strict
