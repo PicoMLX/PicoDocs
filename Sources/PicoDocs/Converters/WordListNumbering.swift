@@ -57,21 +57,25 @@ final class WordListNumbering {
     /// to plain bullets.
     private(set) var isResolvable = false
 
+    private(set) var failure: Error?
+
     init(archive: Archive) {
-        if let app = Self.xml(archive, path: "docProps/app.xml") {
-            isLibreOffice = ((try? app.getElementsByTag("Application").text()) ?? "").hasPrefix("LibreOffice")
-        }
-        let numberingPath = WordConverter.relationshipTarget(archive, typeSuffix: "/numbering")
-            .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/numbering.xml"
-        let stylesPath = WordConverter.relationshipTarget(archive, typeSuffix: "/styles")
-            .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/styles.xml"
-        if let numbering = Self.xml(archive, path: numberingPath) {
-            isResolvable = true
-            parseNumbering(numbering)
-        }
-        if let styles = Self.xml(archive, path: stylesPath) {
-            parseStyles(styles)
-        }
+        do {
+            if let app = try Self.xml(archive, path: "docProps/app.xml") {
+                isLibreOffice = ((try? app.getElementsByTag("Application").text()) ?? "").hasPrefix("LibreOffice")
+            }
+            let numberingPath = try WordConverter.relationshipTarget(archive, typeSuffix: "/numbering")
+                .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/numbering.xml"
+            let stylesPath = try WordConverter.relationshipTarget(archive, typeSuffix: "/styles")
+                .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/styles.xml"
+            if let numbering = try Self.xml(archive, path: numberingPath) {
+                isResolvable = true
+                parseNumbering(numbering)
+            }
+            if let styles = try Self.xml(archive, path: stylesPath) {
+                parseStyles(styles)
+            }
+        } catch { failure = error }
     }
 
     /// The Markdown prefix (indent + marker) for a paragraph, or nil when it isn't
@@ -424,8 +428,8 @@ final class WordListNumbering {
         return trimmed.isEmpty ? "0" : String(trimmed)
     }
 
-    private static func xml(_ archive: Archive, path: String) -> Document? {
-        guard let data = WordConverter.readEntry(archive, path: path),
+    private static func xml(_ archive: Archive, path: String) throws -> Document? {
+        guard let data = try WordConverter.readEntry(archive, path: path),
               let text = WordConverter.decodeText(data) else { return nil }
         return try? SwiftSoup.parse(text, "", SwiftSoup.Parser.xmlParser())
     }
