@@ -220,7 +220,10 @@ public struct WordConverter: DocumentConverter {
             prefix = numbering.prefix(numPr: numPr, style: style, visibleMarker: heading == nil, paragraphProperties: properties)
                 ?? (numPr?.children().size() == 0 ? "- " : nil)
         } else { prefix = numPr != nil ? "- " : nil }
-        guard !text.isEmpty else { return heading == nil ? prefix : nil }
+        let boundary = numbering?.listRestartIndent.map {
+            String(repeating: " ", count: $0) + MarkdownLiteral.listRestartBoundary + "\n\n"
+        } ?? ""
+        guard !text.isEmpty else { return heading == nil ? prefix.map { boundary + $0 } : nil }
 
         if let level = heading {
             return String(repeating: "#", count: level) + " " + text
@@ -228,7 +231,7 @@ public struct WordConverter: DocumentConverter {
         guard let prefix else { return text }
         // Preserve Word's marker width while protecting literal continuation blocks.
         let continuation = "\n" + String(repeating: " ", count: WordListNumbering.displayWidth(prefix))
-        return prefix + text.components(separatedBy: "\n")
+        return boundary + prefix + text.components(separatedBy: "\n")
             .map { MarkdownLiteral.escapeBlockStart($0) }.joined(separator: continuation)
     }
 

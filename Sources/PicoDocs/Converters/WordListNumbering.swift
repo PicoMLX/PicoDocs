@@ -47,6 +47,9 @@ final class WordListNumbering {
     private var isLibreOffice = false
     private var lastInstance: [String: String] = [:]
     private var resumeAlias: (original: String, replacement: String)?
+    private var renderedInstances: [Int: String] = [:]
+    /// A changed native instance needs a boundary at its nesting column.
+    private(set) var listRestartIndent: Int?
     private struct PartialLevel { let format: String?; let start: Int?; let restart: Int?; var text: String? = nil; var legal: Bool? = nil; var language: String? = nil; var suffix: String? = nil; var nullText: Bool? = nil; var paragraphStyle: String? = nil }
     private var levelOverrides: [String: [Int: PartialLevel]] = [:]
 
@@ -75,6 +78,7 @@ final class WordListNumbering {
     /// a list item. `numPr` is the paragraph's own `w:numPr`, if any; `style` its
     /// `w:pStyle`, whose (inherited) numbering applies when the paragraph has none.
     func prefix(numPr: Element?, style: String?, visibleMarker: Bool = true, paragraphProperties: Element? = nil) -> String? {
+        listRestartIndent = nil
         var numID = numPr.flatMap { Self.child(of: $0, named: "w:numid") }.flatMap { try? $0.attr("w:val") }
         var level = numPr.flatMap { Self.child(of: $0, named: "w:ilvl") }.flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
         if numID == nil || level == nil, let inherited = styleNumbering(style) {
@@ -84,6 +88,7 @@ final class WordListNumbering {
         guard let numID = Self.canonicalID(numID), numID != "0" else { return nil }   // numId 0: numbering removed
 
         guard isResolvable, let number = numbers[numID] else {
+            if visibleMarker { recordRenderedInstance(numID, level: 0, indent: 0) }
             return "- "   // Resolved membership survives a missing definition, including styles.
         }
         if level == nil {
@@ -99,8 +104,10 @@ final class WordListNumbering {
         let ilvl = min(max(level ?? 0, 0), 8)
         let abstract = number.abstract
         let definition = effectiveLevel(numID: numID, level: ilvl)
+        var resumedInstance: String?
         if let alias = resumeAlias {
             if alias.original == numID {
+                resumedInstance = alias.replacement
                 counters[numID, default: [:]].merge(counters[alias.replacement] ?? [:]) { _, new in new }
                 markerWidths[numID, default: [:]].merge(markerWidths[alias.replacement] ?? [:]) { _, new in new }
                 resumeAlias = nil
@@ -155,8 +162,22 @@ final class WordListNumbering {
             }
         }
         let indent = (0..<ilvl).reduce(0) { $0 + (markerWidths[numID]?[$1] ?? 0) }
-        if visibleMarker { markerWidths[numID, default: [:]][ilvl] = marker.hasPrefix("- ") ? 2 : Self.displayWidth(marker, startingAt: indent) - indent }
+        if visibleMarker {
+            markerWidths[numID, default: [:]][ilvl] = marker.hasPrefix("- ") ? 2 : Self.displayWidth(marker, startingAt: indent) - indent
+            recordRenderedInstance(numID, level: ilvl, indent: indent, resuming: resumedInstance)
+        }
         return String(repeating: " ", count: indent) + marker
+    }
+
+    private func recordRenderedInstance(_ numID: String, level: Int, indent: Int, resuming alias: String? = nil) {
+        if let previous = renderedInstances[level], previous != numID, previous != alias {
+            listRestartIndent = indent
+        }
+        // A new ancestor item owns fresh child lists. A LibreOffice return to
+        // the original instance continues its restart alias rather than opening
+        // another list; its next paragraph then uses the original ID normally.
+        renderedInstances = renderedInstances.filter { $0.key <= level }
+        renderedInstances[level] = numID
     }
 
     private func effectiveLevel(numID: String, level: Int, visited: Set<String> = []) -> Level? {

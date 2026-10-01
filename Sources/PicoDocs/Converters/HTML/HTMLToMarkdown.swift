@@ -117,11 +117,14 @@ enum HTMLToMarkdown {
             let src = canonicalDestination(resolvedURL(element, attribute: "src"))
             if !src.isEmpty { out += "![\(alt)](\(src))" }
 
-        case "ul":
-            out += "\n\n" + renderList(element, ordered: false, depth: depth) + "\n\n"
-
-        case "ol":
-            out += "\n\n" + renderList(element, ordered: true, depth: depth) + "\n\n"
+        case "ul", "ol":
+            let list = renderList(element, ordered: element.tagName().lowercased() == "ol", depth: depth)
+            guard !list.isEmpty else { return }
+            // Each semantic element starts a distinct list, including lists in
+            // transparent containers or adjacent child lists inside one item.
+            // Emit the signal without rescanning accumulated output per list.
+            // Normalization drops it at the beginning of a new block scope.
+            out += "\n\n" + MarkdownLiteral.listRestartBoundary + "\n\n" + list + "\n\n"
 
         case "blockquote":
             var inner = ""
@@ -228,6 +231,9 @@ enum HTMLToMarkdown {
                 // cells can't contain newlines) and escape pipes.
                 var rendered = ""
                 renderChildren(of: cell, into: &rendered, inList: inList, depth: depth)
+                // A table cell flattens block structure to inline text. Consume
+                // generated list metadata before that marker can become visible.
+                rendered = rendered.replacingOccurrences(of: MarkdownLiteral.listRestartBoundary, with: "")
                 return MarkdownTableCell.escapeCanonicalDelimiters(
                     collapseWhitespace(rendered).trimmingCharacters(in: .whitespaces)
                 )
@@ -254,6 +260,11 @@ enum HTMLToMarkdown {
 
     /// Collapses 3+ consecutive newlines down to a paragraph break.
     private static func normalizeBlankLines(_ s: String) -> String {
-        s.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+        var output = s.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+        if let start = output.firstIndex(where: { !$0.isWhitespace }), output[start...].hasPrefix(MarkdownLiteral.listRestartBoundary) {
+            let end = output.index(start, offsetBy: MarkdownLiteral.listRestartBoundary.count)
+            output.removeSubrange(start..<end)
+        }
+        return output
     }
 }

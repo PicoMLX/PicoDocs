@@ -5,6 +5,73 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func adjacentHTMLListInstancesStaySeparate() throws {
+        let list = "<ul><li>a</li></ul>"
+        for source in [list + list, "<div>" + list + "</div><div>" + list + "</div>",
+                       "<ul><li>parent" + list + list + "</li></ul>"] {
+            let converted = try HTMLToMarkdown.convert(html: source)
+            let result = ConverterResult(sections: [.init(markdown: converted.markdown)])
+            let expected = source.contains("parent") ? 3 : 2
+            #expect(try DocumentRenderer.render(result, to: .html).components(separatedBy: "<ul>").count - 1 == expected)
+            #expect(!(try DocumentRenderer.render(result, to: .plaintext)).contains(MarkdownLiteral.listRestartBoundary))
+        }
+        let continued = try HTMLToMarkdown.convert(html: "<ul><li>a</li><li>b</li></ul>")
+        #expect(try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: continued.markdown)]), to: .html)
+            .components(separatedBy: "<ul>").count - 1 == 1)
+    }
+
+    @Test func adjacentDOCXListInstancesStaySeparate() async throws {
+        for format in ["bullet", "decimal"] {
+            let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"\(format)\"/><w:suff w:val=\"space\"/></w:lvl></w:abstractNum>" +
+                [1, 2].map { "<w:num w:numId=\"\($0)\"><w:abstractNumId w:val=\"1\"/></w:num>" }.joined() + "</w:numbering>"
+            func paragraph(_ id: Int) -> String {
+                "<w:p><w:pPr><w:numPr><w:numId w:val=\"\(id)\"/></w:numPr></w:pPr><w:r><w:t>Item</w:t></w:r></w:p>"
+            }
+            let equivalentID = paragraph(1).replacingOccurrences(of: "w:numId w:val=\"1\"", with: "w:numId w:val=\"+0001\"")
+            let body = paragraph(1) + equivalentID + "<w:sdt><w:sdtContent>" + paragraph(2) + paragraph(2) + "</w:sdtContent></w:sdt>" + paragraph(1)
+            let document = "<w:document \(ns)><w:body>\(body)</w:body></w:document>"
+            for includeDefinitions in [true, false] {
+                var entries = [(name: "word/document.xml", data: Array(document.utf8))]
+                if includeDefinitions { entries.append(("word/numbering.xml", Array(numbering.utf8))) }
+                let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(entries), filename: "instances.docx")
+                let tag = includeDefinitions && format == "decimal" ? "<ol" : "<ul"
+                #expect(try DocumentRenderer.render(result, to: .html).components(separatedBy: tag).count - 1 == 3)
+                for output in [ExportFileType.html, .plaintext, .csv] {
+                    #expect(!(try DocumentRenderer.render(result, to: output)).contains(MarkdownLiteral.listRestartBoundary))
+                }
+            }
+        }
+    }
+
+    @Test func LibreOfficeListAliasResumptionKeepsItsNativeBoundary() async throws {
+        let numbering = "<w:numbering \(ns)><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:suff w:val=\"space\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num><w:num w:numId=\"2\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"0\"><w:startOverride w:val=\"5\"/></w:lvlOverride></w:num></w:numbering>"
+        let body = [1, 2, 2, 1, 1].map {
+            "<w:p><w:pPr><w:numPr><w:numId w:val=\"\($0)\"/></w:numPr></w:pPr><w:r><w:t>Item</w:t></w:r></w:p>"
+        }.joined()
+        for libreOffice in [true, false] {
+            var entries = [(name: "word/document.xml", data: Array("<w:document \(ns)><w:body>\(body)</w:body></w:document>".utf8)),
+                           (name: "word/numbering.xml", data: Array(numbering.utf8))]
+            if libreOffice { entries.append(("docProps/app.xml", Array("<Properties><Application>LibreOffice</Application></Properties>".utf8))) }
+            let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(entries), filename: "alias.docx")
+            let expectedCount = libreOffice ? 2 : 3
+            #expect(try DocumentRenderer.render(result, to: .html).components(separatedBy: "<ol").count - 1 == expectedCount)
+            #expect(result.markdown().contains(libreOffice ? "7. Item" : "2. Item"))
+        }
+    }
+
+    @Test func flattenedHTMLTableListsDoNotExposeBoundaryMetadata() throws {
+        let source = "<table><tr><th>Values</th></tr><tr><td>lead<ul><li>a</li></ul><ul><li>b</li></ul></td></tr></table>"
+        let converted = try HTMLToMarkdown.convert(html: source)
+        let result = ConverterResult(sections: [.init(markdown: converted.markdown)])
+        for format in [ExportFileType.html, .plaintext, .csv] {
+            #expect(!(try DocumentRenderer.render(result, to: format)).contains(MarkdownLiteral.listRestartBoundary))
+        }
+        let literal = try HTMLToMarkdown.convert(html: "<table><tr><td>&lt;!-- PicoDocs:list-restart --&gt;</td></tr></table>")
+        #expect(try DocumentRenderer.render(ConverterResult(sections: [.init(markdown: literal.markdown)]), to: .plaintext)
+            .contains(MarkdownLiteral.listRestartBoundary))
+    }
+
+
     @Test func orderedDelimiterChangesStartSeparateLists() throws {
         for separator in ["\n", "\n\n"] {
             let source = ConverterResult(sections: [.init(markdown: "1. A" + separator + "2) B")])

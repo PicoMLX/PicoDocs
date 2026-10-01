@@ -199,11 +199,15 @@ struct ConverterTests {
 
         An interlude paragraph.
 
+        \(MarkdownLiteral.listRestartBoundary)
+
         -\tApples
 
             -\tConference
 
         -\tPears
+
+        \(MarkdownLiteral.listRestartBoundary)
 
         1.\tRestarted one
 
@@ -295,6 +299,8 @@ struct ConverterTests {
         2. Styled two
 
            - a. Styled nested
+
+        \(MarkdownLiteral.listRestartBoundary)
 
         5. From five
 
