@@ -70,7 +70,7 @@ public struct PowerPointConverter: DocumentConverter {
         }
         func chargeSection(_ section: DocumentSection) throws {
             try charge(section.markdown); try charge(section.title); try charge(section.sourcePath)
-            for (key, value) in section.metadata where key != "base64" { try charge(key); try charge(value) }
+            for (key, value) in section.metadata where key != "base64" && key != "powerPointWhitespace" { try charge(key); try charge(value) }
         }
         let properties = Self.coreProperties(archive)
         try charge(properties.title ?? info.filename); try charge(properties.author)
@@ -85,7 +85,7 @@ public struct PowerPointConverter: DocumentConverter {
             for relation in Self.relationships(archive, forPart: path).values {
                 if relation.external && relation.isType("/image") {
                     externalReferences.insert(Self.linkDestination(relation.target))
-                } else if !relation.external, ["/slideLayout", "/slideMaster", "/notesSlide", "/notesMaster"].contains(where: relation.isType) {
+                } else if !relation.external, ["/slideLayout", "/slideMaster", "/notesSlide", "/notesMaster", "/theme"].contains(where: relation.isType) {
                     pendingParts.append(Self.resolvePartPath(relation.target, relativeTo: Self.directory(of: path)))
                 }
             }
@@ -100,6 +100,7 @@ public struct PowerPointConverter: DocumentConverter {
         parts.styles.register(presentation)
         for (index, slidePath) in slidePaths.enumerated() {
             try Task.checkCancellation()
+            try charge("powerPointWhitespace"); try charge("1")
             guard let slide = parts.document(slidePath, root: "p:sld", cache: false), slide.children().first()?.tagName().lowercased() == "p:sld" else { try archive.check(); throw PicoDocsError.fileCorrupted }
             let relationships = Self.relationships(archive, forPart: slidePath)
             var context = SlideContext(archive: archive, partPath: slidePath, relationships: relationships, images: images)
@@ -118,6 +119,7 @@ public struct PowerPointConverter: DocumentConverter {
             context.masterPath = layoutPath
                 .flatMap { Self.relatedPart(of: $0, type: "/slideMaster", relationships: Self.relationships(archive, forPart: $0), archive: archive) }
             context.master = context.masterPath.flatMap { parts.document($0, root: "p:sldmaster") }
+            Self.configureTheme(context: &context, parts: &parts)
             let rendered = Self.renderSlide(slide, context: &context)
             try archive.check()
             let slideBlocks = (rendered.title.map { [renderBudget.join(["## ", $0])] } ?? []) + rendered.blocks
@@ -146,7 +148,7 @@ public struct PowerPointConverter: DocumentConverter {
                 markdown: renderBudget.join(blocks, separator: "\n\n"),
                 sourcePath: slidePath,
                 slideNumber: index + 1,
-                metadata: notes.map { ["notes": $0] } ?? [:]
+                metadata: (notes.map { ["notes": $0] } ?? [:]).merging(["powerPointWhitespace": "1"]) { first, _ in first }
             )
             try archive.check()
             try chargeSection(section)
@@ -233,7 +235,9 @@ public struct PowerPointConverter: DocumentConverter {
             context.placeholders = parts.placeholders
             context.styles = StyleChildCache(shared: parts.styles)
         }
+        configureTheme(context: &context, parts: &parts)
         var paragraphs: [String] = []
+        appendEffectiveBackground(owners: [(common, notesPath), (context.master?.children().first().flatMap { context.styles.child(of: $0, named: "p:csld") }, context.masterPath)], context: &context, blocks: &paragraphs)
         func appendNotes(in container: Element, inheritedLink: String? = nil) {
             guard !Task.isCancelled else { return }
             for shape in selectedChildren(in: container, visibleOnly: true) {
@@ -375,6 +379,8 @@ public struct PowerPointConverter: DocumentConverter {
         var master: Document?
         var layoutPath: String?
         var masterPath: String?
+        var theme: Document?
+        var themePath: String?
         var defaultTextStyle: Element?
         var placeholders = PlaceholderCache()
         var styles = StyleChildCache()
@@ -433,22 +439,9 @@ public struct PowerPointConverter: DocumentConverter {
         }
         var title: String?
         var blocks: [String] = []
-        let backgroundOwners = [(common, Optional(context.partPath)),
-                                (context.layout?.children().first().flatMap { context.styles.child(of: $0, named: "p:csld") }, context.layoutPath),
-                                (context.master?.children().first().flatMap { context.styles.child(of: $0, named: "p:csld") }, context.masterPath)]
-        for (owner, path) in backgroundOwners {
-            guard let owner, let path, let background = context.styles.child(of: owner, named: "p:bg") else { continue }
-            if let properties = context.styles.child(of: background, named: "p:bgpr"),
-               let fill = context.styles.child(of: properties, named: "a:blipfill") {
-                var backgroundContext = context
-                backgroundContext.partPath = path
-                backgroundContext.relationships = relationships(context.archive, forPart: path)
-                if let image = blipMarkdown(fill, properties: nil, context: &backgroundContext) { context.appendBlock(image, to: &blocks) }
-            }
-            // Any explicitly defined background overrides its ancestors,
-            // including solid fills and theme background references.
-            break
-        }
+        appendEffectiveBackground(owners: [(common, context.partPath),
+            (context.layout?.children().first().flatMap { context.styles.child(of: $0, named: "p:csld") }, context.layoutPath),
+            (context.master?.children().first().flatMap { context.styles.child(of: $0, named: "p:csld") }, context.masterPath)], context: &context, blocks: &blocks)
         let showInherited = !["0", "false"].contains(booleanValue((try? root.attr("showMasterSp")) ?? ""))
         let showMaster = !["0", "false"].contains(booleanValue((try? context.layout?.children().first()?.attr("showMasterSp")) ?? ""))
         if showInherited {
@@ -466,6 +459,48 @@ public struct PowerPointConverter: DocumentConverter {
         }
         renderShapes(in: tree, title: &title, blocks: &blocks, context: &context)
         return (title, blocks)
+    }
+
+    private static func configureTheme(context: inout SlideContext, parts: inout PartCache) {
+        guard let masterPath = context.masterPath else { return }
+        let rels = relationships(context.archive, forPart: masterPath)
+        context.themePath = relatedPart(of: masterPath, type: "/theme", relationships: rels, archive: context.archive)
+        context.theme = context.themePath.flatMap { parts.document($0, root: "a:theme") }
+    }
+
+    /// An explicit local background stops inheritance even when it has no image.
+    /// Theme fills resolve with the theme part's relationships, not the slide's.
+    private static func appendEffectiveBackground(owners: [(Element?, String?)], context: inout SlideContext, blocks: inout [String]) {
+        for (owner, path) in owners {
+            guard let owner, let path, let background = context.styles.child(of: owner, named: "p:bg") else { continue }
+            var fill: Element?
+            var fillPath = path
+            if let properties = context.styles.child(of: background, named: "p:bgpr") {
+                fill = context.styles.child(of: properties, named: "a:blipfill")
+            } else if let reference = context.styles.child(of: background, named: "p:bgref"),
+                      let index = integerValue(try? reference.attr("idx")), index > 0, index != 1000,
+                      let themePath = context.themePath, let root = context.theme?.children().first(),
+                      let elements = context.styles.child(of: root, named: "a:themeelements"),
+                      let scheme = context.styles.child(of: elements, named: "a:fmtscheme"),
+                      let list = context.styles.child(of: scheme, named: index > 1000 ? "a:bgfillstylelst" : "a:fillstylelst") {
+                let entries = selectedChildren(in: list)
+                let offset = index > 1000 ? index - 1001 : index - 1
+                if offset < entries.count, entries[offset].tagName().lowercased() == "a:blipfill" {
+                    fill = entries[offset]; fillPath = themePath
+                }
+            }
+            if let fill {
+                var ownerContext = context
+                ownerContext.partPath = fillPath
+                ownerContext.relationships = relationships(context.archive, forPart: fillPath)
+                if let image = blipMarkdown(fill, properties: nil, context: &ownerContext) { context.appendBlock(image, to: &blocks) }
+            }
+            break
+        }
+    }
+
+    static func integerValue(_ text: String?) -> Int? {
+        text.flatMap { Int($0.trimmingCharacters(in: CharacterSet(charactersIn: " \t\r\n"))) }
     }
 
     private static func isHidden(_ shape: Element, cache: StyleChildCache? = nil) -> Bool {
@@ -648,9 +683,9 @@ public struct PowerPointConverter: DocumentConverter {
         }
         if lookup("a:bunone") != nil { return .plain }
         if let number = lookup("a:buautonum") {
-            let raw = (try? number.attr("startAt")) ?? ""
+            let raw = ((try? number.attr("startAt")) ?? "").trimmingCharacters(in: CharacterSet(charactersIn: " \t\r\n"))
             let scheme = (try? number.attr("type")) ?? ""
-            return .number(startAt: raw.isEmpty ? 1 : (Int(raw) ?? 0), scheme: scheme.isEmpty ? "arabicPeriod" : scheme)
+            return .number(startAt: raw.isEmpty ? 1 : (integerValue(raw) ?? 0), scheme: scheme.isEmpty ? "arabicPeriod" : scheme)
         }
         if lookup("a:buchar") != nil || lookup("a:bublip") != nil {
             return .bullet
@@ -908,16 +943,20 @@ public struct PowerPointConverter: DocumentConverter {
         for paragraph in selectedParagraphs(in: body) {
             if Task.isCancelled || budget?.failed == true { return [] }
             let properties = selectedChild(of: paragraph, named: "a:ppr")
-            let level = min(max(Int((try? properties?.attr("lvl")) ?? "") ?? 0, 0), 8)
+            let level = min(max(integerValue(try? properties?.attr("lvl")) ?? 0, 0), 8)
             let paragraphBudget = budget.map { RenderBudget(maximumBytes: $0.maximumBytes - blockBytes - listBytes, archive: context.archive) }
             var runContext = context
             runContext.renderBudget = paragraphBudget
             let text = escapeBlockMarkers(renderRuns(paragraph, context: &runContext).trimmingCharacters(in: .whitespaces), budget: paragraphBudget)
             if paragraphBudget?.failed == true { return [] }
-            guard !text.isEmpty else { continue }
+            let mode = bullet(in: properties) ?? inherited[level] ?? .plain
+            guard !text.isEmpty else {
+                if case .plain = mode { flushList() }
+                continue
+            }
 
             let marker: String?
-            switch bullet(in: properties) ?? inherited[level] ?? .plain {
+            switch mode {
             case .plain:
                 marker = nil
             case .bullet:
@@ -927,7 +966,7 @@ public struct PowerPointConverter: DocumentConverter {
                     context.archive.fail(PicoDocsError.fileCorrupted)
                     return []
                 }
-                let explicitStart = properties.flatMap { selectedChild(of: $0, named: "a:buautonum") }.flatMap { try? $0.attr("startAt") }.flatMap(Int.init)
+                let explicitStart = properties.flatMap { selectedChild(of: $0, named: "a:buautonum") }.flatMap { try? $0.attr("startAt") }.flatMap(integerValue)
                 if schemes[level] != scheme { counters[level] = nil; starts[level] = nil }
                 if explicitStart != nil && starts[level] != start { counters[level] = nil }
                 if starts[level] == nil || explicitStart != nil { starts[level] = start }
@@ -974,7 +1013,7 @@ public struct PowerPointConverter: DocumentConverter {
         var retainedRunBytes = 0
         let budget = context.renderBudget
         let paragraphProperties = selectedChild(of: paragraph, named: "a:ppr")
-        let level = min(max(Int((try? paragraphProperties?.attr("lvl")) ?? "") ?? 0, 0), 8)
+        let level = min(max(integerValue(try? paragraphProperties?.attr("lvl")) ?? 0, 0), 8)
         let defaults = [paragraphProperties.flatMap { selectedChild(of: $0, named: "a:defrpr") }].compactMap { $0 } + context.runDefaults[level]
         for node in selectedChildren(in: paragraph) {
             if Task.isCancelled || budget?.failed == true { return "" }
@@ -1551,11 +1590,14 @@ public struct PowerPointConverter: DocumentConverter {
     static func xml(_ archive: PowerPointPackage, path: String, budget: PowerPointXML.Budget? = nil, maximumBytes: Int = Int.max) -> Document? {
         guard let data = archive.read(path, maximumBytes: maximumBytes),
               let text = PowerPointXML.normalize(data, budget: budget) else { return nil }
-        guard let document = try? SwiftSoup.parse(text, "", SwiftSoup.Parser.xmlParser()) else { return nil }
+        guard !Task.isCancelled,
+              let document = try? SwiftSoup.parse(text, "", SwiftSoup.Parser.xmlParser()),
+              !Task.isCancelled else { return nil }
         // MustUnderstand applies to the processed tree, excluding ignored extension
         // subtrees and unselected AlternateContent branches.
         var pending = document.children().array().map { ($0, false) }
         while let (element, allowsUnknown) = pending.popLast() {
+            guard !Task.isCancelled else { return nil }
             let tag = element.tagName().lowercased()
             if tag.hasPrefix("requiredextension") {
                 if allowsUnknown { continue }
