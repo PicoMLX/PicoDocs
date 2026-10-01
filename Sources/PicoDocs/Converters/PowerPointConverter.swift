@@ -51,7 +51,7 @@ public struct PowerPointConverter: DocumentConverter {
             try archive.check()
             throw PicoDocsError.fileCorrupted
         }
-        let presentationPath = WordConverter.resolvePartPath(officeDocument.target, relativeTo: "")
+        let presentationPath = Self.resolvePartPath(officeDocument.target, relativeTo: "")
         guard let presentation = Self.xml(archive, path: presentationPath), presentation.children().first()?.tagName().lowercased() == "p:presentation" else {
             try archive.check()
             throw PicoDocsError.fileCorrupted
@@ -86,7 +86,7 @@ public struct PowerPointConverter: DocumentConverter {
                 if relation.external && relation.isType("/image") {
                     externalReferences.insert(Self.linkDestination(relation.target))
                 } else if !relation.external, ["/slideLayout", "/slideMaster", "/notesSlide", "/notesMaster"].contains(where: relation.isType) {
-                    pendingParts.append(WordConverter.resolvePartPath(relation.target, relativeTo: Self.directory(of: path)))
+                    pendingParts.append(Self.resolvePartPath(relation.target, relativeTo: Self.directory(of: path)))
                 }
             }
         }
@@ -189,7 +189,7 @@ public struct PowerPointConverter: DocumentConverter {
         var resolved: [String: String] = [:]
         for slideID in direct {
             guard let id = try? slideID.attr("r:id"), let relation = relationships[id], !relation.external, relation.isType("/slide") else { throw PicoDocsError.fileCorrupted }; let target = relation.target
-            let path = resolved[target] ?? WordConverter.resolvePartPath(target, relativeTo: directory(of: presentationPath))
+            let path = resolved[target] ?? Self.resolvePartPath(target, relativeTo: directory(of: presentationPath))
             guard path.utf8.count <= remainingPathBytes else { throw PicoDocsError.fileCorrupted }
             remainingPathBytes -= path.utf8.count
             resolved[target] = path
@@ -205,7 +205,7 @@ public struct PowerPointConverter: DocumentConverter {
         guard let relation = noteRelations.first else { return nil }
         guard !relation.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         let target = relation.target
-        let notesPath = WordConverter.resolvePartPath(target, relativeTo: directory(of: slidePath))
+        let notesPath = Self.resolvePartPath(target, relativeTo: directory(of: slidePath))
         guard let notes = parts.document(notesPath, root: "p:notes", cache: false) else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         guard let root = notes.children().first(), let common = selectedChild(of: root, named: "p:csld"),
               let tree = selectedChild(of: common, named: "p:sptree") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
@@ -219,14 +219,14 @@ public struct PowerPointConverter: DocumentConverter {
         let notesRels = Self.relationships(archive, forPart: notesPath)
         let backlinks = relationshipsOfType("/slide", archive: archive, part: notesPath, map: notesRels)
         guard backlinks.count == 1, let backlink = backlinks.first, !backlink.external,
-              WordConverter.resolvePartPath(backlink.target, relativeTo: directory(of: notesPath)) == slidePath else {
+              Self.resolvePartPath(backlink.target, relativeTo: directory(of: notesPath)) == slidePath else {
             archive.fail(PicoDocsError.fileCorrupted); return nil
         }
         let masters = relationshipsOfType("/notesMaster", archive: archive, part: notesPath, map: notesRels)
         guard masters.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         if let master = masters.first {
             guard !master.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
-            let path = WordConverter.resolvePartPath(master.target, relativeTo: directory(of: notesPath))
+            let path = Self.resolvePartPath(master.target, relativeTo: directory(of: notesPath))
             guard let document = parts.document(path, root: "p:notesmaster") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
             context.master = document
             context.placeholders = parts.placeholders
@@ -274,7 +274,7 @@ public struct PowerPointConverter: DocumentConverter {
         let properties = relationships(archive, forPart: "").values.filter { $0.isType("/metadata/core-properties") }
         guard properties.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return (nil, nil) }
         guard let relation = properties.first else { return (nil, nil) }
-        let path = WordConverter.resolvePartPath(relation.target, relativeTo: "")
+        let path = Self.resolvePartPath(relation.target, relativeTo: "")
         guard !relation.external, let core = xml(archive, path: path, maximumBytes: 1024 * 1024),
               core.children().first()?.tagName().lowercased() == "cp:coreproperties" else {
             archive.fail(PicoDocsError.fileCorrupted)
@@ -407,7 +407,7 @@ public struct PowerPointConverter: DocumentConverter {
         guard matches.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         guard let relation = matches.first else { return nil }
         guard !relation.external else { archive.fail(PicoDocsError.fileCorrupted); return nil }
-        return WordConverter.resolvePartPath(relation.target, relativeTo: directory(of: part))
+        return Self.resolvePartPath(relation.target, relativeTo: directory(of: part))
     }
 
     /// A slide's title (from its title placeholder) and its other content blocks.
@@ -1270,7 +1270,7 @@ public struct PowerPointConverter: DocumentConverter {
             guard isValidTarget(relation.target, isImage: true) else { return nil }
             source = relation.target
         } else {
-            let mediaPath = WordConverter.resolvePartPath(relation.target, relativeTo: directory(of: context.partPath))
+            let mediaPath = Self.resolvePartPath(relation.target, relativeTo: directory(of: context.partPath))
             let filename = (mediaPath as NSString).lastPathComponent
             source = context.embedsImages
                 ? (context.images.add(path: mediaPath, filename: filename, archive: context.archive) ?? filename)
@@ -1315,7 +1315,7 @@ public struct PowerPointConverter: DocumentConverter {
             if let existing = references[path] { return existing }
             // Base64 consumes four bytes for every three source bytes. Check the
             // declared size before inflating, then charge the verified byte count.
-            guard let entry = archive.archive[path], entry.uncompressedSize <= UInt64(remainingEncodedBytes / 4 * 3) else {
+            guard let entry = archive.entry(path), entry.uncompressedSize <= UInt64(remainingEncodedBytes / 4 * 3) else {
                 archive.fail(PicoDocsError.fileCorrupted); return nil
             }
             guard let bytes = archive.read(path), !bytes.isEmpty else {
@@ -1368,7 +1368,7 @@ public struct PowerPointConverter: DocumentConverter {
                 switch entry.tagName().lowercased() {
                 case "override":
                     guard let name = try? entry.attr("PartName"), name.hasPrefix("/"), name.count > 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
-                    key = name
+                    key = PowerPointPackage.canonicalPartPath(name)
                 case "default":
                     guard let ext = try? entry.attr("Extension"), !ext.isEmpty else { archive.fail(PicoDocsError.fileCorrupted); return nil }
                     key = "." + ext.lowercased()
@@ -1379,7 +1379,7 @@ public struct PowerPointConverter: DocumentConverter {
             }
             archive.contentTypes = types
         }
-        return archive.contentTypes?["/" + path] ?? archive.contentTypes?["." + (path as NSString).pathExtension.lowercased()]
+        return archive.contentTypes?["/" + PowerPointPackage.canonicalPartPath(path)] ?? archive.contentTypes?["." + (path as NSString).pathExtension.lowercased()]
     }
 
     private static let mediaTypePattern: NSRegularExpression = {
@@ -1444,7 +1444,7 @@ public struct PowerPointConverter: DocumentConverter {
         let parent = directory(of: part)
         let relsPath = (parent.isEmpty ? "" : parent + "/") + "_rels/\((part as NSString).lastPathComponent).rels"
         guard let document = xml(archive, path: relsPath) else {
-            if archive.archive[relsPath] != nil { archive.fail(PicoDocsError.fileCorrupted) }
+            if archive.entry(relsPath) != nil { archive.fail(PicoDocsError.fileCorrupted) }
             archive.relationshipMaps[part] = [:]
             return [:]
         }
@@ -1479,6 +1479,21 @@ public struct PowerPointConverter: DocumentConverter {
         }
         archive.relationshipMaps[part] = map
         return map
+    }
+
+    static func resolvePartPath(_ target: String, relativeTo baseDirectory: String) -> String {
+        // PPTX part identities retain encoded octets. The Word resolver decodes
+        // package URIs for its exporter, which would erase this spelling before
+        // the PPTX package index can match equivalent percent-triplet case.
+        let target = PowerPointPackage.canonicalPartPath(target)
+        let combined = target.hasPrefix("/") ? String(target.dropFirst())
+            : baseDirectory.isEmpty ? target : baseDirectory + "/" + target
+        var segments: [Substring] = []
+        for segment in combined.split(separator: "/", omittingEmptySubsequences: true) {
+            if segment == ".." { if !segments.isEmpty { segments.removeLast() } }
+            else if segment != "." { segments.append(segment) }
+        }
+        return segments.joined(separator: "/")
     }
 
     private static func directory(of part: String) -> String {

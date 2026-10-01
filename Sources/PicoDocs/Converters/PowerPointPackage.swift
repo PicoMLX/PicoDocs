@@ -7,6 +7,7 @@ import ZIPFoundation
 /// One conversion's extraction budget, charged for actual inflated bytes.
 final class PowerPointPackage {
     let archive: Archive
+    private var entries: [String: Entry] = [:]
     private var remaining: Int
     private let entryLimit: Int
     private(set) var failure: Error?
@@ -35,8 +36,28 @@ final class PowerPointPackage {
             count += 1; nameBytes += bytes
             guard entry.type == .file || entry.type == .directory else { fail(PicoDocsError.fileCorrupted); break }
             if entry.type == .directory, !entry.path.hasSuffix("/") { fail(PicoDocsError.fileCorrupted); break }
-            if !names.insert(entry.path).inserted { fail(PicoDocsError.fileCorrupted); break }
+            let identity = Self.canonicalPartPath(entry.path)
+            if !names.insert(identity).inserted { fail(PicoDocsError.fileCorrupted); break }
+            entries[identity] = entry
         }
+    }
+
+    static func canonicalPartPath(_ path: String) -> String {
+        let bytes = Array(path.utf8)
+        var output = bytes, i = 0
+        func hex(_ byte: UInt8) -> Bool { (48...57).contains(byte) || (65...70).contains(byte) || (97...102).contains(byte) }
+        while i + 2 < bytes.count {
+            if bytes[i] == 37, hex(bytes[i + 1]), hex(bytes[i + 2]) {
+                for j in (i + 1)...(i + 2) where (97...102).contains(output[j]) { output[j] -= 32 }
+                i += 3
+            } else { i += 1 }
+        }
+        return String(decoding: output, as: UTF8.self)
+    }
+
+    func entry(_ path: String) -> Entry? {
+        let clean = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        return entries[Self.canonicalPartPath(clean)]
     }
 
     /// Bound all retained relationship dictionaries, including empty-map keys.
@@ -67,7 +88,7 @@ final class PowerPointPackage {
         do {
             try check()
             let clean = path.hasPrefix("/") ? String(path.dropFirst()) : path
-            guard let entry = archive[clean] else { return nil }
+            guard let entry = entry(clean) else { return nil }
             let size = UInt64(archive.data?.count ?? 0)
             let allowed = max(0, min(entryLimit, maximumBytes))
             guard entry.uncompressedSize <= UInt64(allowed), entry.uncompressedSize <= UInt64(remaining),
@@ -95,10 +116,10 @@ final class PowerPointPackage {
 final class PowerPointXML: NSObject, XMLParserDelegate {
     /// Conversion-wide allowance for shared and transient slide/notes DOM construction.
     final class Budget {
-        var nodes: Int, attributes: Int, bytes: Int, attributeBytes: Int
-        init(nodes: Int = 250_000, attributes: Int = 500_000, bytes: Int = 64 * 1024 * 1024, attributeBytes: Int = 8 * 1024 * 1024) {
+        var nodes: Int, attributes: Int, bytes: Int, attributeBytes: Int, namespaceWork: Int
+        init(nodes: Int = 250_000, attributes: Int = 500_000, bytes: Int = 64 * 1024 * 1024, attributeBytes: Int = 8 * 1024 * 1024, namespaceWork: Int = 1_000_000) {
             self.nodes = max(0, nodes); self.attributes = max(0, attributes); self.bytes = max(0, bytes)
-            self.attributeBytes = max(0, attributeBytes)
+            self.attributeBytes = max(0, attributeBytes); self.namespaceWork = max(0, namespaceWork)
         }
     }
 
@@ -117,6 +138,8 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
     private var attributeBytes = 0
     private var maximumAttributeBytes = 8 * 1024 * 1024
     private var maximumAttributesPerElement = 256
+    private var namespaceWork = 0
+    private var maximumNamespaceWork = 1_000_000
     private var maximumNodes = 250_000
     private var maximumAttributes = 500_000
     private var maximumOutputBytes = 64 * 1024 * 1024
@@ -140,7 +163,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
     ]
 
     static func normalize(_ data: Data, maximumOutputBytes: Int = 64 * 1024 * 1024, maximumNodes: Int = 250_000, maximumAttributes: Int = 500_000, maximumAttributesPerElement: Int = 256, maximumAttributeBytes: Int = 8 * 1024 * 1024, budget: Budget? = nil) -> String? {
-        guard !containsDoctype(data) else { return nil }
+        guard lexicalPreflight(data, maximumAttributesPerElement: maximumAttributesPerElement) else { return nil }
         let parser = XMLParser(data: data)
         let delegate = PowerPointXML()
         delegate.maximumOutputBytes = min(maximumOutputBytes, budget?.bytes ?? maximumOutputBytes)
@@ -148,6 +171,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         delegate.maximumAttributes = min(maximumAttributes, budget?.attributes ?? maximumAttributes)
         delegate.maximumAttributesPerElement = maximumAttributesPerElement
         delegate.maximumAttributeBytes = min(maximumAttributeBytes, budget?.attributeBytes ?? maximumAttributeBytes)
+        delegate.maximumNamespaceWork = budget?.namespaceWork ?? 1_000_000
         parser.delegate = delegate
         parser.shouldResolveExternalEntities = false
         guard parser.parse(), !delegate.hasError, !Task.isCancelled else { return nil }
@@ -156,39 +180,102 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
             budget.attributes -= delegate.attributesCount
             budget.attributeBytes -= delegate.attributeBytes
             budget.bytes -= delegate.outputBytes
+            budget.namespaceWork -= delegate.namespaceWork
         }
         return delegate.output
     }
 
-    /// Inspect the XML prolog without expanding entities. Ignoring NUL padding
-    /// recognizes ASCII declaration tokens in UTF-8, UTF-16 and UTF-32 inputs.
-    /// Comments, processing instructions and CDATA cannot introduce a DTD.
-    private static func containsDoctype(_ data: Data) -> Bool {
-        // The low bytes of this register are a fixed-size rolling window.
-        // Nine-byte openings compare their first eight bytes before shifting.
-        func token(_ value: String) -> UInt64 { value.utf8.reduce(0) { ($0 << 8) | UInt64($1) } }
-        let declaration = token("<!DOCTYP"), cdata = token("<![CDATA")
-        let comment = token("<!--"), processing = token("<?")
-        let commentEnd = token("-->"), cdataEnd = token("]]>"), processingEnd = token("?>")
-        var window: UInt64 = 0
-        var ending = 0
-        for (index, byte) in data.enumerated() {
-            if index.isMultiple(of: 4096), Task.isCancelled { return true }
-            guard byte != 0 else { continue }
-            let previous = window
-            window = (window << 8) | UInt64(byte)
-            if ending != 0 {
-                if (ending == 1 && window & 0xFFFFFF == commentEnd)
-                    || (ending == 2 && window & 0xFFFFFF == cdataEnd)
-                    || (ending == 3 && window & 0xFFFF == processingEnd) {
-                    ending = 0; window = 0
+    /// Inspect ASCII markup as encoded code units, without allocating attribute
+    /// dictionaries or deleting NUL bytes from valid non-ASCII UTF-16 text.
+    static func lexicalPreflight(_ data: Data, maximumAttributesPerElement: Int = 256) -> Bool {
+        data.withUnsafeBytes { buffer in
+            let bytes = buffer.bindMemory(to: UInt8.self)
+            var width = 1, little = false
+            if bytes.count >= 4 {
+                let first = Array(bytes.prefix(4))
+                if first == [0, 0, 0xFE, 0xFF] || first == [0, 0, 0, 0x3C] { width = 4 }
+                else if first == [0xFF, 0xFE, 0, 0] || first == [0x3C, 0, 0, 0] { width = 4; little = true }
+            }
+            if width == 1, bytes.count >= 2 {
+                if (bytes[0] == 0xFE && bytes[1] == 0xFF) || (bytes[0] == 0 && bytes[1] == 0x3C) { width = 2 }
+                else if (bytes[0] == 0xFF && bytes[1] == 0xFE) || (bytes[0] == 0x3C && bytes[1] == 0) { width = 2; little = true }
+            }
+            let count = bytes.count / width
+            func unit(_ index: Int) -> UInt32 {
+                guard index < count else { return 0 }
+                var value: UInt32 = 0
+                for j in 0..<width {
+                    let offset = little ? width - 1 - j : j
+                    value = (value << 8) | UInt32(bytes[index * width + offset])
                 }
-            } else if window & 0xFFFFFFFF == comment { ending = 1 }
-            else if previous == cdata && byte == 91 { ending = 2 }
-            else if window & 0xFFFF == processing { ending = 3 }
-            else if previous == declaration && byte == 69 { return true }
+                return value
+            }
+            func matches(_ token: [UInt8], at index: Int) -> Bool {
+                guard token.count <= count - index else { return false }
+                for j in token.indices where unit(index + j) != UInt32(token[j]) { return false }
+                return true
+            }
+            func space(_ value: UInt32) -> Bool { value == 32 || value == 9 || value == 10 || value == 13 }
+            var i = 0
+            func skip(to token: [UInt8]) -> Bool {
+                while i < count {
+                    if i % 4096 == 0, Task.isCancelled { return false }
+                    if matches(token, at: i) { i += token.count; return true }
+                    i += 1
+                }
+                return false
+            }
+            let comment = Array("<!--".utf8), cdata = Array("<![CDATA[".utf8), processing = Array("<?".utf8)
+            while i < count {
+                if i % 4096 == 0, Task.isCancelled { return false }
+                guard unit(i) == 60 else { i += 1; continue }
+                if matches(comment, at: i) { i += 4; guard skip(to: Array("-->".utf8)) else { return false }; continue }
+                if matches(cdata, at: i) { i += 9; guard skip(to: Array("]]>".utf8)) else { return false }; continue }
+                if matches(processing, at: i) { i += 2; guard skip(to: Array("?>".utf8)) else { return false }; continue }
+                // DTDs and entity declarations are unsupported, including external ones.
+                if unit(i + 1) == 33 { return false }
+                if unit(i + 1) == 47 { i += 2; guard skip(to: [62]) else { return false }; continue }
+                i += 1
+                // Element name. Leave full XML name validation to XMLParser.
+                while i < count, !space(unit(i)), unit(i) != 62, unit(i) != 47 {
+                    if i % 4096 == 0, Task.isCancelled { return false }
+                    i += 1
+                }
+                var attributes = 0
+                while i < count {
+                    while i < count, space(unit(i)) {
+                        if i % 4096 == 0, Task.isCancelled { return false }
+                        i += 1
+                    }
+                    if unit(i) == 62 { i += 1; break }
+                    if unit(i) == 47, unit(i + 1) == 62 { i += 2; break }
+                    guard i < count, attributes < maximumAttributesPerElement else { return false }
+                    attributes += 1
+                    while i < count, !space(unit(i)), unit(i) != 61 {
+                        if i % 4096 == 0, Task.isCancelled { return false }
+                        if unit(i) == 62 || unit(i) == 47 { return false }
+                        i += 1
+                    }
+                    while i < count, space(unit(i)) {
+                        if i % 4096 == 0, Task.isCancelled { return false }
+                        i += 1
+                    }
+                    guard unit(i) == 61 else { return false }; i += 1
+                    while i < count, space(unit(i)) {
+                        if i % 4096 == 0, Task.isCancelled { return false }
+                        i += 1
+                    }
+                    let quote = unit(i)
+                    guard i < count, quote == 34 || quote == 39 else { return false }; i += 1
+                    while i < count, unit(i) != quote {
+                        if i % 4096 == 0, Task.isCancelled { return false }
+                        i += 1
+                    }
+                    guard i < count else { return false }; i += 1
+                }
+            }
+            return !Task.isCancelled
         }
-        return false
     }
 
     func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) {
@@ -237,11 +324,18 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         nodes += 1; attributesCount += attributes.count
         var scope = scopes.last!
         var bytes = scopeBytes.last!
+        var chargedScopeCopy = false
         for (key, value) in attributes {
             if Task.isCancelled { hasError = true; parser.abortParsing(); return }
             guard key == "xmlns" || key.hasPrefix("xmlns:") else { continue }
             let prefix = key == "xmlns" ? "" : String(key.dropFirst(6))
             let prior = scope[prefix]
+            if prior == value { continue }
+            if !chargedScopeCopy {
+                let work = scope.count + 1
+                guard work <= maximumNamespaceWork - namespaceWork else { hasError = true; parser.abortParsing(); return }
+                namespaceWork += work; chargedScopeCopy = true
+            }
             bytes -= prior.map { prefix.utf8.count + $0.utf8.count } ?? 0
             bytes += prefix.utf8.count + value.utf8.count
             // Each copied scope is small, even at the maximum XML depth.
