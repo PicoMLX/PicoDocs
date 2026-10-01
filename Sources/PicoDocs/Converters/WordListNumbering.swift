@@ -1,0 +1,415 @@
+//
+//  WordListNumbering.swift
+//  PicoDocs
+//
+//  Resolves DOCX list membership and Markdown markers from `word/numbering.xml`
+//  (and list styles in `word/styles.xml`), so numbered lists render as `1.`,
+//  bulleted ones as `-`, nested levels are indented, and paragraphs whose
+//  numbering is switched off (`w:numId="0"`) aren't list items at all.
+//
+//  Counters belong to concrete numbering instances. LibreOffice restart aliases
+//  are handled only for its explicit startOverride/return-to-original pattern.
+
+import Foundation
+import ZIPFoundation
+import SwiftSoup
+
+final class WordListNumbering {
+
+    private struct Level {
+        let format: String   // w:numFmt, e.g. "decimal", "bullet", "none"
+        let start: Int       // w:start
+        let restart: Int?    // one-based triggering ancestor; zero means never
+        var text: String? = nil
+        var legal = false
+        var language: String? = nil
+        var suffix: String? = nil
+        var nullText = false
+        var paragraphStyle: String? = nil
+    }
+
+    /// abstractNumId → ilvl → level definition.
+    private var numberingStyleLinks: [String: String] = [:]
+    private var abstractLevels: [String: [Int: Level]] = [:]
+    /// numId → (abstractNumId, ilvl → startOverride).
+    private var numbers: [String: (abstract: String, overrides: [Int: Int])] = [:]
+    /// styleId → numbering its paragraph properties declare, and its parent style.
+    private var styles: [String: (numID: String?, level: Int?, basedOn: String?)] = [:]
+
+    private var counters: [String: [Int: Int]] = [:]
+    private var markerWidths: [String: [Int: Int]] = [:]
+    private var defaultLanguage = "en-US"
+    private var styleOutlineLevels: [String: Int] = [:]
+    private var styleLanguages: [String: String] = [:]
+    private var defaultStyle: String?
+    private var documentDefaults: (numID: String?, level: Int?)?
+    private var restartAfterBreak: [String: Bool] = [:]
+    private var isLibreOffice = false
+    private var lastInstance: [String: String] = [:]
+    private var resumeAlias: (original: String, replacement: String)?
+    private struct PartialLevel { let format: String?; let start: Int?; let restart: Int?; var text: String? = nil; var legal: Bool? = nil; var language: String? = nil; var suffix: String? = nil; var nullText: Bool? = nil; var paragraphStyle: String? = nil }
+    private var levelOverrides: [String: [Int: PartialLevel]] = [:]
+
+    /// Whether `numbering.xml` was found; without it, list paragraphs fall back
+    /// to plain bullets.
+    private(set) var isResolvable = false
+
+    init(archive: Archive) {
+        if let app = Self.xml(archive, path: "docProps/app.xml") {
+            isLibreOffice = ((try? app.getElementsByTag("Application").text()) ?? "").hasPrefix("LibreOffice")
+        }
+        let numberingPath = WordConverter.relationshipTarget(archive, typeSuffix: "/numbering")
+            .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/numbering.xml"
+        let stylesPath = WordConverter.relationshipTarget(archive, typeSuffix: "/styles")
+            .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/styles.xml"
+        if let numbering = Self.xml(archive, path: numberingPath) {
+            isResolvable = true
+            parseNumbering(numbering)
+        }
+        if let styles = Self.xml(archive, path: stylesPath) {
+            parseStyles(styles)
+        }
+    }
+
+    /// The Markdown prefix (indent + marker) for a paragraph, or nil when it isn't
+    /// a list item. `numPr` is the paragraph's own `w:numPr`, if any; `style` its
+    /// `w:pStyle`, whose (inherited) numbering applies when the paragraph has none.
+    func prefix(numPr: Element?, style: String?, visibleMarker: Bool = true, paragraphProperties: Element? = nil) -> String? {
+        var numID = numPr.flatMap { Self.child(of: $0, named: "w:numid") }.flatMap { try? $0.attr("w:val") }
+        var level = numPr.flatMap { Self.child(of: $0, named: "w:ilvl") }.flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
+        if numID == nil || level == nil, let inherited = styleNumbering(style) {
+            numID = numID ?? inherited.numID
+            level = level ?? inherited.level
+        }
+        guard let numID = Self.canonicalID(numID), numID != "0" else { return nil }   // numId 0: numbering removed
+
+        guard isResolvable, let number = numbers[numID] else {
+            return "- "   // Resolved membership survives a missing definition, including styles.
+        }
+        if level == nil {
+            var associatedStyle = style ?? defaultStyle
+            for _ in 0..<16 {
+                guard let id = associatedStyle else { break }
+                if let match = (0...8).first(where: { effectiveLevel(numID: numID, level: $0)?.paragraphStyle == id }) {
+                    level = match; break
+                }
+                associatedStyle = styles[id]?.basedOn
+            }
+        }
+        let ilvl = min(max(level ?? 0, 0), 8)
+        let abstract = number.abstract
+        let definition = effectiveLevel(numID: numID, level: ilvl)
+        if let alias = resumeAlias {
+            if alias.original == numID {
+                counters[numID, default: [:]].merge(counters[alias.replacement] ?? [:]) { _, new in new }
+                markerWidths[numID, default: [:]].merge(markerWidths[alias.replacement] ?? [:]) { _, new in new }
+                resumeAlias = nil
+            } else if alias.replacement != numID { resumeAlias = nil }
+        }
+        if isLibreOffice, counters[numID] == nil, !number.overrides.isEmpty,
+           let original = lastInstance[abstract], original != numID {
+            resumeAlias = (original, numID)
+        }
+        lastInstance[abstract] = numID
+        // Default: restart after the previous level (or any higher ancestor).
+        // Explicit restart=0 preserves counters across all ancestor items.
+        for deeper in (ilvl + 1)..<9 {
+            let effective = effectiveLevel(numID: numID, level: deeper)
+            let trigger = effective?.restart ?? deeper
+            if trigger > 0 && ilvl < trigger {
+                counters[numID]?[deeper] = nil
+            }
+        }
+        markerWidths[numID] = markerWidths[numID]?.filter { $0.key < ilvl }
+
+        // Invisible and bullet levels still participate in compound numbering.
+        let start = number.overrides[ilvl] ?? definition?.start ?? 0
+        let previous = counters[numID]?[ilvl]
+        let count = previous.map { min($0, Int.max - 1) + 1 } ?? start
+        counters[numID, default: [:]][ilvl] = count
+
+        if definition?.nullText == true { return nil }
+        let language = Self.language(in: paragraphProperties ?? numPr?.parent()) ?? styleLanguage(style)
+        let suffix = definition?.suffix == "nothing" ? "" : (definition?.suffix == "space" ? " " : "\t")
+        var marker: String
+        switch definition?.format ?? "bullet" {
+        case "none":
+            return nil
+        case "bullet":
+            if suffix.isEmpty {
+                let label = definition?.text ?? "•"
+                marker = "- " + label.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+            } else { marker = "-" + suffix }
+        default:
+            let simple = Self.formattedNumber(count, format: definition?.format ?? "decimal", language: definition?.language ?? language) + "."
+            var label = definition?.text ?? simple
+            for level in 0...8 {
+                let effective = effectiveLevel(numID: numID, level: level)
+                let value = counters[numID]?[level] ?? numbers[numID]?.overrides[level] ?? effective?.start ?? 0
+                label = label.replacingOccurrences(of: "%\(level + 1)", with: Self.formattedNumber(value, format: definition?.legal == true ? "decimal" : (effective?.format ?? "decimal"), language: definition?.language ?? effective?.language ?? language))
+            }
+            if ["\(count).", "\(count))"].contains(label), String(count).count <= 9, !suffix.isEmpty { marker = label + suffix }
+            else {
+                let escaped = label.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()
+                marker = "- " + escaped + suffix
+            }
+        }
+        let indent = (0..<ilvl).reduce(0) { $0 + (markerWidths[numID]?[$1] ?? 0) }
+        if visibleMarker { markerWidths[numID, default: [:]][ilvl] = marker.hasPrefix("- ") ? 2 : Self.displayWidth(marker, startingAt: indent) - indent }
+        return String(repeating: " ", count: indent) + marker
+    }
+
+    private func effectiveLevel(numID: String, level: Int, visited: Set<String> = []) -> Level? {
+        guard !visited.contains(numID), visited.count < 16, let number = numbers[numID] else { return nil }
+        var base = abstractLevels[number.abstract]?[level]
+        if base == nil, let style = numberingStyleLinks[number.abstract],
+           let linkedID = Self.canonicalID(styleNumbering(style)?.numID),
+           let linked = effectiveLevel(numID: linkedID, level: level, visited: visited.union([numID])) {
+            base = Level(format: linked.format, start: numbers[linkedID]?.overrides[level] ?? linked.start, restart: linked.restart, text: linked.text, legal: linked.legal, language: linked.language, suffix: linked.suffix, nullText: linked.nullText, paragraphStyle: linked.paragraphStyle)
+        }
+        guard let override = levelOverrides[numID]?[level] else { return base }
+        return Level(format: override.format ?? base?.format ?? "decimal",
+                     start: override.start ?? base?.start ?? 0,
+                     restart: override.restart ?? base?.restart, text: override.text ?? base?.text, legal: override.legal ?? base?.legal ?? false, language: override.language ?? base?.language, suffix: override.suffix ?? base?.suffix, nullText: override.nullText ?? base?.nullText ?? false, paragraphStyle: override.paragraphStyle ?? base?.paragraphStyle)
+    }
+
+    // MARK: - Parsing
+
+    private func parseNumbering(_ document: Document) {
+        for abstract in (try? document.getElementsByTag("w:abstractNum").array()) ?? [] {
+            guard let id = Self.canonicalID(try? abstract.attr("w:abstractNumId")) else { continue }
+            if abstract.hasAttr("w15:restartNumberingAfterBreak") { restartAfterBreak[id] = ["1", "true", "on"].contains((try? abstract.attr("w15:restartNumberingAfterBreak")) ?? "") }
+            numberingStyleLinks[id] = Self.child(of: abstract, named: "w:numstylelink").flatMap { try? $0.attr("w:val") }
+            var levels: [Int: Level] = [:]
+            for level in abstract.children().array() where level.tagName().lowercased() == "w:lvl" {
+                guard let ilvl = Int((try? level.attr("w:ilvl")) ?? ""), (0...8).contains(ilvl) else { continue }
+                let format = Self.child(of: level, named: "w:numfmt").flatMap { try? $0.attr("w:val") } ?? "decimal"
+                let start = Self.child(of: level, named: "w:start").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) } ?? 0
+                let restart = Self.child(of: level, named: "w:lvlrestart").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
+                levels[ilvl] = Level(format: format, start: max(0, start), restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil }, text: Self.child(of: level, named: "w:lvltext").flatMap { try? $0.attr("w:val") }, legal: Self.legal(in: level) ?? false, language: Self.language(in: level), suffix: Self.child(of: level, named: "w:suff").flatMap { try? $0.attr("w:val") }, nullText: Self.nullLevelText(level) ?? false, paragraphStyle: Self.child(of: level, named: "w:pstyle").flatMap { try? $0.attr("w:val") })
+            }
+            abstractLevels[id] = levels
+        }
+        for number in (try? document.getElementsByTag("w:num").array()) ?? [] {
+            guard let id = Self.canonicalID(try? number.attr("w:numId")),
+                  let abstract = Self.child(of: number, named: "w:abstractnumid").flatMap({ try? $0.attr("w:val") }).flatMap(Self.canonicalID) else { continue }
+            var overrides: [Int: Int] = [:]
+            for override in number.children().array() where override.tagName().lowercased() == "w:lvloverride" {
+                guard let ilvl = Int((try? override.attr("w:ilvl")) ?? ""), (0...8).contains(ilvl) else { continue }
+                if let start = Self.child(of: override, named: "w:startoverride")
+                    .flatMap({ try? $0.attr("w:val") }).flatMap({ Int($0) }) {
+                    overrides[ilvl] = max(0, start)
+                }
+                if let level = Self.child(of: override, named: "w:lvl") {
+                    let format = Self.child(of: level, named: "w:numfmt").flatMap { try? $0.attr("w:val") }
+                    let start = Self.child(of: level, named: "w:start").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
+                    let restart = Self.child(of: level, named: "w:lvlrestart").flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
+                    levelOverrides[id, default: [:]][ilvl] = PartialLevel(format: format, start: start.map { max(0, $0) }, restart: restart.flatMap { (0...ilvl).contains($0) ? $0 : nil }, text: Self.child(of: level, named: "w:lvltext").flatMap { try? $0.attr("w:val") }, legal: Self.legal(in: level), language: Self.language(in: level), suffix: Self.child(of: level, named: "w:suff").flatMap { try? $0.attr("w:val") }, nullText: Self.nullLevelText(level), paragraphStyle: Self.child(of: level, named: "w:pstyle").flatMap { try? $0.attr("w:val") })
+                }
+            }
+            numbers[id] = (abstract, overrides)
+        }
+    }
+
+    private func parseStyles(_ document: Document) {
+        if let defaults = try? document.getElementsByTag("w:docDefaults").first(),
+           let language = try? defaults.getElementsByTag("w:lang").first()?.attr("w:val"), !language.isEmpty { defaultLanguage = language }
+        if let defaults = try? document.getElementsByTag("w:docDefaults").first(),
+           let paragraph = Self.child(of: defaults, named: "w:pprdefault").flatMap({ Self.child(of: $0, named: "w:ppr") }),
+           let numPr = Self.child(of: paragraph, named: "w:numpr") {
+            documentDefaults = (Self.child(of: numPr, named: "w:numid").flatMap { try? $0.attr("w:val") },
+                                Self.child(of: numPr, named: "w:ilvl").flatMap { try? $0.attr("w:val") }.flatMap(Int.init))
+        }
+        for style in (try? document.getElementsByTag("w:style").array()) ?? [] {
+            guard let id = try? style.attr("w:styleId"), !id.isEmpty else { continue }
+            if (try? style.attr("w:type")) == "paragraph",
+               ["1", "true", "on"].contains((try? style.attr("w:default")) ?? "") { defaultStyle = id }
+            styleLanguages[id] = Self.language(in: style)
+            styleOutlineLevels[id] = Self.child(of: style, named: "w:ppr").flatMap { Self.child(of: $0, named: "w:outlinelvl") }.flatMap { try? $0.attr("w:val") }.flatMap(Int.init)
+            let numPr = Self.child(of: style, named: "w:ppr").flatMap { Self.child(of: $0, named: "w:numpr") }
+            styles[id] = (
+                numID: numPr.flatMap { Self.child(of: $0, named: "w:numid") }.flatMap { try? $0.attr("w:val") },
+                level: numPr.flatMap { Self.child(of: $0, named: "w:ilvl") }.flatMap { try? $0.attr("w:val") }.flatMap { Int($0) },
+                basedOn: Self.child(of: style, named: "w:basedon").flatMap { try? $0.attr("w:val") }
+            )
+        }
+    }
+
+    /// Resolve direct/inherited outline semantics before deciding list visibility.
+    func headingLevel(style: String?, paragraphProperties: Element?) -> Int? {
+        func heading(_ outline: Int) -> Int? { (0...8).contains(outline) ? min(outline + 1, 6) : nil }
+        if let outline = paragraphProperties.flatMap({ Self.child(of: $0, named: "w:outlinelvl") }).flatMap({ try? $0.attr("w:val") }).flatMap(Int.init) { return heading(outline) }
+        var current = style ?? defaultStyle
+        for _ in 0..<16 {
+            guard let id = current else { break }
+            if let outline = styleOutlineLevels[id] { return heading(outline) }
+            if let named = WordConverter.headingLevel(forStyle: id) { return named }
+            current = styles[id]?.basedOn
+        }
+        return nil
+    }
+
+    /// The numbering a paragraph style declares, walking `w:basedOn` (bounded, so
+    /// a cyclic chain can't loop).
+    private func styleNumbering(_ styleID: String?) -> (numID: String?, level: Int?)? {
+        var current = styleID ?? defaultStyle
+        var numID: String?
+        var level: Int?
+        for _ in 0..<16 {
+            guard let id = current, let style = styles[id] else { break }
+            numID = numID ?? style.numID
+            level = level ?? style.level
+            if numID != nil && level != nil { break }
+            current = style.basedOn
+        }
+        numID = numID ?? documentDefaults?.numID
+        level = level ?? documentDefaults?.level
+        return numID == nil && level == nil ? nil : (numID, level)
+    }
+
+    static func displayWidth(_ text: String, startingAt column: Int = 0) -> Int {
+        text.reduce(column) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
+    }
+
+    private func restartsAfterSection(_ numID: String) -> Bool {
+        var current: String? = numID, seen: Set<String> = []
+        for _ in 0..<16 {
+            guard let id = current, seen.insert(id).inserted, let number = numbers[id] else { break }
+            if let restart = restartAfterBreak[number.abstract] { return restart }
+            current = numberingStyleLinks[number.abstract].flatMap { Self.canonicalID(styleNumbering($0)?.numID) }
+        }
+        return false
+    }
+
+    func sectionBreak() {
+        let affected = Set(numbers.keys.filter(restartsAfterSection))
+        for id in affected { counters[id] = nil; markerWidths[id] = nil }
+        lastInstance = lastInstance.filter { !affected.contains($0.value) }
+        resumeAlias = nil
+    }
+
+    private static func legal(in level: Element) -> Bool? {
+        guard let legal = child(of: level, named: "w:islgl") else { return nil }
+        return !["0", "false", "off"].contains((try? legal.attr("w:val")) ?? "")
+    }
+
+    private static func language(in element: Element?) -> String? {
+        guard let element, let properties = child(of: element, named: "w:rpr"),
+              let lang = child(of: properties, named: "w:lang"), let value = try? lang.attr("w:val"), !value.isEmpty else { return nil }
+        return value
+    }
+
+    private func styleLanguage(_ style: String?) -> String {
+        var current = style ?? defaultStyle
+        for _ in 0..<16 {
+            guard let id = current else { break }
+            if let language = styleLanguages[id] { return language }
+            current = styles[id]?.basedOn
+        }
+        return defaultLanguage
+    }
+
+    private static func formattedNumber(_ value: Int, format: String, language: String) -> String {
+        if format == "cardinalText" || format == "ordinalText" {
+            let formatter = NumberFormatter()
+            formatter.locale = Locale(identifier: language)
+            formatter.numberStyle = .spellOut
+            let cardinal = (formatter.string(from: NSNumber(value: value)) ?? String(value)).replacingOccurrences(of: "\u{00AD}", with: "")
+            if format == "cardinalText" { return cardinal }
+            if language.lowercased().hasPrefix("en") {
+                let end = cardinal.endIndex
+                let start = cardinal.lastIndex(where: { $0 == " " || $0 == "-" }).map { cardinal.index(after: $0) } ?? cardinal.startIndex
+                let word = String(cardinal[start..<end])
+                let irregular = ["one": "first", "two": "second", "three": "third", "five": "fifth", "eight": "eighth", "nine": "ninth", "twelve": "twelfth"]
+                let ordinal = irregular[word] ?? (word.hasSuffix("y") ? String(word.dropLast()) + "ieth" : word + "th")
+                return String(cardinal[..<start]) + ordinal
+            }
+            // Foundation's .ordinal emits digits, not ordinal words. Apply
+            // textual inflection for French/German instead of changing format.
+            // CLDR reference: common/rbnf/{fr,de}.xml, SpelloutRules.
+            if language.lowercased().hasPrefix("fr") {
+                if value == 1 { return "premier" }
+                var stem = cardinal
+                if value >= 1_000_000, value.isMultiple(of: 1_000_000), stem.hasPrefix("un ") { stem = String(stem.dropFirst(3)) }
+                if stem.hasSuffix("cents") || stem.hasSuffix("vingts") || stem.hasSuffix("millions") || stem.hasSuffix("milliards") { stem.removeLast() }
+                if stem.hasSuffix("cinq") { stem += "u" }
+                else if stem.hasSuffix("neuf") { stem = String(stem.dropLast()) + "v" }
+                else if stem.hasSuffix("e") { stem.removeLast() }
+                return stem + "ième"
+            }
+            if language.lowercased().hasPrefix("de") {
+                let remainder = value % 100
+                let ending = [1:"erste",3:"dritte",7:"siebte",8:"achte"]
+                if remainder > 0 && remainder < 20 {
+                    let tail = (formatter.string(from: NSNumber(value: remainder)) ?? "").replacingOccurrences(of: "\u{00AD}", with: "")
+                    if cardinal.hasSuffix(tail) {
+                        return String(cardinal.dropLast(tail.count)) + (ending[remainder] ?? tail + "te")
+                    }
+                }
+                return cardinal + (value < 20 ? "te" : "ste")
+            }
+            // Unsupported ordinal inflections retain localized words rather
+            // than silently substituting a numeric ordinal representation.
+            return cardinal
+        }
+        if format == "ordinal" {
+            let formatter = NumberFormatter()
+            formatter.locale = Locale(identifier: language)
+            formatter.numberStyle = .ordinal
+            return formatter.string(from: NSNumber(value: value)) ?? String(value)
+        }
+        if format == "decimalEnclosedParen", (1...20).contains(value) {
+            return String(UnicodeScalar(0x2473 + value)!)
+        }
+        if format == "decimalEnclosedFullstop", (1...20).contains(value) {
+            return String(UnicodeScalar(0x2487 + value)!)
+        }
+        if format == "decimalEnclosedCircle", (1...20).contains(value) {
+            return String(UnicodeScalar(0x245F + value)!)
+        }
+        if format == "hex" { return String(value, radix: 16, uppercase: true) }
+        if format == "decimalFullWidth" {
+            return String(String(value).unicodeScalars.map { scalar in
+                (48...57).contains(scalar.value) ? Character(UnicodeScalar(scalar.value + 0xFEE0)!) : Character(scalar)
+            })
+        }
+        if format == "decimalZero", (0...9).contains(value) { return "0" + String(value) }
+        guard value > 0 else { return String(value) }
+        if format == "lowerLetter" || format == "upperLetter" {
+            var n = value, text = ""
+            while n > 0 { n -= 1; text = String(UnicodeScalar(65 + n % 26)!) + text; n /= 26 }
+            return format == "lowerLetter" ? text.lowercased() : text
+        }
+        if format == "lowerRoman" || format == "upperRoman", value < 4000 {
+            var n = value, text = ""
+            for (amount, symbol) in [(1000,"M"),(900,"CM"),(500,"D"),(400,"CD"),(100,"C"),(90,"XC"),(50,"L"),(40,"XL"),(10,"X"),(9,"IX"),(5,"V"),(4,"IV"),(1,"I")] {
+                while n >= amount { text += symbol; n -= amount }
+            }
+            return format == "lowerRoman" ? text.lowercased() : text
+        }
+        return String(value)
+    }
+
+    private static func nullLevelText(_ level: Element) -> Bool? {
+        guard let text = child(of: level, named: "w:lvltext") else { return nil }
+        return ["1", "true", "on"].contains((try? text.attr("w:null")) ?? "")
+    }
+
+    private static func canonicalID(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let digits = value.hasPrefix("+") ? value.dropFirst() : value[...]
+        guard !digits.isEmpty, digits.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        let trimmed = digits.drop { $0 == "0" }
+        return trimmed.isEmpty ? "0" : String(trimmed)
+    }
+
+    private static func xml(_ archive: Archive, path: String) -> Document? {
+        guard let data = WordConverter.readEntry(archive, path: path),
+              let text = WordConverter.decodeText(data) else { return nil }
+        return try? SwiftSoup.parse(text, "", SwiftSoup.Parser.xmlParser())
+    }
+
+    private static func child(of element: Element, named tag: String) -> Element? {
+        element.children().first { $0.tagName().lowercased() == tag }
+    }
+}

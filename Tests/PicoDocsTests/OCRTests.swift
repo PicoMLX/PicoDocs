@@ -24,6 +24,10 @@ import PDFKit
 @Suite("OCR (Vision)")
 struct OCRTests {
     @Test func recognizedFrameTextSharesCodeContextAndRetainsPageGaps() throws {
+        let literal = ConverterResult(sections: ImageOCRConverter.sections(from: [#"C:\*"#], filename: "scan.png"))
+        for format in [ExportFileType.html, .plaintext] {
+            #expect(try DocumentRenderer.render(literal, to: format).contains(#"C:\*"#))
+        }
         let sections = ImageOCRConverter.sections(from:["```","",#"a\*b"#,"```"],filename:"frames.tiff")
         #expect(sections.map(\.pageRange) == [1...1,3...3,4...4])
         #expect(sections.allSatisfy { $0.metadata["extractionMethod"] == "vision-ocr" })
@@ -73,6 +77,8 @@ struct OCRTests {
         let result = try await PicoDocsEngine.convert(data: data as Data, filename: "literal.pdf")
         for format in [ExportFileType.html,.plaintext,.csv] { #expect(try DocumentRenderer.render(result, to: format).contains(literal)) }
     }
+
+
 
     @Test("Image OCR converter extracts text from an image")
     func imageOCR() async throws {

@@ -75,9 +75,10 @@ public enum DocumentRenderer {
                 return "---"
             case .blockquote(let lines):
                 return lines.map { stripInline($0, footnoteNumbers: numbers) }.joined(separator: "\n")
-            case .list(let ordered, let start, let items):
-                return items.enumerated().map { index, item in
-                    plaintextListItem(ordered ? "\(start + index)." : "-", item, footnoteNumbers: numbers, depth: depth)
+            case .list(_, _, let items):
+                return items.map { item in
+                    let marker = item.number.map { "\($0)\(item.delimiter)" } ?? "-"
+                    return plaintextListItem(marker + item.padding, listItemText(item), footnoteNumbers: numbers, depth: depth)
                 }.joined(separator: "\n")
             case .table(let rows):
                 return rows.map { $0.map { stripInline($0, footnoteNumbers: numbers) }.joined(separator: "\t") }.joined(separator: "\n")
@@ -85,14 +86,23 @@ public enum DocumentRenderer {
         }
     }
 
+    private static func listItemText(_ item: MarkdownList.Item) -> String {
+        item.content.map { content in
+            switch content {
+            case .text(let text): return text
+            case .list(let list): return list.plaintext { $0 }
+            }
+        }.joined(separator: "\n")
+    }
+
     /// A list item as plaintext: the marker and its leading text on one line, with
     /// any nested content (e.g. a sub-list) indented under it.
     private static func plaintextListItem(_ marker: String, _ item: String,
                                           footnoteNumbers numbers: [String: Int], depth: Int) -> String {
         let (lead, nested) = listItemContent(item, depth: depth)
-        var out = lead.isEmpty ? marker
-            : marker + " " + stripInline(lead, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: " ")
-        let indent = String(repeating: " ", count: marker.count + 1)
+        var out = lead.isEmpty ? marker.trimmingCharacters(in: .whitespaces)
+            : marker + stripInline(lead, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: " ")
+        let indent = String(repeating: " ", count: WordListNumbering.displayWidth(marker))
         for block in plaintextBlocks(nested, footnoteNumbers: numbers, depth: depth + 1) {
             out += "\n" + block.components(separatedBy: "\n").map { indent + $0 }.joined(separator: "\n")
         }
@@ -204,13 +214,17 @@ public enum DocumentRenderer {
                 return "<blockquote>\(inner)</blockquote>"
             case .list(let ordered, let start, let items):
                 let tag = ordered ? "ol" : "ul"
+                var expected = start
                 let lis = items.map { item -> String in
-                    let (lead, nested) = listItemContent(item, depth: depth)
+                    let value = item.number.map { $0 == expected ? "" : " value=\"\($0)\"" } ?? ""
+                    if let number = item.number { expected = number + 1 }
+                    let (lead, nested) = listItemContent(listItemText(item), depth: depth)
                     var html = inlineHTML(lead, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: " ")
                     if !nested.isEmpty {
-                        html += "\n" + htmlBlocks(nested, footnoteNumbers: numbers, depth: depth + 1).joined(separator: "\n") + "\n"
+                        html += "\n" + htmlBlocks(nested, footnoteNumbers: numbers, depth: depth + 1).joined(separator: "\n")
+                        if case .list? = nested.last {} else { html += "\n" }
                     }
-                    return "<li>\(html)</li>"
+                    return "<li\(value)>\(html)</li>"
                 }
                 let startAttribute = ordered && start != 1 ? " start=\"\(start)\"" : ""
                 return "<\(tag)\(startAttribute)>\n\(lis.joined(separator: "\n"))\n</\(tag)>"
@@ -389,8 +403,8 @@ public enum DocumentRenderer {
                 case .paragraph(let text): scan(text)
                 case .blockquote(let lines): lines.forEach(scan)
                 case .list(_, _, let items):
-                    if depth < maxListNesting { items.forEach { scanBlocks(parseBlocks($0), depth: depth + 1) } }
-                    else { items.forEach(scan) }
+                    if depth < maxListNesting { items.forEach { scanBlocks(parseBlocks(listItemText($0)), depth: depth + 1) } }
+                    else { items.forEach { scan(listItemText($0)) } }
                 case .table(let rows): rows.forEach { $0.forEach(scan) }
                 }
             }
@@ -563,13 +577,16 @@ public enum DocumentRenderer {
         case paragraph(String)
         case code(String)
         case blockquote([String])
-        case list(ordered: Bool, start: Int, items: [String])
+        case list(ordered: Bool, start: Int, items: [MarkdownList.Item])
         case table([[String]])
         case rule
     }
 
     private static func parseBlocks(_ markdown: String) -> [Block] {
-        let lines = markdown.components(separatedBy: "\n")
+        let lines = markdown.components(separatedBy: "\n").map { line in
+            let whitespace = line.prefix { $0 == " " || $0 == "\t" }
+            return String(repeating: " ", count: indentWidth(line)) + line.dropFirst(whitespace.count)
+        }
         var blocks: [Block] = []
         var i = 0
 
@@ -639,17 +656,19 @@ public enum DocumentRenderer {
                 // list stays nested (the renderers parse each item's text again).
                 let base = indentWidth(line)
                 var contentColumn = base
-                var items: [String] = []
+                var items: [MarkdownList.Item] = []
                 while i < lines.count {
                     let raw = lines[i]
                     let itemLine = raw.trimmingCharacters(in: .whitespaces)
                     let indent = indentWidth(raw)
                     if indent < base + 2, let marker = listMarker(itemLine), (marker == .ordered) == ordered {
-                        items.append(stripListMarker(itemLine))
-                        contentColumn = indent + markerWidth(itemLine); i += 1
+                        guard let item = MarkdownList.item(from: raw), !ordered || item.delimiter == items.first?.delimiter || items.isEmpty else { break }
+                        items.append(item)
+                        contentColumn = MarkdownList.contentIndent(of: raw) ?? indent + markerWidth(itemLine); i += 1
                     } else if indent < base + 2, let marker = bareListMarker(itemLine), (marker == .ordered) == ordered {
-                        items.append("")                  // an empty item inside the list
-                        contentColumn = indent + itemLine.count + 1; i += 1
+                        guard let item = MarkdownList.item(from: raw), !ordered || item.delimiter == items.first?.delimiter || items.isEmpty else { break }
+                        items.append(item)                  // an empty item inside the list
+                        contentColumn = MarkdownList.contentIndent(of: raw) ?? indent + itemLine.count + 1; i += 1
                     } else if isBlank(raw), !items.isEmpty {
                         var next = i + 1
                         while next < lines.count, isBlank(lines[next]) { next += 1 }
@@ -658,15 +677,16 @@ public enum DocumentRenderer {
                         let nextMarker = listMarker(nextText) ?? bareListMarker(nextText)
                         // Native inline tables insert blank separators but do not
                         // restart their enclosing list. Explicit list restarts do.
-                        let endsTable = items.last?.split(separator: "\n").last?.trimmingCharacters(in: .whitespaces).hasPrefix("|") == true
-                        let resumesList = endsTable && indentWidth(lines[next]) == base
+                        let endsTable = items.last.map(listItemText)?.split(separator: "\n").last?.trimmingCharacters(in: .whitespaces).hasPrefix("|") == true
+                        let resumesList = (endsTable || ordered) && indentWidth(lines[next]) < base + 2
                             && nextMarker.map { ($0 == .ordered) == ordered } == true
-                            && (!ordered || listStart(nextText) == start + items.count)
+                            && (!ordered || (listStart(nextText) == (items.last?.number ?? start) + 1
+                                && MarkdownList.item(from: lines[next])?.delimiter == items.first?.delimiter))
                         guard resumesList || indentWidth(lines[next]) >= contentColumn else { break }
-                        if !resumesList { items[items.count - 1] += "\n" }
+                        if !resumesList { items[items.count - 1].appendText("") }
                         i = next
                     } else if !isBlank(raw), !items.isEmpty, literalListContains(raw, base: base, content: contentColumn) {
-                        items[items.count - 1] += "\n" + String(raw.dropFirst(min(indent, contentColumn)))
+                        items[items.count - 1].appendText(String(raw.dropFirst(min(indent, contentColumn))))
                         i += 1
                     } else {
                         break
@@ -714,16 +734,9 @@ public enum DocumentRenderer {
     }
 
     private static func listMarker(_ line: String) -> ListKind? {
-        if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") { return .unordered }
-        // ordered: one-or-more digits, then ". "
-        var index = line.startIndex
-        var digits = 0
-        while index < line.endIndex, line[index].isASCII && line[index].isNumber { digits += 1; index = line.index(after: index) }
-        if (1...9).contains(digits), index < line.endIndex, line[index] == "." {
-            let after = line.index(after: index)
-            if after < line.endIndex, line[after] == " " { return .ordered }
-        }
-        return nil
+        guard let ordered = MarkdownList.isOrderedMarker(line), let item = MarkdownList.item(from: line),
+              !listItemText(item).isEmpty else { return nil }
+        return ordered ? .ordered : .unordered
     }
 
     /// Match the list parser's continuation grammar for both literal escaping and CSV.
@@ -733,12 +746,12 @@ public enum DocumentRenderer {
     }
 
     private static func indentWidth(_ line: String) -> Int {
-        line.prefix { $0 == " " }.count
+        line.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
     }
 
     /// The width of a list line's marker and the space after it (`- ` → 2, `12. ` → 4).
     private static func markerWidth(_ line: String) -> Int {
-        listMarker(line) == .unordered ? 2 : line.prefix { $0.isNumber }.count + 2
+        MarkdownList.contentIndent(of: line) ?? 0
     }
 
     /// A marker with no content (`-`, `2.`) — an empty list item. Only accepted
@@ -746,7 +759,7 @@ public enum DocumentRenderer {
     private static func bareListMarker(_ line: String) -> ListKind? {
         if line == "-" || line == "*" || line == "+" { return .unordered }
         let digits = line.prefix { $0.isASCII && $0.isNumber }
-        return (1...9).contains(digits.count) && line.dropFirst(digits.count) == "." ? .ordered : nil
+        return (1...9).contains(digits.count) && [".", ")"].contains(String(line.dropFirst(digits.count))) ? .ordered : nil
     }
 
     /// The number an ordered list starts at (`5. x` → 5), 1 when it isn't a
@@ -914,9 +927,16 @@ public enum DocumentRenderer {
         // duplicate element ids. The escaped id also matches the escaped body text.
         result = renderFootnoteReferences(result, escaped: escaped, numbers: footnoteNumbers, html: true)
         for (index, link) in links.enumerated() {
-            let tag = link.isImage
-                ? "<img src=\"\(escapeHTML(link.url))\" alt=\"\(escapeHTML(link.label))\">"
-                : "<a href=\"\(escapeHTML(link.url))\">\(applyEmphasisHTML(escapeHTML(link.label)))</a>"
+            let tag: String
+            if !isSafeURL(link.url, isImage: link.isImage) {
+                // A script-capable URL (`javascript:` …) would make the exported
+                // page executable when displayed; keep only the visible text.
+                tag = link.isImage ? escapeHTML(link.label) : applyEmphasisHTML(escapeHTML(link.label))
+            } else if link.isImage {
+                tag = "<img src=\"\(escapeHTML(link.url))\" alt=\"\(escapeHTML(link.label))\">"
+            } else {
+                tag = "<a href=\"\(escapeHTML(link.url))\">\(applyEmphasisHTML(escapeHTML(link.label)))</a>"
+            }
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: tag)
         }
         result = restoreEscapes(result, escaped: escaped, html: true)
@@ -924,6 +944,30 @@ public enum DocumentRenderer {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
         }
         return result
+    }
+
+    /// URL schemes the HTML export emits as live links. Link and image URLs come
+    /// from untrusted documents (web pages, DOCX hyperlinks, LLM output), and the
+    /// HTML export is meant to be displayed, so anything that can run script —
+    /// `javascript:`, `vbscript:`, `data:text/html`, … — must not become an `href`
+    /// or `src`.
+    private static let safeLinkSchemes: Set<String> = ["http", "https", "mailto", "tel", "ftp"]
+
+    /// Whether `url` is safe to emit as an `href` (or, for images, a `src`):
+    /// relative references and fragments (no scheme) and allowlisted schemes are;
+    /// images may also use `data:image/…`. Browsers ignore ASCII whitespace and
+    /// control characters inside a scheme (`java\tscript:`), so those are dropped
+    /// before the scheme is read.
+    static func isSafeURL(_ url: String, isImage: Bool) -> Bool {
+        let compact = String(String.UnicodeScalarView(url.unicodeScalars.filter { $0.value > 0x20 && $0.value != 0x7F }))
+        guard let colon = compact.firstIndex(of: ":") else { return true }   // relative
+        let scheme = compact[..<colon]
+        // A `:` after `/`, `?` or `#` belongs to a path, query or fragment, so the
+        // reference is relative (`docs/a:b`, `#x:y`).
+        if scheme.contains(where: { $0 == "/" || $0 == "?" || $0 == "#" }) { return true }
+        let lowered = scheme.lowercased()
+        if safeLinkSchemes.contains(lowered) { return true }
+        return isImage && lowered == "data" && compact.lowercased().hasPrefix("data:image/")
     }
 
     private static func applyEmphasisHTML(_ text: String) -> String {

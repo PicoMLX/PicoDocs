@@ -125,6 +125,17 @@ enum MarkdownLiteral {
         return output + String(repeating: "\\", count: slashes * 2)
     }
 
+    /// Add only missing escapes to already canonical inline Markdown.
+    static func escapeStructural(_ text: String, characters: String) -> String {
+        var output = "", slashes = 0
+        for character in text.unicodeScalars {
+            if characters.unicodeScalars.contains(character), slashes.isMultiple(of: 2) { output += "\\" }
+            output.unicodeScalars.append(character)
+            slashes = character == "\\" ? slashes + 1 : 0
+        }
+        return output
+    }
+
     /// Count added backslashes while retaining source
     /// UTF-16 indices, so styled runs can share whole-document code context.
     static func backslashEscapeCounts(_ text: String, paragraphSeparators: Set<UInt16> = [], softSeparators: Set<UInt16> = [], structuralText: String? = nil) -> [Int] {

@@ -55,21 +55,40 @@ public struct SpreadsheetConverter: DocumentConverter {
     // MARK: - Markdown table
 
     private static func markdownTable(rows: [Row], sharedStrings: SharedStrings?, sheetName: String?) -> String {
-        // Use the widest row as the column count so ragged rows still produce a
-        // valid (rectangular) Markdown table.
-        let columnCount = rows.map { $0.cells.count }.max() ?? 0
-        guard columnCount > 0 else { return "" }
+        // Worksheet rows are sparse: a blank cell is simply absent from `<row>`, so
+        // a cell's column comes from its reference (`C3`), not its position in the
+        // row — placing cells by position shifts every value after a gap into the
+        // wrong column. Columns and rows that are empty throughout are dropped, so
+        // the table stays compact (a stray value in column XFD doesn't produce
+        // thousands of empty columns) while every value keeps its column.
+        let origin = ColumnReference("A")!
+        var grid: [[(column: Int, text: String)]] = []
+        var usedColumns = Set<Int>()
+        for row in rows {
+            var cells: [(column: Int, text: String)] = []
+            for cell in row.cells {
+                let text = cellText(cell, sharedStrings: sharedStrings)
+                guard !text.isEmpty else { continue }
+                let column = origin.distance(to: cell.reference.column)
+                cells.append((column, text))
+                usedColumns.insert(column)
+            }
+            if !cells.isEmpty { grid.append(cells) }
+        }
+        let columns = usedColumns.sorted()
+        guard !columns.isEmpty else { return "" }
+        let position = Dictionary(uniqueKeysWithValues: columns.enumerated().map { ($1, $0) })
 
         var out = ""
         if let sheetName, !sheetName.isEmpty {
             out += "## \(sheetName)\n\n"
         }
-        for (index, row) in rows.enumerated() {
-            var values = row.cells.map { cellText($0, sharedStrings: sharedStrings) }
-            while values.count < columnCount { values.append("") }
+        for (index, cells) in grid.enumerated() {
+            var values = Array(repeating: "", count: columns.count)
+            for cell in cells { values[position[cell.column]!] = cell.text }
             out += "| " + values.joined(separator: " | ") + " |\n"
             if index == 0 {
-                out += "| " + Array(repeating: "---", count: columnCount).joined(separator: " | ") + " |\n"
+                out += "| " + Array(repeating: "---", count: columns.count).joined(separator: " | ") + " |\n"
             }
         }
         return out

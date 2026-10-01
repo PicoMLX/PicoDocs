@@ -112,8 +112,6 @@ public struct PDFConverter: DocumentConverter {
             throw PicoDocsError.emptyDocument
         }
 
-        sections = MarkdownLiteral.escapeSectionBackslashes(sections)
-
         let attributes = document.documentAttributes
         let title = (attributes?[PDFDocumentAttribute.titleAttribute] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -122,7 +120,7 @@ public struct PDFConverter: DocumentConverter {
         return ConverterResult(
             title: (title?.isEmpty == false) ? title : info.filename,
             author: (author?.isEmpty == false) ? author : nil,
-            sections: sections
+            sections: MarkdownLiteral.escapeSectionBackslashes(sections)
         )
     }
 
