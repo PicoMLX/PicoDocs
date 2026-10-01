@@ -76,8 +76,13 @@ struct PowerPointSecondStackReviewTests {
         let accepted = try attempt(1000)
         try accepted.1.check()
         let section = try #require(accepted.0.sections.first)
-        let actual = section.markdown.utf8.count + (section.title?.utf8.count ?? 0) + (section.sourcePath?.utf8.count ?? 0)
-            + section.metadata.filter { $0.key != "base64" }.reduce(0) { $0 + $1.key.utf8.count + $1.value.utf8.count }
+        var actual = section.markdown.utf8.count
+        actual += section.title?.utf8.count ?? 0
+        actual += section.sourcePath?.utf8.count ?? 0
+        for (key, value) in section.metadata where key != "base64" {
+            actual += key.utf8.count
+            actual += value.utf8.count
+        }
         #expect(1000 - accepted.2 == actual)
         let exact = try attempt(actual); try exact.1.check(); #expect(exact.2 == 0)
         let rejected = try attempt(actual - 1)
