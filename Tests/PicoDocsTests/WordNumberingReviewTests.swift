@@ -5,6 +5,35 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct WordNumberingReviewTests {
+    @Test func quotedHTMLListsDoNotExposeGeneratedBoundaries() throws {
+        let list = "<ul><li>a</li></ul>"
+        for source in ["<blockquote><p>lead</p>" + list + "</blockquote>",
+                       "<blockquote><blockquote><p>lead</p>" + list + list + "</blockquote></blockquote>",
+                       "<ul><li>parent<blockquote><p>lead</p>" + list + "</blockquote></li></ul>"] {
+            let converted = try HTMLToMarkdown.convert(html: source)
+            let result = ConverterResult(sections: [.init(markdown: converted.markdown)])
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                let output = try DocumentRenderer.render(result, to: format)
+                #expect(!output.contains("PicoDocs:list-restart"))
+                #expect(output.contains("lead")); #expect(output.contains("a"))
+            }
+        }
+    }
+
+    @Test func flattenedHTMLKeepsLiteralBoundaryTextInCode() throws {
+        let literal = "&lt;!-- PicoDocs:list-restart --&gt;"
+        for source in ["<blockquote><p>" + literal + "</p></blockquote>",
+                       "<blockquote><pre>" + literal + "</pre></blockquote>",
+                       "<blockquote><blockquote><pre>" + literal + "</pre></blockquote></blockquote>",
+                       "<table><tr><td><code>" + literal + "</code></td></tr></table>"] {
+            let converted = try HTMLToMarkdown.convert(html: source)
+            let result = ConverterResult(sections: [.init(markdown: converted.markdown)])
+            for format in [ExportFileType.html, .plaintext, .csv] {
+                #expect(try DocumentRenderer.render(result, to: format).contains("PicoDocs:list-restart"))
+            }
+        }
+    }
+
     @Test func adjacentHTMLListInstancesStaySeparate() throws {
         let list = "<ul><li>a</li></ul>"
         for source in [list + list, "<div>" + list + "</div><div>" + list + "</div>",

@@ -51,7 +51,15 @@ enum HTMLToMarkdown {
     private static func inlineString(_ element: Element, inList: Bool, depth: Int) -> String {
         var s = ""
         renderChildren(of: element, into: &s, inList: inList, depth: depth)
-        return collapseWhitespace(s).trimmingCharacters(in: .whitespaces)
+        return collapseWhitespace(consumeListBoundaries(s)).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Flattened contexts cannot carry block metadata. Literal source text is
+    /// already escaped; semantic code must retain a marker-looking literal.
+    private static func consumeListBoundaries(_ markdown: String) -> String {
+        MarkdownTableCell.mapCodeSpans(markdown, code: { $0 }, plain: {
+            $0.replacingOccurrences(of: MarkdownLiteral.listRestartBoundary, with: "")
+        })
     }
 
     private static func render(_ node: Node, into out: inout String, preserveWhitespace: Bool = false, inList: Bool = false, depth: Int = 0) {
@@ -129,7 +137,7 @@ enum HTMLToMarkdown {
         case "blockquote":
             var inner = ""
             renderChildren(of: element, into: &inner, preserveWhitespace: preserveWhitespace, inList: inList, depth: depth)
-            let quoted = normalizeBlankLines(inner)
+            let quoted = normalizeBlankLines(consumeListBoundaries(inner))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .components(separatedBy: "\n")
                 .map { $0.isEmpty ? ">" : "> \($0)" }
@@ -233,7 +241,7 @@ enum HTMLToMarkdown {
                 renderChildren(of: cell, into: &rendered, inList: inList, depth: depth)
                 // A table cell flattens block structure to inline text. Consume
                 // generated list metadata before that marker can become visible.
-                rendered = rendered.replacingOccurrences(of: MarkdownLiteral.listRestartBoundary, with: "")
+                rendered = consumeListBoundaries(rendered)
                 return MarkdownTableCell.escapeCanonicalDelimiters(
                     collapseWhitespace(rendered).trimmingCharacters(in: .whitespaces)
                 )
