@@ -143,7 +143,7 @@ public enum ContentTypeDetector {
         // package and its manifest after routing.
         // Read the bounded root relationships, then only a prefix of the main
         // part. Routing must not construct a presentation DOM.
-        let package = PowerPointPackage(archive: zip, totalLimit: 128 * 1024 * 1024)
+        let package = PowerPointPackage(archive: zip, entryLimit: 64 * 1024, totalLimit: 64 * 1024)
         let offices = PowerPointConverter.relationships(package, forPart: "").values.filter { $0.isType("/officeDocument") }
         guard offices.count == 1, let office = offices.first, !office.external else { return .zip }
         let path = PowerPointConverter.resolvePartPath(office.target, relativeTo: "")

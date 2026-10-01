@@ -85,7 +85,7 @@ public struct PowerPointConverter: DocumentConverter {
             for relation in Self.relationships(archive, forPart: path).values {
                 if relation.external && relation.isType("/image") {
                     externalReferences.insert(Self.linkDestination(relation.target))
-                } else if !relation.external, ["/slideLayout", "/slideMaster", "/notesSlide", "/notesMaster", "/theme"].contains(where: relation.isType) {
+                } else if !relation.external, ["/slideLayout", "/slideMaster", "/notesSlide", "/notesMaster", "/theme", "/themeOverride"].contains(where: relation.isType) {
                     try pendingParts.schedule(Self.resolvePartPath(relation.target, relativeTo: Self.directory(of: path)))
                 }
             }
@@ -398,6 +398,8 @@ public struct PowerPointConverter: DocumentConverter {
         var masterPath: String?
         var theme: Document?
         var themePath: String?
+        var formatScheme: Element?
+        var formatSchemePath: String?
         var defaultTextStyle: Element?
         var placeholders = PlaceholderCache()
         var styles = StyleChildCache()
@@ -479,10 +481,27 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     private static func configureTheme(context: inout SlideContext, parts: inout PartCache) {
-        guard let masterPath = context.masterPath else { return }
-        let rels = relationships(context.archive, forPart: masterPath)
-        context.themePath = relatedPart(of: masterPath, type: "/theme", relationships: rels, archive: context.archive)
-        context.theme = context.themePath.flatMap { parts.document($0, root: "a:theme") }
+        // A theme override replaces only the components it contains. Keep the
+        // effective format matrix with its part identity so image IDs resolve
+        // through the override's relationships, without copying the base DOM.
+        for path in [context.partPath, context.layoutPath].compactMap({ $0 }) {
+            let rels = relationships(context.archive, forPart: path)
+            if let overridePath = relatedPart(of: path, type: "/themeOverride", relationships: rels, archive: context.archive),
+               let root = parts.document(overridePath, root: "a:themeoverride")?.children().first(),
+               let scheme = context.styles.child(of: root, named: "a:fmtscheme"), context.formatScheme == nil {
+                context.formatScheme = scheme; context.formatSchemePath = overridePath
+            }
+        }
+        if let masterPath = context.masterPath {
+            let rels = relationships(context.archive, forPart: masterPath)
+            context.themePath = relatedPart(of: masterPath, type: "/theme", relationships: rels, archive: context.archive)
+            context.theme = context.themePath.flatMap { parts.document($0, root: "a:theme") }
+            if context.formatScheme == nil, let root = context.theme?.children().first(),
+               let elements = context.styles.child(of: root, named: "a:themeelements") {
+                context.formatScheme = context.styles.child(of: elements, named: "a:fmtscheme")
+                context.formatSchemePath = context.themePath
+            }
+        }
     }
 
     /// An explicit local background stops inheritance even when it has no image.
@@ -510,9 +529,7 @@ public struct PowerPointConverter: DocumentConverter {
 
     private static func themeFill(_ reference: Element, context: SlideContext) -> (fill: Element, path: String)? {
         guard let index = integerValue(try? reference.attr("idx")), index > 0, index != 1000,
-              let path = context.themePath, let root = context.theme?.children().first(),
-              let elements = context.styles.child(of: root, named: "a:themeelements"),
-              let scheme = context.styles.child(of: elements, named: "a:fmtscheme"),
+              let path = context.formatSchemePath, let scheme = context.formatScheme,
               let list = context.styles.child(of: scheme, named: index > 1000 ? "a:bgfillstylelst" : "a:fillstylelst") else { return nil }
         let entries = selectedChildren(in: list), offset = index > 1000 ? index - 1001 : index - 1
         guard offset < entries.count, entries[offset].tagName().lowercased() == "a:blipfill" else { return nil }
@@ -677,8 +694,17 @@ public struct PowerPointConverter: DocumentConverter {
     /// shape isn't a placeholder or its placeholder has no type (a body/object one).
     static func placeholderType(of shape: Element, cache: StyleChildCache? = nil) -> String? {
         guard let placeholder = self.placeholder(of: shape, cache: cache) else { return nil }
-        let type = (try? placeholder.attr("type")) ?? ""
+        let type = normalizedPlaceholderType(placeholder)
         return type.isEmpty ? nil : type
+    }
+
+    private static func normalizedPlaceholderType(_ placeholder: Element) -> String {
+        collapsedXMLURI((try? placeholder.attr("type")) ?? "")
+    }
+
+    private static func effectivePlaceholderType(_ placeholder: Element) -> String {
+        let type = normalizedPlaceholderType(placeholder)
+        return type.isEmpty ? "obj" : type
     }
 
     // MARK: - Inherited list formatting
@@ -724,7 +750,7 @@ public struct PowerPointConverter: DocumentConverter {
         var fallback: Bullet?
         var sources: [Element?] = [listStyle(shape, cache: context.styles)]
         if let placeholder = placeholder(of: shape, cache: context.styles) {
-            let type = ((try? placeholder.attr("type")) ?? "").isEmpty ? "obj" : ((try? placeholder.attr("type")) ?? "")
+            let type = effectivePlaceholderType(placeholder)
             let index = (try? placeholder.attr("idx")).flatMap { $0.isEmpty ? nil : $0 } ?? "0"
             let bodyLike = ["obj", "body", "subTitle"].contains(type)
             if context.layout == nil, context.master == nil {
@@ -754,8 +780,7 @@ public struct PowerPointConverter: DocumentConverter {
     private static func inheritedRunDefaults(for shape: Element, context: SlideContext) -> [[Element]] {
         var styles: [Element?] = [listStyle(shape, cache: context.styles)]
         if let placeholder = placeholder(of: shape, cache: context.styles) {
-            let raw = (try? placeholder.attr("type")) ?? ""
-            let type = raw.isEmpty ? "obj" : raw
+            let type = effectivePlaceholderType(placeholder)
             let index = (try? placeholder.attr("idx")).flatMap { $0.isEmpty ? nil : $0 } ?? "0"
             let bodyLike = ["obj", "body", "subTitle"].contains(type)
             if let layout = context.layout { styles.append(matchingPlaceholder(in: layout, type: type, index: index, cache: context.placeholders).flatMap { listStyle($0, cache: context.styles) }) }
@@ -780,8 +805,7 @@ public struct PowerPointConverter: DocumentConverter {
         if master.children().first()?.tagName().lowercased() == "p:notesmaster" {
             style = "p:notesStyle"
         } else {
-            let raw = placeholder(of: shape, cache: context.styles).flatMap { try? $0.attr("type") }
-            let type = raw.map { $0.isEmpty ? "obj" : $0 }
+            let type = placeholder(of: shape, cache: context.styles).map(effectivePlaceholderType)
             let nonvisual = context.styles.child(of: shape, named: "p:nvsppr")
             let properties = nonvisual.flatMap { context.styles.child(of: $0, named: "p:cnvsppr") }
             let bodyLike = type.map { ["obj", "body", "subTitle"].contains($0) } ?? isOn(properties, "txBox")
@@ -862,8 +886,7 @@ public struct PowerPointConverter: DocumentConverter {
                         case "p:sp":
                             guard let ph = PowerPointConverter.placeholder(of: element) else { continue }
                             let id = (try? ph.attr("idx")).flatMap { $0.isEmpty ? nil : $0 } ?? "0"
-                            let raw = (try? ph.attr("type")) ?? ""
-                            let kind = raw.isEmpty ? "obj" : raw
+                            let kind = PowerPointConverter.effectivePlaceholderType(ph)
                             let equivalent = ["title", "ctrTitle"].contains(kind) ? "title" : (["body", "obj"].contains(kind) ? "body" : kind)
                             let typedID = PlaceholderID(type: equivalent, id: id)
                             if result.byID[typedID] == nil { result.byID[typedID] = element }
@@ -1205,7 +1228,7 @@ public struct PowerPointConverter: DocumentConverter {
                 if let budget { _ = budget.append(escaped, to: &output) } else { output += escaped }
                 return
             }
-            if trimmed.count >= 3, trimmed.allSatisfy({ $0 == "-" || $0 == " " }) {
+            if trimmed.allSatisfy({ $0 == "-" }) || (trimmed.count >= 3 && trimmed.allSatisfy({ $0 == "-" || $0 == " " })) {
                 if let budget {
                     var bytes = output.utf8.count
                     guard budget.admit(line.utf8.count, retained: &bytes) else { return }
@@ -1382,23 +1405,64 @@ public struct PowerPointConverter: DocumentConverter {
     /// An inline image reference for a picture (alt text from `descr`, then
     /// `title`, then `name`), registering its bytes as an `.image` section.
     static func pictureMarkdown(_ picture: Element, context: inout SlideContext) -> String? {
-        let properties = selectedChild(of: picture, named: "p:sppr")
-        let direct = selectedChild(of: picture, named: "p:blipfill")
-            ?? properties.flatMap { selectedChild(of: $0, named: "a:blipfill") }
         let nonvisual = selectedChild(of: picture, named: "p:nvpicpr") ?? selectedChild(of: picture, named: "p:nvsppr")
         let common = nonvisual.flatMap { selectedChild(of: $0, named: "p:cnvpr") }
-        if let direct { return blipMarkdown(direct, properties: common, context: &context) }
-        // An explicit solid/gradient/no-fill owns the fill and stops style inheritance.
-        if let properties, selectedChildren(in: properties).contains(where: { ["a:solidfill", "a:gradfill", "a:pattfill", "a:nofill", "a:grpfill"].contains($0.tagName().lowercased()) }) { return nil }
-        guard let style = selectedChild(of: picture, named: "p:style"),
-              let reference = selectedChild(of: style, named: "a:fillref"),
-              let resolved = themeFill(reference, context: context) else { return nil }
+        guard let resolved = effectiveShapeFill(picture, context: context) else { return nil }
         var owner = context
         owner.partPath = resolved.path; owner.relationships = relationships(context.archive, forPart: resolved.path)
-        return blipMarkdown(resolved.fill, properties: common, context: &owner)
+        return blipMarkdown(resolved.fill, properties: common, context: &owner, linkContext: context)
     }
 
-    private static func blipMarkdown(_ fill: Element, properties: Element?, context: inout SlideContext) -> String? {
+    /// Select the nearest concrete fill; group fills explicitly follow the
+    /// containing group, while unfilled placeholders follow layout then master.
+    /// The visible shape keeps its text/link properties and the fill keeps its
+    /// own part identity for resolving image relationships.
+    private static func effectiveShapeFill(_ shape: Element, context: SlideContext) -> (fill: Element, path: String)? {
+        var owners: [(Element, String)] = [(shape, context.partPath)]
+        if let ph = placeholder(of: shape, cache: context.styles) {
+            let type = effectivePlaceholderType(ph)
+            let index = (try? ph.attr("idx")).flatMap { $0.isEmpty ? nil : $0 } ?? "0"
+            if let layout = context.layout, let path = context.layoutPath, path != context.partPath,
+               let match = matchingPlaceholder(in: layout, type: type, index: index, cache: context.placeholders) {
+                owners.append((match, path))
+            }
+            if let master = context.master, let path = context.masterPath, path != context.partPath,
+               let match = matchingPlaceholder(in: master, type: ["body", "obj", "subTitle"].contains(type) ? "body" : type, index: "", cache: context.placeholders) {
+                owners.append((match, path))
+            }
+        }
+        for (owner, path) in owners {
+            if let fill = context.styles.child(of: owner, named: "p:blipfill") { return (fill, path) }
+            if let properties = context.styles.child(of: owner, named: "p:sppr"),
+               let fill = selectedChildren(in: properties).first(where: { fillNames.contains($0.tagName().lowercased()) }) {
+                if fill.tagName().lowercased() == "a:grpfill" { return groupFill(containing: owner, path: path, context: context) }
+                return fill.tagName().lowercased() == "a:blipfill" ? (fill, path) : nil
+            }
+            if let style = context.styles.child(of: owner, named: "p:style"),
+               let reference = context.styles.child(of: style, named: "a:fillref") {
+                return themeFill(reference, context: context)
+            }
+        }
+        return nil
+    }
+
+    private static let fillNames: Set<String> = ["a:blipfill", "a:solidfill", "a:gradfill", "a:pattfill", "a:nofill", "a:grpfill"]
+
+    private static func groupFill(containing shape: Element, path: String, context: SlideContext) -> (fill: Element, path: String)? {
+        var parent = shape.parent()
+        while let group = parent {
+            guard !Task.isCancelled else { return nil }
+            parent = group.parent()
+            guard group.tagName().lowercased() == "p:grpsp" else { continue }
+            guard let properties = context.styles.child(of: group, named: "p:grpsppr"),
+                  let fill = selectedChildren(in: properties).first(where: { fillNames.contains($0.tagName().lowercased()) }) else { return nil }
+            if fill.tagName().lowercased() == "a:grpfill" { continue }
+            return fill.tagName().lowercased() == "a:blipfill" ? (fill, path) : nil
+        }
+        return nil
+    }
+
+    private static func blipMarkdown(_ fill: Element, properties: Element?, context: inout SlideContext, linkContext: SlideContext? = nil) -> String? {
         guard let blip = selectedDescendant(in: fill, named: "a:blip") else { return nil }
         let embedded = (try? blip.attr("r:embed")) ?? ""
         let linked = (try? blip.attr("r:link")) ?? ""
@@ -1427,7 +1491,7 @@ public struct PowerPointConverter: DocumentConverter {
         let image = budget?.join(fragments) ?? fragments.joined()
         if budget?.failed == true { return nil }
         let click = properties.flatMap { selectedChild(of: $0, named: "a:hlinkclick") }
-        if let target = click == nil ? context.defaultLink : hyperlink(click, context: context) {
+        if let target = click == nil ? context.defaultLink : hyperlink(click, context: linkContext ?? context) {
             let linked = ["[", image, "](", linkDestination(target), ")"]
             return budget?.join(linked) ?? linked.joined()
         }
@@ -1453,7 +1517,31 @@ public struct PowerPointConverter: DocumentConverter {
         static func referenceIdentity(_ reference: String) -> String {
             guard URLComponents(string: reference)?.scheme == nil, !reference.hasPrefix("//") else { return reference }
             let end = reference.firstIndex(where: { $0 == "?" || $0 == "#" }) ?? reference.endIndex
-            let path = PowerPointConverter.resolvePartPath(String(reference[..<end]), relativeTo: "")
+            // RFC 3986 unreserved escapes are equivalent to literal bytes.
+            // Decode them before dot-segment removal, retaining reserved escapes
+            // such as %2F and all encoded non-ASCII octets.
+            let bytes = Array(reference[..<end].utf8)
+            var decoded: [UInt8] = []
+            decoded.reserveCapacity(bytes.count)
+            func hex(_ byte: UInt8) -> UInt8? {
+                switch byte {
+                case 48...57: return byte - 48
+                case 65...70: return byte - 55
+                case 97...102: return byte - 87
+                default: return nil
+                }
+            }
+            var index = 0
+            while index < bytes.count {
+                if bytes[index] == 37, index + 2 < bytes.count, let high = hex(bytes[index + 1]), let low = hex(bytes[index + 2]) {
+                    let byte = high * 16 + low
+                    if (65...90).contains(byte) || (97...122).contains(byte) || (48...57).contains(byte) || [45, 46, 95, 126].contains(byte) {
+                        decoded.append(byte); index += 3; continue
+                    }
+                }
+                decoded.append(bytes[index]); index += 1
+            }
+            let path = PowerPointConverter.resolvePartPath(String(decoding: decoded, as: UTF8.self), relativeTo: "")
             return path + reference[end...]
         }
 
