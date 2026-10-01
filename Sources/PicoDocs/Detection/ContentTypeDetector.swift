@@ -18,11 +18,12 @@
 //    7. Plain-text default
 //
 //  ZIP subtyping reads the archive's central directory (authoritative, scanned
-//  in full) rather than pulling in an unzip dependency at the detection stage.
+//  in full); relocated presentations additionally use bounded OPC part reads.
 //
 
 import Foundation
 import UniformTypeIdentifiers
+import ZIPFoundation
 
 public enum ContentTypeDetector {
 
@@ -132,10 +133,18 @@ public enum ContentTypeDetector {
     /// (it's authoritative and contains only headers); otherwise a windowed scan
     /// of the whole archive is used as a fallback.
     static func classifyZip(_ data: Data) -> DetectedFormat {
-        if let centralDirectory = zipCentralDirectory(data) {
-            return classifyZipEntries(in: centralDirectory, bounded: false)
-        }
-        return classifyZipEntries(in: data, bounded: true)
+        let format = zipCentralDirectory(data).map { classifyZipEntries(in: $0, bounded: false) }
+            ?? classifyZipEntries(in: data, bounded: true)
+        guard format == .zip, let zip = try? Archive(data: data, accessMode: .read) else { return format }
+        // Detection remains a bounded hint; the converter validates the whole
+        // package and its manifest after routing.
+        let package = PowerPointPackage(archive: zip, entryLimit: 1024 * 1024, totalLimit: 2 * 1024 * 1024)
+        let offices = PowerPointConverter.relationships(package, forPart: "").values.filter { $0.isType("/officeDocument") }
+        guard offices.count == 1, let office = offices.first, !office.external else { return .zip }
+        let path = PowerPointConverter.resolvePartPath(office.target, relativeTo: "")
+        guard PowerPointConverter.xml(package, path: path, maximumBytes: 1024 * 1024)?.children().first()?.tagName().lowercased() == "p:presentation",
+              package.failure == nil else { return .zip }
+        return .pptx
     }
 
     /// NOTE: a substring search over the central-directory bytes, not a strict
