@@ -1342,6 +1342,12 @@ public struct PowerPointConverter: DocumentConverter {
                     text = cellBudget?.join(paragraphs, separator: "\n") ?? paragraphs.joined(separator: "\n")
                     if cellBudget?.failed == true { return "" }
                 }
+                if !merged, let properties = selectedChild(of: cell, named: "a:tcpr"),
+                   let fill = selectedChild(of: properties, named: "a:blipfill"),
+                   let image = blipMarkdown(fill, properties: nil, context: &cellContext) {
+                    text = cellBudget?.join([text, image].filter { !$0.isEmpty }, separator: "\n")
+                        ?? [text, image].filter { !$0.isEmpty }.joined(separator: "\n")
+                }
                 if let budget {
                     var expanded = text.utf8.count
                     guard cellBudget?.fits(expanded) != false else { return "" }
@@ -1569,6 +1575,20 @@ public struct PowerPointConverter: DocumentConverter {
             + (index["http://purl.oclc.org/ooxml/officeDocument/relationships" + suffix] ?? [])
     }
 
+    /// xsd:anyURI collapses only XML layout whitespace; percent escapes and
+    /// semantic Unicode spaces remain unchanged before indexing/resolution.
+    static func collapsedXMLURI(_ text: String) -> String {
+        var output = "", pendingSpace = false
+        for scalar in text.unicodeScalars {
+            if scalar == " " || scalar == "\t" || scalar == "\r" || scalar == "\n" { pendingSpace = !output.isEmpty }
+            else {
+                if pendingSpace { output.append(" "); pendingSpace = false }
+                output.unicodeScalars.append(scalar)
+            }
+        }
+        return output
+    }
+
     /// A part's relationships (`<dir>/_rels/<file>.rels`), keyed by id.
     static func relationships(_ archive: PowerPointPackage, forPart part: String) -> [String: Relationship] {
         if let cached = archive.relationshipMaps[part] { return cached }
@@ -1589,9 +1609,10 @@ public struct PowerPointConverter: DocumentConverter {
             guard element.tagName().lowercased() == "relationship", element.children().isEmpty() else {
                 archive.fail(PicoDocsError.fileCorrupted); return [:]
             }
-            guard let id = try? element.attr("Id"), let target = try? element.attr("Target"),
-                  !id.isEmpty, !target.isEmpty, let type = try? element.attr("Type"), !type.isEmpty else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
-            guard map[id] == nil else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
+            guard let id = try? element.attr("Id"), let rawTarget = try? element.attr("Target"),
+                  !id.isEmpty, !rawTarget.isEmpty, let rawType = try? element.attr("Type"), !rawType.isEmpty else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
+            let target = collapsedXMLURI(rawTarget), type = collapsedXMLURI(rawType)
+            guard !target.isEmpty, !type.isEmpty, map[id] == nil else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
             let mode = (try? element.attr("TargetMode")) ?? ""
             guard !element.hasAttr("TargetMode") || ["Internal", "External"].contains(mode) else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
             // Bound allocation in this validation and subsequent path resolution.
