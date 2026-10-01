@@ -49,6 +49,26 @@ import ZIPFoundation
         #expect(try DocumentRenderer.render(result, to: .plaintext).hasPrefix(name + "\n\n"))
     }
 
+    @Test(arguments: ["AT&amp;T", "&#35;", "&copy;"])
+    func entityLikeSheetNamesRemainLiteral(_ name: String) async throws {
+        let result = try await NumbersConverter().convert(Self.workbook(name: name), info: StreamInfo(detectedFormat: .numbers))
+        let parsed = try AttributedString(markdown: result.markdown())
+        #expect(String(parsed.characters).hasPrefix(name))
+    }
+
+    @Test func emptyAndUnsupportedOnlySheetsRetainNamesAndOrder() async throws {
+        typealias B = PagesConverterTests
+        let document = B.lengthField(1, B.varintField(1, 10)) + B.lengthField(1, B.varintField(1, 11))
+        let objects: [(id: UInt64, type: UInt64, payload: [UInt8], references: [UInt64])] = [
+            (1, 1, document, [10, 11]), (11, 2, B.lengthField(1, Array("Charts".utf8)), [20]),
+            (10, 2, B.lengthField(1, Array("Empty".utf8)), []), (20, 5000, [], [])
+        ]
+        let data = B.makeZip([(name: "Index/Document.iwa", data: B.snappyFrame(B.makeIWAStream(objects: objects)))])
+        let result = try await NumbersConverter().convert(data, info: StreamInfo(detectedFormat: .numbers))
+        #expect(result.sections.map(\.sheetName) == ["Empty", "Charts"])
+        #expect(result.sections.map(\.markdown) == ["## Empty\n\n", "## Charts\n\n"])
+    }
+
     @Test func directoryWorkbookIsNotAdvertisedAsConvertible() {
         #expect(!UTType.numbers.isSupported)
         #expect(UTType.numbersSingleFile.isSupported)
