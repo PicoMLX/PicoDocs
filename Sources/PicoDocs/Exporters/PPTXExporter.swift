@@ -102,6 +102,7 @@ public struct PPTXExporter: DocumentExporter {
         var level: Int = 0
         var inlines: [MarkdownInline]? = nil
         var isHeading = false
+        var listContinuation = false
 
         init(text: String, ordered: Bool? = nil, number: Int = 1, level: Int = 0, inlines: [MarkdownInline]? = nil) {
             self.text = text; self.ordered = ordered; self.number = number; self.level = level; self.inlines = inlines
@@ -161,7 +162,13 @@ public struct PPTXExporter: DocumentExporter {
             return groups.map { sections in
                 Slide(title: sections.first(where: { $0.kind == .slide })?.title ?? "",
                       body: sections.flatMap { section in
-                          var blocks = OfficeDocumentBlocks.parse(ConverterResult(sections: [section]), includeSlideTitles: false)
+                          var visible = section
+                          if section.kind == .slide, let notes = section.metadata["notes"], !notes.isEmpty {
+                              let suffix = "### Notes\n\n" + notes
+                              if visible.markdown == suffix { visible.markdown = "" }
+                              else if visible.markdown.hasSuffix("\n\n" + suffix) { visible.markdown.removeLast(suffix.count + 2) }
+                          }
+                          var blocks = OfficeDocumentBlocks.parse(ConverterResult(sections: [visible]), includeSlideTitles: false)
                           if section.kind == .slide, let title = section.title,
                              case .heading(_, let text)? = blocks.first,
                              MarkdownInlineParser.parse(text).plainText == title {
@@ -215,7 +222,9 @@ public struct PPTXExporter: DocumentExporter {
                 lines.append(Paragraph(markdown: text, normalizeLineBreaks: true))
             case .list(let list):
                 for item in list.paragraphs() {
-                    lines.append(Paragraph(markdown: item.text, ordered: item.continuation ? nil : item.ordered, number: item.number ?? 1, level: item.level, normalizeLineBreaks: true))
+                    var paragraph = Paragraph(markdown: item.text, ordered: item.continuation ? nil : item.ordered, number: item.number ?? 1, level: item.level, normalizeLineBreaks: true)
+                    paragraph.listContinuation = item.continuation
+                    lines.append(paragraph)
                 }
             case .code(let code):
                 for line in code.components(separatedBy: "\n") { lines.append(Paragraph(text: line, inlines: [.code(line)])) }
@@ -276,7 +285,9 @@ public struct PPTXExporter: DocumentExporter {
                     nodes.insert(.text("\(paragraph.number). "), at: 0)
                 case true?: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buAutoNum type=\"arabicPeriod\" startAt=\"\(paragraph.number)\"/></a:pPr>"
                 case false?: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buChar char=\"•\"/></a:pPr>"
-                case nil: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buNone/></a:pPr>"
+                case nil:
+                    let provenance = paragraph.listContinuation ? "<a:extLst><a:ext uri=\"https://picomlx.github.io/picodocs/markdown/listContinuation\"><pd:listContinuation xmlns:pd=\"https://picomlx.github.io/picodocs/markdown\"/></a:ext></a:extLst>" : ""
+                    properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buNone/>\(provenance)</a:pPr>"
                 }
                 let runs = try runs(nodes, fragmentSlides: fragmentSlides, relationships: &relationships)
                 return "<a:p>\(properties)\(runs)</a:p>"
@@ -315,7 +326,7 @@ public struct PPTXExporter: DocumentExporter {
             case .emphasis(let children):
                 output += try runs(children, bold: bold, italic: true, link: link, fragmentSlides: fragmentSlides, relationships: &relationships)
             case .link(let label, let destination):
-                guard !destination.isEmpty else {
+                guard !destination.isEmpty, DocumentRenderer.isSafeURL(destination, isImage: false) else {
                     output += try runs(label, bold: bold, italic: italic, fragmentSlides: fragmentSlides, relationships: &relationships)
                     continue
                 }

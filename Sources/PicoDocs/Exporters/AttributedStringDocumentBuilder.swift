@@ -203,7 +203,7 @@ enum AttributedStringDocumentBuilder {
         var attrs: [NSAttributedString.Key: Any] = [
             .font: monospace ? monospacedFont(size: size, bold: bold, italic: italic) : font(size: size, bold: bold, italic: italic)
         ]
-        if let link, let url = URL(string: link) { attrs[.link] = url }
+        if let link, DocumentRenderer.isSafeURL(link, isImage: false), let url = URL(string: link) { attrs[.link] = url }
         return attrs
     }
 

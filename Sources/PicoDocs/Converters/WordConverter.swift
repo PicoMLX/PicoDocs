@@ -44,9 +44,6 @@ public struct WordConverter: DocumentConverter {
             headings.append(heading); titles.append(MarkdownInlineParser.parse(text).plainText)
         }
         try Self.collectHeadings(in: body, relationships: relationships, numbering: previewNumbering, observe: observe)
-        for textBox in try body.getElementsByTag("w:txbxContent") where Self.shouldRenderTextBox(textBox) {
-            try Self.collectHeadings(in: textBox, relationships: relationships, numbering: previewNumbering, observe: observe)
-        }
         for (heading, slug) in zip(headings, MarkdownHeadingAnchors.slugs(titles)) {
             for bookmark in try heading.getElementsByTag("w:bookmarkStart").array() {
                 let name = try bookmark.attr("w:name")
@@ -119,24 +116,37 @@ public struct WordConverter: DocumentConverter {
             let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
             _ = numbering?.prefix(numPr: numPr, style: style)
         }
+        func collectBoxes(_ anchor: Element) throws {
+            for textBox in try anchor.getElementsByTag("w:txbxContent") where shouldRenderTextBox(textBox) && !isInsideTextBox(textBox, before: anchor) {
+                try collectHeadings(in: textBox, relationships: relationships, numbering: numbering, observe: observe)
+            }
+        }
         var pending = Array(container.children().array().reversed())
         while let element = pending.popLast() {
             try Task.checkCancellation()
             switch element.tagName().lowercased() {
             case "w:p":
+                defer { if child(of: element, named: "w:ppr").flatMap({ child(of: $0, named: "w:sectpr") }) != nil { numbering?.sectionBreak() } }
                 let properties = element.children().first { $0.tagName().lowercased() == "w:ppr" }
                 let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
                 if headingLevel(forStyle: style) != nil {
                     _ = renderParagraph(element, relationships: relationships, numbering: numbering, headingObserver: observe)
                 } else if style != "PicoCodeBlock" { advance(element) }
+                try collectBoxes(element)
             case "w:tbl":
                 for row in element.children().array() where row.tagName().lowercased() == "w:tr" {
                     for cell in row.children().array() where cell.tagName().lowercased() == "w:tc" {
-                        for paragraph in try cell.getElementsByTag("w:p") where !isInsideTextBox(paragraph, before: cell) { advance(paragraph) }
+                        for paragraph in try cell.getElementsByTag("w:p") where !isInsideTextBox(paragraph, before: cell) && !paragraph.parents().prefix(while: { $0 !== cell }).contains(where: { ["w:del", "w:movefrom"].contains($0.tagName().lowercased()) }) {
+                            advance(paragraph)
+                            try collectBoxes(paragraph)
+                        }
                     }
                 }
             case "w:sdt":
                 if let content = element.children().first(where: { $0.tagName().lowercased() == "w:sdtcontent" }) { pending.append(contentsOf: content.children().array().reversed()) }
+            case "w:customxml", "w:ins", "w:moveto", "w:smarttag":
+                pending.append(contentsOf: element.children().array().reversed())
+            case "w:sectpr": numbering?.sectionBreak()
             default: break
             }
         }

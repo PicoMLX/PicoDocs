@@ -101,9 +101,16 @@ public struct SpreadsheetConverter: DocumentConverter {
             }
             grid[rowIndex] = values
         }
+        return try materializeGrid(grid, rows: rowCount, columns: columnCount, sheetName: sheetName)
+    }
+
+    static func materializeGrid(_ grid: [Int: [String]], rows rowCount: Int, columns columnCount: Int, sheetName: String?) throws -> (markdown: String, csv: String) {
+        try Task.checkCancellation()
+        guard rowCount > 0 else { return ("", "") }
         var out = "", csvRows: [String] = []
         if let sheetName, !sheetName.isEmpty { out += "## \(sheetName)\n\n" }
         for index in 1...rowCount {
+            if index % 64 == 0 { try Task.checkCancellation() }
             let values = grid[index] ?? Array(repeating: "", count: columnCount)
             csvRows.append(values.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: ","))
             out += "| " + values.map(markdownCell).joined(separator: " | ") + " |\n"

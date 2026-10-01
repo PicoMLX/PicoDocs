@@ -1882,7 +1882,8 @@ struct ExporterFollowupTests {
         let word = try xml(PicoDocsEngine.write(markdown:source,to:.docx),"word/document.xml")
         #expect(word.contains("continuation")); #expect(word.contains(#"w:left="1440""#))
         let slide = try xml(PicoDocsEngine.write(markdown:source,to:.pptx),"ppt/slides/slide1.xml")
-        #expect(slide.contains(#"<a:pPr lvl="1"><a:buNone/></a:pPr>"#))
+        #expect(slide.contains(#"<a:pPr lvl="1"><a:buNone/><a:extLst>"#))
+        #expect(slide.contains("pd:listContinuation"))
     }
 
     @Test func innerLinkDeactivatesOuterLinkWithoutNestedHyperlinks() throws {
@@ -1921,7 +1922,8 @@ struct ExporterFollowupTests {
         let deck = try PicoDocsEngine.write(blank,to:.pptx)
         #expect(try xml(deck,"ppt/presentation.xml").components(separatedBy:"<p:sldId ").count - 1 == 3)
         let slide = try xml(PicoDocsEngine.write(markdown:"- parent\n  - child\n    - grandchild\n    continuation",to:.pptx),"ppt/slides/slide1.xml")
-        #expect(slide.contains(#"<a:pPr lvl="1"><a:buNone/></a:pPr>"#))
+        #expect(slide.contains(#"<a:pPr lvl="1"><a:buNone/><a:extLst>"#))
+        #expect(slide.contains("pd:listContinuation"))
         #expect(slide.contains("continuation"))
     }
 

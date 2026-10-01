@@ -98,7 +98,8 @@ public struct RTFConverter: DocumentConverter {
         var pendingBytes: [UInt8] = []
 
         var runs: [Run] = []
-        let canonical = rtf.contains("{\\*\\picodocsmarkdown1}")
+        var canonical = false
+        let canonicalMarker = Array("{\\*\\picodocsmarkdown1}")
         var nativeParagraphs: [[Run]] = []
         var paragraphs: [String] = []
         var markdownFence: (character: Character, length: Int)?
@@ -194,6 +195,9 @@ public struct RTFConverter: DocumentConverter {
             }
             switch c {
             case "{":
+                // Only the parsed top-level ignorable destination emitted by our
+                // writer signals canonical Markdown. Binary/ignored payloads do not.
+                if stack.count == 1, !ignore, chars[i...].starts(with: canonicalMarker) { canonical = true }
                 stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip, field: field, instruction: instruction, font: font, fontTable: fontTable, fontNameIgnored: fontNameIgnored))
                 i += 1
 

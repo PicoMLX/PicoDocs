@@ -18,7 +18,8 @@ enum MarkdownLiteral {
     /// Verbatim converters predate canonical Markdown escaping. Protect their
     /// literal backslashes before the renderer decodes generated escapes.
     static func escapeBackslashes(_ text: String, paragraphEndLines: Set<Int> = [], structuralText: String? = nil) -> String {
-        var inFence = false
+        var openingFence: (character: Character, length: Int)?
+        var inFence: Bool { openingFence != nil }
         var fenceList: (base: Int, content: Int)?
         var inNote = false
         var lists: [(base: Int, content: Int)] = []
@@ -47,7 +48,7 @@ enum MarkdownLiteral {
             let blank = structure.trimmingCharacters(in: .whitespaces).isEmpty
             if inFence, let container = fenceList, !blank,
                !MarkdownBlockParser.literalListContains(structure, base: container.base, content: container.content, afterBlank: followsBlank) {
-                inFence = false; fenceList = nil
+                openingFence = nil; fenceList = nil
             }
             // Footnote extraction joins continued paragraphs into one inline value.
             if !inFence, inNote, structure.hasPrefix("    ") || structure.hasPrefix("\t") || (blank && followedByNoteContinuation[index]) {
@@ -68,9 +69,11 @@ enum MarkdownLiteral {
                 if let item = MarkdownBlockParser.literalListIndent(structuralLines, index: index) { lists.append(item) }
             }
             followsBlank = blank
-            if structure.trimmingCharacters(in: .whitespaces).hasPrefix("```") || (!inFence && MarkdownBlockParser.literalListFenceStart(structure)) {
+            if let candidate = MarkdownBlockParser.fence(structure.trimmingCharacters(in: .whitespaces)) ?? (!inFence ? MarkdownBlockParser.listFence(structure) : nil) {
                 flushProse()
-                inFence.toggle()
+                if let opening = openingFence {
+                    if MarkdownBlockParser.closesFence(structure, opening: opening) { openingFence = nil }
+                } else { openingFence = candidate }
                 fenceList = inFence ? lists.last : nil
                 output += line
                 if index < lines.count - 1 { output += "\n" }

@@ -518,9 +518,13 @@ public enum DocumentRenderer {
             if !rows.isEmpty { parts.append(rows.joined(separator: "\n")) }
             markdown.removeAll(keepingCapacity: true)
         }
+        let namedSheets = result.sections.filter { $0.kind == .sheet }.count
         for section in result.sections where section.kind != .image {
             if let rawCSV = section.metadata["csv"], !rawCSV.isEmpty {
                 flush()
+                if namedSheets > 1, section.kind == .sheet, let name = section.sheetName ?? section.metadata["sheetName"] ?? section.title {
+                    parts.append(csvField(name))
+                }
                 parts.append(rawCSV)
             } else { markdown.append(section.markdown) }
         }
@@ -598,7 +602,7 @@ public enum DocumentRenderer {
                                 }
                             }
                         }
-                        if candidate.isEmpty || candidate.hasPrefix("```") || MarkdownBlockParser.literalBlockBoundary(lines[i]).starts || MarkdownBlockParser.confirmedBareMarker(lines, index: i) != nil { break }
+                        if candidate.isEmpty || MarkdownBlockParser.fence(candidate) != nil || MarkdownBlockParser.literalBlockBoundary(lines[i]).starts || MarkdownBlockParser.confirmedBareMarker(lines, index: i) != nil { break }
                         if let list = lists.last, MarkdownBlockParser.indentWidth(lines[i]) < list.base + 2 { break }
                         if inNote, !lines[i].hasPrefix("    "), !lines[i].hasPrefix("\t") { break }
                         paragraph.append(candidate)

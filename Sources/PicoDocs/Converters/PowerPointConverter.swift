@@ -897,6 +897,17 @@ public struct PowerPointConverter: DocumentConverter {
             }
 
             guard let marker else {
+                let continuation = properties.flatMap { selectedChild(of: $0, named: "a:extlst") }?.children().first { ext in
+                    ext.tagName().lowercased() == "a:ext" && (try? ext.attr("uri")) == "https://picomlx.github.io/picodocs/markdown/listContinuation"
+                        && ext.children().contains { $0.tagName().lowercased() == "pd:listcontinuation" }
+                } != nil
+                let depth = level - baseLevel
+                if continuation, !listLines.isEmpty, depth >= 0, depth < markerWidths.count {
+                    let indent = String(repeating: " ", count: markerWidths.prefix(depth + 1).reduce(0, +))
+                    let continued = paragraphBudget?.replaceNewlines(text, with: "  \n" + indent) ?? text.replacingOccurrences(of: "\n", with: "  \n" + indent)
+                    appendListLine(paragraphBudget?.join(["\n", indent, continued]) ?? ("\n" + indent + continued))
+                    continue
+                }
                 flushList()
                 appendBlock(paragraphBudget?.replaceNewlines(text, with: "  \n") ?? text.replacingOccurrences(of: "\n", with: "  \n"))
                 continue

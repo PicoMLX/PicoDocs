@@ -5,11 +5,11 @@ import Foundation
 enum OfficeDocumentBlocks {
     /// These writers do not serialize result.cover; do not silently discard it
     /// when it is the only payload. Custom exporters remain free to support it.
-    static func validateInput(_ result: ConverterResult) throws {
+    static func validateInput(_ result: ConverterResult, maximumBytes: Int = 64 * 1024 * 1024) throws {
         if !(result.cover?.isEmpty ?? true), PicoDocsEngine.isEmptyForExport(result, includingCover: false) {
             throw PicoDocsError.emptyDocument
         }
-        var remaining = 64 * 1024 * 1024
+        var remaining = max(0, maximumBytes)
         func charge(_ bytes: Int) throws {
             guard bytes <= remaining else { throw ExporterError.serializationFailed("Office projection exceeds the supported 64 MiB budget") }
             remaining -= bytes
@@ -21,10 +21,11 @@ enum OfficeDocumentBlocks {
             try charge(value.utf8.count * 7)
         }
         for section in result.sections {
+            // Parser section entries and joined separators exist even without text.
+            try charge(256)
             if section.kind == .image {
                 // Synthesis duplicates identities into alt text, destinations and
                 // generated sections before any Markdown parser sees them.
-                try charge(256)
                 for value in [section.title, section.sourcePath].compactMap({ $0 }) {
                     guard value.utf8.count <= remaining / 14 else { throw ExporterError.serializationFailed("Office image references exceed the supported byte budget") }
                     try charge(value.utf8.count * 14)

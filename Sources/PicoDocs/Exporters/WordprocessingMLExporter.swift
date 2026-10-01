@@ -204,7 +204,8 @@ public struct WordprocessingMLExporter: DocumentExporter {
             usedFilenames.insert(mediaFilename.lowercased())
 
             let image = IndexedImage(base64: base64, mediaFilename: mediaFilename, metadata: section.metadata, budget: budget)
-            if let identity = [section.sourcePath, section.title].compactMap({ $0 }).first(where: { !$0.isEmpty }) {
+            let originalIdentity = [section.sourcePath, section.title].compactMap({ $0 }).first(where: { !$0.isEmpty })
+            for identity in Set([originalIdentity, section.metadata["markdownReference"]].compactMap({ $0 }).filter({ !$0.isEmpty })) {
                 byPath[identity, default: []].append(image)
             }
             if let name, !name.isEmpty {
@@ -412,7 +413,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 case .emphasis(let children):
                     out += renderRuns(children, bold: bold, italic: true)
                 case .link(let label, let destination):
-                    guard !destination.isEmpty else {
+                    guard !destination.isEmpty, DocumentRenderer.isSafeURL(destination, isImage: false) else {
                         out += renderRuns(label, bold: bold, italic: italic)
                         continue
                     }

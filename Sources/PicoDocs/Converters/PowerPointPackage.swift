@@ -121,6 +121,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
     private var maximumAttributes = 500_000
     private var maximumOutputBytes = 64 * 1024 * 1024
     private static let prefixes = [
+        "https://picomlx.github.io/picodocs/markdown": "pd",
         "http://schemas.openxmlformats.org/presentationml/2006/main": "p",
         "http://schemas.openxmlformats.org/drawingml/2006/main": "a",
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships": "r",
