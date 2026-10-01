@@ -17,7 +17,7 @@ enum MarkdownTableCell {
     }
 
     static func decodeBreaks(_ text: String, breakText: String = "\n") -> String {
-        var brackets = 0, destinationDepth = 0
+        var brackets = 0, destinationDepth = 0, angleDestination = false
         return mapCodeSpans(text, code: { codePipes($0, encoding: false) }, plain: { plain in
             var output = "", index = plain.startIndex
             while index < plain.endIndex {
@@ -29,8 +29,13 @@ enum MarkdownTableCell {
                     continue
                 }
                 if destinationDepth > 0 {
-                    if character == "(" { destinationDepth += 1 }
-                    if character == ")" { destinationDepth -= 1 }
+                    if angleDestination {
+                        if character == ">" { angleDestination = false }
+                    } else {
+                        if character == "<", destinationDepth == 1 { angleDestination = true }
+                        else if character == "(" { destinationDepth += 1 }
+                        else if character == ")" { destinationDepth -= 1 }
+                    }
                 } else if character == "[" { brackets += 1 }
                 else if character == "]", brackets > 0 {
                     brackets -= 1
