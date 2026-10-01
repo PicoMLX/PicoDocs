@@ -75,7 +75,7 @@ public enum DocumentRenderer {
             }
             guard bytes <= remaining else { throw PicoDocsError.fileCorrupted }
             var text = section.markdown.replacingOccurrences(of: "\u{E008}", with: "\u{E008}\u{E008}").replacingOccurrences(of: "\u{E009}", with: "\u{E009}\u{E009}")
-            if section.metadata["powerPointWhitespace"] == "1" {
+            if section.metadata["preservedWhitespace"] == "1" {
                 let source = text as NSString
                 var offset = 0, output = "", exceeded = false
                 whitespaceReference.enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, stop in

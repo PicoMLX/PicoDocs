@@ -213,7 +213,11 @@ import ZIPFoundation
         let task = Task.detached {
             let budget = IWAOutputBudget()
             _ = IWATable.attributedTables(rootIDs: [], in: [stream], excludingSubgraphs: [], budget: budget)
-            do { try budget.check(); return false }
+            // Under a loaded full suite, reconstruction may finish before the
+            // sleeping cancelling task wakes. Success is valid in that case;
+            // cancellation already present at the final boundary must throw.
+            let cancelledBeforeBoundary = Task.isCancelled
+            do { try budget.check(); return !cancelledBeforeBoundary }
             catch is CancellationError { return true }
         }
         try await Task.sleep(nanoseconds: 5_000_000)

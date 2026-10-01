@@ -12,7 +12,7 @@ struct PowerPointThirdStackReviewTests {
         #expect(html.components(separatedBy: "white-space:pre-wrap").count - 1 == 100)
         #expect(try DocumentRenderer.boundedHTMLWhitespaceReferences(input, maximumBytes: bytes) == html)
         #expect(throws: PicoDocsError.fileCorrupted) { try DocumentRenderer.boundedHTMLWhitespaceReferences(input, maximumBytes: bytes - 1) }
-        let result = ConverterResult(sections: [DocumentSection(kind: .body, markdown: String(repeating: "&#32;a", count: 1_700_000), metadata: ["powerPointWhitespace": "1"])])
+        let result = ConverterResult(sections: [DocumentSection(kind: .body, markdown: String(repeating: "&#32;a", count: 1_700_000), metadata: ["preservedWhitespace": "1"])])
         #expect(throws: PicoDocsError.fileCorrupted) { () throws -> Void in _ = try DocumentRenderer.render(result, to: .html) }
     }
 
@@ -43,7 +43,7 @@ struct PowerPointThirdStackReviewTests {
 
     @Test func adjacentPreservedWhitespaceUsesOneSpan() throws {
         let markers = String(repeating: "&#32;", count: 512)
-        let html = try DocumentRenderer.render(ConverterResult(sections: [DocumentSection(markdown: markers + "End", metadata: ["powerPointWhitespace": "1"])]), to: .html)
+        let html = try DocumentRenderer.render(ConverterResult(sections: [DocumentSection(markdown: markers + "End", metadata: ["preservedWhitespace": "1"])]), to: .html)
         #expect(html.components(separatedBy: "white-space:pre-wrap").count - 1 == 1)
         #expect(html.utf8.count < markers.utf8.count + 512)
         #expect(html.contains("<span style=\"white-space:pre-wrap\">" + markers + "</span>End"))

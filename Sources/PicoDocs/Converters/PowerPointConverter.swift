@@ -70,7 +70,7 @@ public struct PowerPointConverter: DocumentConverter {
         }
         func chargeSection(_ section: DocumentSection) throws {
             try charge(section.markdown); try charge(section.title); try charge(section.sourcePath)
-            for (key, value) in section.metadata where key != "base64" && key != "powerPointWhitespace" { try charge(key); try charge(value) }
+            for (key, value) in section.metadata where key != "base64" && key != "preservedWhitespace" { try charge(key); try charge(value) }
         }
         let properties = Self.coreProperties(archive)
         try charge(properties.title ?? info.filename); try charge(properties.author)
@@ -100,7 +100,7 @@ public struct PowerPointConverter: DocumentConverter {
         parts.styles.register(presentation)
         for (index, slidePath) in slidePaths.enumerated() {
             try Task.checkCancellation()
-            try charge("powerPointWhitespace"); try charge("1")
+            try charge("preservedWhitespace"); try charge("1")
             guard let slide = parts.document(slidePath, root: "p:sld", cache: false), slide.children().first()?.tagName().lowercased() == "p:sld" else { try archive.check(); throw PicoDocsError.fileCorrupted }
             let relationships = Self.relationships(archive, forPart: slidePath)
             var context = SlideContext(archive: archive, partPath: slidePath, relationships: relationships, images: images)
@@ -148,7 +148,7 @@ public struct PowerPointConverter: DocumentConverter {
                 markdown: renderBudget.join(blocks, separator: "\n\n"),
                 sourcePath: slidePath,
                 slideNumber: index + 1,
-                metadata: (notes.map { ["notes": $0] } ?? [:]).merging(["powerPointWhitespace": "1"]) { first, _ in first }
+                metadata: (notes.map { ["notes": $0] } ?? [:]).merging(["preservedWhitespace": "1"]) { first, _ in first }
             )
             try archive.check()
             try chargeSection(section)

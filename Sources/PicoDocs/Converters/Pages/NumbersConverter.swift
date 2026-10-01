@@ -92,7 +92,7 @@ public struct NumbersConverter: DocumentConverter {
             try budget.check()
             var markdown = tables.joined(separator: "\n\n")
             if let heading { markdown = "## " + heading + "\n\n" + markdown }
-            sections.append(DocumentSection(title: sheet.name, kind: .sheet, markdown: markdown, sheetName: sheet.name))
+            sections.append(DocumentSection(title: sheet.name, kind: .sheet, markdown: markdown, sheetName: sheet.name, metadata: ["preservedWhitespace": "1"]))
         }
         // Partial reachability must not drop the remaining physical tables.
         for markdown in attribution.unclaimed {
