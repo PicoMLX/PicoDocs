@@ -41,7 +41,7 @@ struct ProtobufReader {
 
     /// Returns the next field, or nil at end of message / on malformed input.
     mutating func next() -> Field? {
-        guard pos < end, let tag = readVarint() else { return nil }
+        guard !Task.isCancelled, pos < end, let tag = readVarint() else { return nil }
         let number = Int(tag >> 3)
         let wireType = Int(tag & 0x07)
         guard number > 0 else { return nil }
@@ -59,7 +59,7 @@ struct ProtobufReader {
             let length = Int(len)
             // Compare against remaining bytes, not `pos + length`, which can
             // overflow/trap for a hostile length near Int.max.
-            guard length <= end - pos else { return nil }
+            guard !Task.isCancelled, length <= end - pos else { return nil }
             let sub = Array(bytes[pos ..< pos + length])
             pos += length
             return Field(number: number, value: .length(sub))

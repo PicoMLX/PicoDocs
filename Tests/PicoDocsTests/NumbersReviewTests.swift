@@ -101,6 +101,8 @@ import ZIPFoundation
         #expect(try PagesConverter.iwaComponents(in: archive, maximumEntryBytes: 12, maximumTotalBytes: 24).count == 2)
         let nestedBytes = B.makeZip([(name: "Document.iwa", data: payload)])
         let nested = try Archive(data: B.makeZip([(name: "Index.zip", data: Array(nestedBytes))]), accessMode: .read)
+        // The outer container is itself a ZIP entry and has the same entry cap.
+        #expect(throws: PicoDocsError.fileCorrupted) { try PagesConverter.iwaComponents(in: nested, maximumEntryBytes: nestedBytes.count - 1, maximumTotalBytes: nestedBytes.count + 12) }
         #expect(throws: PicoDocsError.fileCorrupted) { try PagesConverter.iwaComponents(in: nested, maximumEntryBytes: nestedBytes.count, maximumTotalBytes: nestedBytes.count + 11) }
         #expect(try PagesConverter.iwaComponents(in: nested, maximumEntryBytes: nestedBytes.count, maximumTotalBytes: nestedBytes.count + 12).count == 1)
         let frames = B.snappyFrame(payload) + B.snappyFrame(payload)
@@ -133,6 +135,86 @@ import ZIPFoundation
                 _ = try Snappy.decompressBlock(input, maximumOutputBytes: size)
                 return false
             } catch is CancellationError { return true }
+        }
+        try await Task.sleep(nanoseconds: 5_000_000)
+        task.cancel()
+        #expect(try await task.value)
+    }
+
+    @Test func cancellationStopsAlreadyDecodedIWAAndTableReconstruction() async throws {
+        typealias B = PagesConverterTests
+        let stream = B.makeIWAStream(objects: [(1, 2001, B.lengthField(3, Array("Body".utf8)), [])])
+        let task = Task.detached {
+            withUnsafeCurrentTask { $0?.cancel() }
+            var reader = ProtobufReader([8, 1])
+            #expect(reader.next() == nil)
+            #expect(IWAArchive.objects(in: stream).isEmpty)
+            do {
+                _ = try IWATable.inlineBlocks(documentStream: stream, in: [stream])
+                return false
+            } catch is CancellationError { return true }
+        }
+        #expect(try await task.value)
+    }
+
+    static func repeatedCellStream(rows: [Int], value: String) -> [UInt8] {
+        typealias B = PagesConverterTests
+        let cell: [UInt8] = [5, 3] + Array(repeating: 0, count: 10) + [1, 0, 0, 0]
+        var tile: [UInt8] = []
+        for columns in rows {
+            let offsets = Array(repeating: UInt8(0), count: columns * 2)
+            let row = B.lengthField(6, cell) + B.lengthField(7, offsets)
+            tile += B.lengthField(5, row)
+        }
+        let entry = B.varintField(1, 1) + B.lengthField(3, Array(value.utf8))
+        let strings = B.varintField(1, 1) + B.lengthField(3, entry)
+        return B.makeIWAStream(objects: [(20, 6001, [], [21, 22]), (21, 6002, tile, []), (22, 6005, strings, [])])
+    }
+
+    @Test func repeatedCellStringsAndSparsePaddingAreAdmittedBeforeExpansion() throws {
+        let value = String(repeating: "&", count: 100)
+        let one = Self.repeatedCellStream(rows: [1], value: value)
+        let smallBudget = IWAOutputBudget(bytes: 4096)
+        let small = IWATable.attributedTables(rootIDs: [], in: [one], excludingSubgraphs: [], budget: smallBudget)
+        try smallBudget.check()
+        #expect(small.unclaimed.count == 1)
+        #expect(small.unclaimed[0].contains(String(repeating: "\\&", count: 100)))
+        let repeated = Self.repeatedCellStream(rows: [1000], value: value)
+        let repeatedBudget = IWAOutputBudget(bytes: 4096)
+        _ = IWATable.attributedTables(rootIDs: [], in: [repeated], excludingSubgraphs: [], budget: repeatedBudget)
+        #expect(throws: PicoDocsError.fileCorrupted) { try repeatedBudget.check() }
+        let sparse = Self.repeatedCellStream(rows: [100] + Array(repeating: 1, count: 99), value: "a")
+        let sparseBudget = IWAOutputBudget(bytes: 1_000_000, cells: 1000)
+        _ = IWATable.attributedTables(rootIDs: [], in: [sparse], excludingSubgraphs: [], budget: sparseBudget)
+        #expect(throws: PicoDocsError.fileCorrupted) { try sparseBudget.check() }
+    }
+
+    @Test func outputAdmissionHasAnExactBoundaryAndIncludesRecoveredTables() async throws {
+        let stream = Self.repeatedCellStream(rows: [3, 1], value: "a&b")
+        let measured = IWAOutputBudget(bytes: 4096)
+        let expected = IWATable.attributedTables(rootIDs: [], in: [stream], excludingSubgraphs: [], budget: measured)
+        try measured.check()
+        let used = 4096 - measured.remainingBytes
+        let exact = IWAOutputBudget(bytes: used)
+        let actual = IWATable.attributedTables(rootIDs: [], in: [stream], excludingSubgraphs: [], budget: exact)
+        try exact.check()
+        #expect(actual.unclaimed == expected.unclaimed)
+        let short = IWAOutputBudget(bytes: used - 1)
+        _ = IWATable.attributedTables(rootIDs: [], in: [stream], excludingSubgraphs: [], budget: short)
+        #expect(throws: PicoDocsError.fileCorrupted) { try short.check() }
+        _ = try await NumbersConverter(outputBudgetBytes: 1000).convert(Self.workbook(), info: StreamInfo(detectedFormat: .numbers))
+        await #expect(throws: PicoDocsError.fileCorrupted) {
+            try await NumbersConverter(outputBudgetBytes: 1000).convert(Self.workbook(orphan: true), info: StreamInfo(detectedFormat: .numbers))
+        }
+    }
+
+    @Test func cancellationInterruptsActiveDecodedTableReconstruction() async throws {
+        let stream = Self.repeatedCellStream(rows: [1000], value: String(repeating: "&", count: 2048))
+        let task = Task.detached {
+            let budget = IWAOutputBudget()
+            _ = IWATable.attributedTables(rootIDs: [], in: [stream], excludingSubgraphs: [], budget: budget)
+            do { try budget.check(); return false }
+            catch is CancellationError { return true }
         }
         try await Task.sleep(nanoseconds: 5_000_000)
         task.cancel()
