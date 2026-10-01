@@ -242,8 +242,8 @@ public struct PowerPointConverter: DocumentConverter {
                 let link = click == nil ? inheritedLink : hyperlink(click, context: context)
                 if shape.tagName().lowercased() == "p:grpsp" {
                     appendNotes(in: shape, inheritedLink: link)
-                } else if shape.tagName().lowercased() == "p:sp",
-                          placeholderType(of: shape) == nil || placeholderType(of: shape) == "body" {
+                } else if shape.tagName().lowercased() == "p:sp" {
+                    if let type = placeholderType(of: shape), skippedPlaceholders.contains(type) { continue }
                     context.defaultLink = link
                     context.runDefaults = inheritedRunDefaults(for: shape, context: context)
                     if let body = textBody(of: shape) {
@@ -663,10 +663,9 @@ public struct PowerPointConverter: DocumentConverter {
             }
             if let master = context.master {
                 sources.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap { listStyle($0, cache: context.styles) })
-                let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
-                sources.append(masterTextStyle(master, named: style, cache: context.styles))
             }
         }
+        sources.append(applicableMasterTextStyle(for: shape, context: context))
         sources.append(context.defaultTextStyle)
         return (0..<9).map { level in
             for source in sources {
@@ -689,10 +688,9 @@ public struct PowerPointConverter: DocumentConverter {
             if let layout = context.layout { styles.append(matchingPlaceholder(in: layout, type: type, index: index, cache: context.placeholders).flatMap { listStyle($0, cache: context.styles) }) }
             if let master = context.master {
                 styles.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap { listStyle($0, cache: context.styles) })
-                let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
-                styles.append(masterTextStyle(master, named: style, cache: context.styles))
             }
         }
+        styles.append(applicableMasterTextStyle(for: shape, context: context))
         styles.append(context.defaultTextStyle)
         return (0..<9).map { level in
             styles.flatMap { source -> [Element] in
@@ -701,6 +699,22 @@ public struct PowerPointConverter: DocumentConverter {
                     .compactMap { $0.flatMap { context.styles.child(of: $0, named: "a:defrpr") } }
             }
         }
+    }
+
+    private static func applicableMasterTextStyle(for shape: Element, context: SlideContext) -> Element? {
+        guard let master = context.master else { return nil }
+        let style: String
+        if master.children().first()?.tagName().lowercased() == "p:notesmaster" {
+            style = "p:notesStyle"
+        } else {
+            let raw = placeholder(of: shape).flatMap { try? $0.attr("type") }
+            let type = raw.map { $0.isEmpty ? "obj" : $0 }
+            let nonvisual = context.styles.child(of: shape, named: "p:nvsppr")
+            let properties = nonvisual.flatMap { context.styles.child(of: $0, named: "p:cnvsppr") }
+            let bodyLike = type.map { ["obj", "body", "subTitle"].contains($0) } ?? isOn(properties, "txBox")
+            style = bodyLike ? "p:bodyStyle" : (type.map { ["title", "ctrTitle"].contains($0) } == true ? "p:titleStyle" : "p:otherStyle")
+        }
+        return masterTextStyle(master, named: style, cache: context.styles)
     }
 
     private static func masterTextStyle(_ master: Document, named name: String, cache: StyleChildCache) -> Element? {
