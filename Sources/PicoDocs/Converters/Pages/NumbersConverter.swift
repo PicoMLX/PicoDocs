@@ -26,7 +26,18 @@ public struct NumbersConverter: DocumentConverter {
     private static let documentArchiveType: UInt64 = 1
     private static let sheetArchiveType: UInt64 = 2
 
-    public init() {}
+    private let outputBudgetBytes: Int
+    private let outputBudgetCells: Int
+
+    public init() {
+        outputBudgetBytes = 64 * 1024 * 1024
+        outputBudgetCells = 1_000_000
+    }
+
+    init(outputBudgetBytes: Int, outputBudgetCells: Int = 1_000_000) {
+        self.outputBudgetBytes = outputBudgetBytes
+        self.outputBudgetCells = outputBudgetCells
+    }
 
     public func accepts(_ info: StreamInfo) -> Bool {
         info.detectedFormat == .numbers
@@ -64,19 +75,32 @@ public struct NumbersConverter: DocumentConverter {
         }
         guard let documentStream else { throw PicoDocsError.fileCorrupted }
 
-        let sheets = Self.sheets(in: IWAArchive.objects(in: documentStream))
-        let attribution = IWATable.attributedTables(rootIDs: sheets.map(\.id), in: streams, excludingSubgraphs: [])
+        let budget = IWAOutputBudget(bytes: outputBudgetBytes, cells: outputBudgetCells)
+        let sheets = Self.sheets(in: IWAArchive.objects(in: documentStream), budget: budget)
+        try budget.check()
+        let attribution = IWATable.attributedTables(rootIDs: sheets.map(\.id), in: streams, excludingSubgraphs: [], budget: budget)
+        try budget.check()
 
         var sections: [DocumentSection] = []
         for sheet in sheets {
+            try budget.check()
+            guard budget.reserve(256) else { try budget.check(); throw PicoDocsError.fileCorrupted }
             let tables = attribution.byRoot[sheet.id] ?? []
+            for table in tables { budget.reserve(table.utf8.count, copies: 2) }
+            budget.reserve(tables.count, copies: 4)
+            let heading = try sheet.name.map { try Self.literalHeading($0, budget: budget) }
+            try budget.check()
             var markdown = tables.joined(separator: "\n\n")
-            if let name = sheet.name { markdown = "## " + Self.literalHeading(name) + "\n\n" + markdown }
+            if let heading { markdown = "## " + heading + "\n\n" + markdown }
             sections.append(DocumentSection(title: sheet.name, kind: .sheet, markdown: markdown, sheetName: sheet.name))
         }
         // Partial reachability must not drop the remaining physical tables.
-        sections += attribution.unclaimed.map { DocumentSection(kind: .sheet, markdown: $0) }
+        for markdown in attribution.unclaimed {
+            guard budget.reserve(256) else { try budget.check(); throw PicoDocsError.fileCorrupted }
+            sections.append(DocumentSection(kind: .sheet, markdown: markdown))
+        }
 
+        try budget.check()
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
         let title = (info.filename?.isEmpty == false) ? info.filename : nil
         return ConverterResult(title: title, sections: sections)
@@ -85,9 +109,16 @@ public struct NumbersConverter: DocumentConverter {
     /// The workbook's sheets in tab order: the TN.DocumentArchive's sheet
     /// references (field 1), falling back to the sheet archives' stream order.
     /// Each sheet's name is its archive's field 1.
-    static func sheets(in objects: [IWAArchive.Object]) -> [(id: UInt64, name: String?)] {
-        let sheetObjects = objects.filter { $0.type == sheetArchiveType }
-        let byID = Dictionary(sheetObjects.map { ($0.identifier, $0) }, uniquingKeysWith: { first, _ in first })
+    static func sheets(in objects: [IWAArchive.Object], budget: IWAOutputBudget? = nil) -> [(id: UInt64, name: String?)] {
+        var sheetObjects: [IWAArchive.Object] = []
+        var byID: [UInt64: IWAArchive.Object] = [:]
+        for object in objects {
+            guard !Task.isCancelled, budget?.active != false else { return [] }
+            if object.type == sheetArchiveType {
+                sheetObjects.append(object)
+                if byID[object.identifier] == nil { byID[object.identifier] = object }
+            }
+        }
 
         var order: [UInt64] = [], seen: Set<UInt64> = []
         if let document = objects.first(where: { $0.type == documentArchiveType }) {
@@ -99,11 +130,25 @@ public struct NumbersConverter: DocumentConverter {
             }
         }
         // Retain stream-order recovery after the references that did resolve.
-        for sheet in sheetObjects where seen.insert(sheet.identifier).inserted { order.append(sheet.identifier) }
-        return order.map { ($0, byID[$0].flatMap(sheetName)) }
+        for sheet in sheetObjects {
+            guard !Task.isCancelled else { return [] }
+            if seen.insert(sheet.identifier).inserted { order.append(sheet.identifier) }
+        }
+        var sheets: [(id: UInt64, name: String?)] = []
+        for id in order {
+            guard !Task.isCancelled, budget?.reserve(64) != false else { return [] }
+            let name = byID[id].flatMap { sheetName($0, budget: budget) }
+            sheets.append((id, name))
+        }
+        return sheets
     }
 
-    private static func literalHeading(_ name: String) -> String {
+    private static func literalHeading(_ name: String, budget: IWAOutputBudget) throws -> String {
+        // Folding, numeric boundary entities (up to 10 bytes/scalar), and the
+        // eventual section copy are admitted before any expanded string exists.
+        budget.reserve(name.utf8.count, copies: 24)
+        budget.reserve(10)
+        try budget.check()
         let text = name.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
         let scalars = text.unicodeScalars
         let leading = scalars.prefix { CharacterSet.whitespaces.contains($0) }.count
@@ -111,6 +156,7 @@ public struct NumbersConverter: DocumentConverter {
         let end = scalars.count - trailing
         var heading = ""
         for (index, scalar) in scalars.enumerated() {
+            if index.isMultiple(of: 1024) { try Task.checkCancellation() }
             if index < leading || index >= end || scalar == "\t" {
                 heading += "&#\(scalar.value);"
             } else {
@@ -121,12 +167,12 @@ public struct NumbersConverter: DocumentConverter {
         return heading
     }
 
-    private static func sheetName(_ sheet: IWAArchive.Object) -> String? {
+    private static func sheetName(_ sheet: IWAArchive.Object, budget: IWAOutputBudget?) -> String? {
         var reader = ProtobufReader(sheet.payload)
         while let field = reader.next() {
-            if field.number == 1, case .length(let bytes) = field.value,
-               let name = String(bytes: bytes, encoding: .utf8), !name.isEmpty {
-                return name
+            if field.number == 1, case .length(let bytes) = field.value {
+                guard budget?.reserve(bytes.count, copies: 2) != false else { return nil }
+                if let name = String(bytes: bytes, encoding: .utf8), !name.isEmpty { return name }
             }
         }
         return nil

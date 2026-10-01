@@ -60,6 +60,7 @@ enum IWAArchive {
             // `Int.max`) and return what parsed cleanly — never re-read past a
             // partially-consumed object, which would mis-parse or loop.
             for info in infos {
+                guard !Task.isCancelled else { return [] }
                 guard info.length <= UInt64(Int.max),
                       let payload = cursor.take(Int(info.length)) else { return objects }
                 objects.append(Object(identifier: info.identifier, type: info.type,
@@ -83,6 +84,7 @@ enum IWAArchive {
     static func text(from objects: [Object]) -> String {
         var storages: [String] = []
         for object in objects where object.type == textStorageType {
+            guard !Task.isCancelled else { return "" }
             guard let body = bodyText(in: object.payload), !body.isEmpty else { continue }
             storages.append(body)
         }
@@ -183,7 +185,7 @@ private struct StreamCursor {
     init(_ bytes: [UInt8]) { self.bytes = bytes }
 
     mutating func readVarint() -> UInt64? {
-        guard pos < bytes.count else { return nil }
+        guard !Task.isCancelled, pos < bytes.count else { return nil }
         var result: UInt64 = 0
         var shift: UInt64 = 0
         while pos < bytes.count {
@@ -206,7 +208,7 @@ private struct StreamCursor {
     mutating func take(_ count: Int) -> [UInt8]? {
         // `count <= bytes.count - pos` rather than `pos + count <= count` so a
         // hostile length near Int.max can't overflow the addition.
-        guard count >= 0, count <= bytes.count - pos else { return nil }
+        guard !Task.isCancelled, count >= 0, count <= bytes.count - pos else { return nil }
         let slice = Array(bytes[pos ..< pos + count])
         pos += count
         return slice

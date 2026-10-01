@@ -122,6 +122,7 @@ public struct PagesConverter: DocumentConverter {
             }
         }
 
+        try Task.checkCancellation()
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
         let title = (info.filename?.isEmpty == false) ? info.filename : nil
         return ConverterResult(title: title, sections: sections)

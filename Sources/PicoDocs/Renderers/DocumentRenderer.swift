@@ -39,10 +39,75 @@ public enum DocumentRenderer {
         }
     }
 
+    /// Charge line-array/string slots before footnote and block parsing split
+    /// input. Both passes retain line strings; byte-only limits miss empty lines.
+    static func preflightRenderInput(_ result: ConverterResult, maximumBytes: Int = 64 * 1024 * 1024, maximumLines: Int = 100_000) throws {
+        guard maximumBytes >= 0, maximumLines > 0 else { throw PicoDocsError.fileCorrupted }
+        var remaining = maximumBytes, lines = 1, sections = 0
+        for section in result.sections where section.kind != .image {
+            try Task.checkCancellation()
+            let bytes = section.markdown.utf8.count
+            guard bytes <= remaining else { throw PicoDocsError.fileCorrupted }
+            remaining -= bytes
+            for byte in section.markdown.utf8 where byte == 10 {
+                guard lines < maximumLines else { throw PicoDocsError.fileCorrupted }
+                lines += 1
+            }
+            if sections > 0 {
+                guard lines <= maximumLines - 2, remaining >= 2 else { throw PicoDocsError.fileCorrupted }
+                lines += 2; remaining -= 2
+            }
+            sections += 1
+        }
+        guard lines <= remaining / 256 else { throw PicoDocsError.fileCorrupted }
+    }
+
+    /// Only a producer that owns preserved-space metadata can introduce internal
+    /// whitespace tokens. Literal numeric entities from every other producer stay
+    /// literal; source private-use delimiters are doubled before token insertion.
+    private static func renderMarkdown(_ result: ConverterResult) throws -> String {
+        var remaining = 64 * 1024 * 1024
+        var sections: [String] = []
+        for section in result.sections where section.kind != .image {
+            var bytes = section.markdown.utf8.count
+            for scalar in section.markdown.unicodeScalars where scalar == "\u{E008}" || scalar == "\u{E009}" {
+                guard bytes <= remaining - 3 else { throw PicoDocsError.fileCorrupted }; bytes += 3
+            }
+            guard bytes <= remaining else { throw PicoDocsError.fileCorrupted }
+            var text = section.markdown.replacingOccurrences(of: "\u{E008}", with: "\u{E008}\u{E008}").replacingOccurrences(of: "\u{E009}", with: "\u{E009}\u{E009}")
+            if section.metadata["powerPointWhitespace"] == "1" {
+                let source = text as NSString
+                var offset = 0, output = "", exceeded = false
+                whitespaceReference.enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, stop in
+                    guard let match, let value = UInt32(source.substring(with: match.range(at: 1))),
+                          let scalar = UnicodeScalar(value), CharacterSet.whitespaces.contains(scalar) else { return }
+                    var preceding = match.range.location, slashes = 0
+                    while preceding > 0, source.character(at: preceding - 1) == 92 { preceding -= 1; slashes += 1 }
+                    guard slashes.isMultiple(of: 2) else { return }
+                    let token = "\u{E008}\(value)\u{E009}"
+                    let growth = token.utf8.count - source.substring(with: match.range).utf8.count
+                    guard growth <= remaining - bytes else { exceeded = true; stop.pointee = true; return }
+                    bytes += growth
+                    output += source.substring(with: NSRange(location: offset, length: match.range.location - offset)) + token
+                    offset = NSMaxRange(match.range)
+                }
+                guard !exceeded else { throw PicoDocsError.fileCorrupted }
+                output += source.substring(from: offset)
+                text = output
+            }
+            remaining -= bytes
+            guard sections.isEmpty || remaining >= 2 else { throw PicoDocsError.fileCorrupted }
+            if !sections.isEmpty { remaining -= 2 }
+            sections.append(text)
+        }
+        return sections.joined(separator: "\n\n")
+    }
+
     // MARK: - Plaintext
 
     private static func renderPlaintext(_ result: ConverterResult) throws -> String {
-        let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
+        try preflightRenderInput(result)
+        let (bodyMarkdown, notes) = extractFootnotes(try renderMarkdown(result))
         let parsed = parseBlocks(bodyMarkdown)
         let numbers = try footnoteNumbers(blocks: parsed, notes: notes)
         let out = plaintextBlocks(parsed, footnoteNumbers: numbers)
@@ -127,7 +192,8 @@ public enum DocumentRenderer {
     // MARK: - HTML
 
     private static func renderHTML(_ result: ConverterResult) throws -> String {
-        let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
+        try preflightRenderInput(result)
+        let (bodyMarkdown, notes) = extractFootnotes(try renderMarkdown(result))
         let parsed = parseBlocks(bodyMarkdown)
         let numbers = try footnoteNumbers(blocks: parsed, notes: notes, maximumProtectedBytes: 64 * 1024 * 1024)
         let budget = HTMLBudget()
@@ -176,39 +242,78 @@ public enum DocumentRenderer {
         for section in imageSections where !(section.metadata["base64"] ?? "").isEmpty {
             for reference in references(section) { referenceCounts[reference, default: 0] += 1 }
         }
-        var result = html
+        var replacements: [String: (mime: String, base64: String)] = [:]
         for section in imageSections {
             guard let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
             // Parameters are metadata, not part of the payload delimiter syntax.
             let mime = (section.metadata["mimeType"] ?? "application/octet-stream")
                 .split(separator: ";", maxSplits: 1).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? "application/octet-stream"
             for reference in references(section) where referenceCounts[reference] == 1 {
-                result = try boundedImageReplacement(result, reference: reference, mime: mime, base64: base64)
+                replacements[reference] = (mime, base64)
             }
         }
-        guard result.utf8.count <= 64 * 1024 * 1024 else { throw PicoDocsError.fileCorrupted }
-        return result
+        return try boundedImageReplacements(html, replacements: replacements)
     }
 
     /// Charge every projected occurrence before materializing any data URLs.
     static func boundedImageReplacement(_ html: String, reference: String, mime: String, base64: String, maximumBytes: Int = 64 * 1024 * 1024) throws -> String {
-        guard maximumBytes >= 19 else { throw PicoDocsError.fileCorrupted }
-        let needle = "src=\"\(try boundedEscapeHTML(reference, maximumBytes: maximumBytes - 6))\""
-        var projectedBytes = html.utf8.count
-        guard projectedBytes <= maximumBytes else { throw PicoDocsError.fileCorrupted }
-        guard html.range(of: needle, options: .literal) != nil else { return html }
-        var replacementBytes = 19 // src="data: + ;base64, + closing quote
-        for text in [mime, base64] {
-            replacementBytes += try htmlEscapedByteCount(text, maximumBytes: maximumBytes - replacementBytes)
+        try boundedImageReplacements(html, replacements: [reference: (mime, base64)], maximumBytes: maximumBytes)
+    }
+
+    static func boundedImageReplacements(_ html: String, replacements: [String: (mime: String, base64: String)], maximumBytes: Int = 64 * 1024 * 1024) throws -> String {
+        var bytes = html.utf8.count
+        guard bytes <= maximumBytes else { throw PicoDocsError.fileCorrupted }
+        var byEscapedReference: [String: (mime: String, base64: String)] = [:]
+        var keyBytes = 0
+        for (reference, payload) in replacements {
+            try Task.checkCancellation()
+            let key = try boundedEscapeHTML(reference, maximumBytes: maximumBytes - keyBytes)
+            keyBytes += key.utf8.count
+            byEscapedReference[key] = payload
         }
-        let growth = replacementBytes - needle.utf8.count
-        var start = html.startIndex
-        while let range = html.range(of: needle, options: .literal, range: start..<html.endIndex) {
-            if growth > 0, growth > maximumBytes - projectedBytes { throw PicoDocsError.fileCorrupted }
-            projectedBytes += growth
-            start = range.upperBound
+        let regex = try NSRegularExpression(pattern: #"src="([^"]*)""#)
+        let source = html as NSString
+        var sizes: [String: Int] = [:], failed = false
+        regex.enumerateMatches(in: html, range: NSRange(location: 0, length: source.length)) { match, _, stop in
+            guard let match, !failed else { return }
+            let reference = source.substring(with: match.range(at: 1))
+            guard let payload = byEscapedReference[reference] else { return }
+            do {
+                let size: Int
+                if let cached = sizes[reference] { size = cached }
+                else {
+                    guard maximumBytes >= 13 else { throw PicoDocsError.fileCorrupted }
+                    let mimeBytes = try htmlEscapedByteCount(payload.mime, maximumBytes: maximumBytes - 13)
+                    let base64Bytes = try htmlEscapedByteCount(payload.base64, maximumBytes: maximumBytes - 13 - mimeBytes)
+                    size = 13 + mimeBytes + base64Bytes
+                    sizes[reference] = size
+                }
+                let growth = size - reference.utf8.count
+                guard growth <= maximumBytes - bytes else { throw PicoDocsError.fileCorrupted }
+                bytes += growth
+            } catch { failed = true; stop.pointee = true }
         }
-        return html.replacingOccurrences(of: needle, with: "src=\"\(escapeHTML("data:\(mime);base64,\(base64)"))\"", options: .literal)
+        try Task.checkCancellation()
+        guard !failed else { throw PicoDocsError.fileCorrupted }
+        var output = "", offset = 0, payloads: [String: String] = [:]
+        output.reserveCapacity(bytes)
+        regex.enumerateMatches(in: html, range: NSRange(location: 0, length: source.length)) { match, _, _ in
+            guard let match else { return }
+            let reference = source.substring(with: match.range(at: 1))
+            guard let payload = byEscapedReference[reference] else { return }
+            let value: String
+            if let cached = payloads[reference] { value = cached }
+            else {
+                value = "data:" + escapeHTML(payload.mime) + ";base64," + escapeHTML(payload.base64)
+                payloads[reference] = value
+            }
+            let range = match.range(at: 1)
+            output += source.substring(with: NSRange(location: offset, length: range.location - offset)) + value
+            offset = NSMaxRange(range)
+        }
+        try Task.checkCancellation()
+        output += source.substring(from: offset)
+        return output
     }
 
     /// The serialized destination carried by an image producer, or its source
@@ -633,7 +738,7 @@ public enum DocumentRenderer {
     /// don't rewrite Markdown metacharacters inside code.
     private static func extractCodeSpans(_ text: String) -> (text: String, spans: [String]) {
         var spans: [String] = []
-        let result = MarkdownTableCell.mapCodeSpans(text, keepDelimiters: false, code: { raw in
+        let result = MarkdownTableCell.mapCodeSpans(protectInlineSentinels(text), keepDelimiters: false, code: { raw in
             var content = raw.replacingOccurrences(of: "\r\n", with: " ").replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ")
             if content.hasPrefix(" "), content.hasSuffix(" "), content.contains(where: { $0 != " " }) {
                 content = String(content.dropFirst().dropLast())
@@ -693,6 +798,7 @@ public enum DocumentRenderer {
     private final class HTMLBudget { var remaining = 64 * 1024 * 1024 }
 
     private static func inlineHTML(_ text: String, footnoteNumbers: [String: Int] = [:], budget: HTMLBudget) throws -> String {
+        _ = try inlineSentinelByteCount(text, maximumBytes: budget.remaining)
         let (afterCode, spans) = extractCodeSpans(text)
         let protected = try boundedProtectEscapes(afterCode, maximumBytes: budget.remaining)
         let (afterLinks, links) = extractLinks(protected)
@@ -718,18 +824,19 @@ public enum DocumentRenderer {
             } else {
                 tag = "<a href=\"\(try boundedEscapeHTML(link.url, maximumBytes: budget.remaining))\">\(applyEmphasisHTML(try boundedEscapeHTML(link.label, maximumBytes: budget.remaining)))</a>"
             }
-            result = try boundedHTMLReplacement(result, needle: "\(linkOpen)\(index)\(linkClose)", replacement: tag, maximumBytes: budget.remaining)
+            result = try boundedInlineTokenReplacement(result, open: linkOpen, close: linkClose, index: index, replacement: tag, maximumBytes: budget.remaining)
+
         }
         result = try boundedHTMLWhitespaceReferences(result, maximumBytes: budget.remaining)
         result = restoreEscapes(result, html: true)
         for (index, span) in spans.enumerated() {
             guard budget.remaining >= 13 else { throw PicoDocsError.fileCorrupted }
             let escaped = try boundedEscapeHTML(span, maximumBytes: budget.remaining - 13)
-            result = try boundedHTMLReplacement(result, needle: "\(codeOpen)\(index)\(codeClose)", replacement: "<code>\(escaped)</code>", maximumBytes: budget.remaining)
+            result = try boundedInlineTokenReplacement(result, open: codeOpen, close: codeClose, index: index, replacement: "<code>\(escaped)</code>", maximumBytes: budget.remaining)
         }
         guard result.utf8.count <= budget.remaining else { throw PicoDocsError.fileCorrupted }
         budget.remaining -= result.utf8.count
-        return result
+        return restoreInlineSentinels(result)
     }
 
     /// URL schemes the HTML export emits as live links. Link and image URLs come
@@ -756,6 +863,55 @@ public enum DocumentRenderer {
         return isImage && lowered == "data" && compact.lowercased().hasPrefix("data:image/")
     }
 
+    private static func inlineSentinelByteCount(_ text: String, maximumBytes: Int) throws -> Int {
+        var bytes = text.utf8.count
+        guard bytes <= maximumBytes else { throw PicoDocsError.fileCorrupted }
+        for scalar in text.unicodeScalars where (0xE000...0xE003).contains(scalar.value) {
+            guard bytes <= maximumBytes - 3 else { throw PicoDocsError.fileCorrupted }; bytes += 3
+        }
+        return bytes
+    }
+
+    private static func protectInlineSentinels(_ text: String) -> String {
+        var output = ""
+        for scalar in text.unicodeScalars {
+            output.unicodeScalars.append(scalar)
+            if (0xE000...0xE003).contains(scalar.value) { output.unicodeScalars.append(scalar) }
+        }
+        return output
+    }
+
+    private static func restoreInlineSentinels(_ text: String) -> String {
+        var output = text
+        for value in [0xE000, 0xE001, 0xE002, 0xE003, 0xE008, 0xE009] {
+            let scalar = String(UnicodeScalar(value)!)
+            output = output.replacingOccurrences(of: scalar + scalar, with: scalar)
+        }
+        return output
+    }
+
+    private static func boundedInlineTokenReplacement(_ text: String, open: String, close: String, index: Int, replacement: String, maximumBytes: Int) throws -> String {
+        let pattern = "(?<!" + open + ")" + open + String(index) + close + "(?!" + close + ")"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let source = text as NSString
+        var bytes = text.utf8.count, exceeded = bytes > maximumBytes
+        let needleBytes = open.utf8.count + String(index).utf8.count + close.utf8.count
+        let growth = replacement.utf8.count - needleBytes
+        regex.enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, stop in
+            guard match != nil, !exceeded else { return }
+            if growth > maximumBytes - bytes { exceeded = true; stop.pointee = true }
+            else { bytes += growth }
+        }
+        guard !exceeded else { throw PicoDocsError.fileCorrupted }
+        var output = "", offset = 0
+        regex.enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, _ in
+            guard let match else { return }
+            output += source.substring(with: NSRange(location: offset, length: match.range.location - offset)) + replacement
+            offset = NSMaxRange(match.range)
+        }
+        return output + source.substring(from: offset)
+    }
+
     private static func applyEmphasisHTML(_ text: String) -> String {
         var result = text
         result = result.replacingOccurrences(of: "\\*\\*\\*(.+?)\\*\\*\\*", with: "<strong><em>$1</em></strong>", options: .regularExpression)
@@ -775,14 +931,14 @@ public enum DocumentRenderer {
         // markers inside code are preserved; code blocks never reach stripInline).
         result = renderFootnoteReferences(result, numbers: footnoteNumbers, html: false)
         for (index, link) in links.enumerated() {
-            result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: applyEmphasisStrip(link.label))
+            result = (try? boundedInlineTokenReplacement(result, open: linkOpen, close: linkClose, index: index, replacement: applyEmphasisStrip(link.label), maximumBytes: Int.max)) ?? result
         }
         result = restoreWhitespaceReferences(result, html: false)
         result = restoreEscapes(result, html: false)
         for (index, span) in spans.enumerated() {
-            result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: span)
+            result = (try? boundedInlineTokenReplacement(result, open: codeOpen, close: codeClose, index: index, replacement: span, maximumBytes: Int.max)) ?? result
         }
-        return result
+        return restoreInlineSentinels(result)
     }
 
     private static func applyEmphasisStrip(_ text: String) -> String {
@@ -794,7 +950,7 @@ public enum DocumentRenderer {
     }
 
     private static let whitespaceReference = try! NSRegularExpression(pattern: #"&#([0-9]{1,7});"#)
-    private static let htmlWhitespaceReference = try! NSRegularExpression(pattern: #"&amp;#([0-9]{1,7});"#)
+    private static let internalWhitespaceReference = try! NSRegularExpression(pattern: "(?<!\u{E008})\u{E008}([0-9]{1,7})\u{E009}(?!\u{E009})")
     static func boundedHTMLWhitespaceReferences(_ text: String, maximumBytes: Int = 64 * 1024 * 1024) throws -> String {
         var projected = 0, exceeded = false
         restoreWhitespaceFragments(text, html: true) { fragment in
@@ -820,7 +976,7 @@ public enum DocumentRenderer {
         let source = text as NSString
         var last = 0, inTag = false, inSpan = false
         func closeSpan() { if inSpan { emit("</span>"); inSpan = false } }
-        (html ? htmlWhitespaceReference : whitespaceReference).enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, _ in
+        internalWhitespaceReference.enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, _ in
             guard let match, let value = UInt32(source.substring(with: match.range(at: 1))),
                   let scalar = UnicodeScalar(value), CharacterSet.whitespaces.contains(scalar) else { return }
             let preceding = source.substring(with: NSRange(location: last, length: match.range.location - last))
@@ -834,7 +990,7 @@ public enum DocumentRenderer {
             }
             emit(preceding)
             if html {
-                if inTag { closeSpan(); emit(source.substring(with: match.range)) }
+                if inTag { closeSpan(); emit("&amp;#\(value);") }
                 else {
                     if !inSpan { emit("<span style=\"white-space:pre-wrap\">"); inSpan = true }
                     emit("&#\(value);")

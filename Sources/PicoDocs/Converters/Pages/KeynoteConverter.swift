@@ -141,6 +141,7 @@ public struct KeynoteConverter: DocumentConverter {
             if !cleaned.isEmpty { sections.insert(DocumentSection(kind: .body, markdown: cleaned), at: 0) }
         }
 
+        try Task.checkCancellation()
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
         let title = (info.filename?.isEmpty == false) ? info.filename : nil
         return ConverterResult(title: title, sections: MarkdownLiteral.escapeSectionBackslashes(sections))
