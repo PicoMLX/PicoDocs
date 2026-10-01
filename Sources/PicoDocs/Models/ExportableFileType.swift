@@ -23,7 +23,7 @@ public enum ExportableFileType: String, Equatable, Codable, CaseIterable, Identi
     public var id: String { rawValue }
 
     /// The conventional file extension (matches the raw value).
-    public var fileExtension: String { rawValue }
+    public var fileExtension: String { self == .keynote ? "key" : rawValue }
 
     /// The format's MIME type.
     public var mimeType: String {

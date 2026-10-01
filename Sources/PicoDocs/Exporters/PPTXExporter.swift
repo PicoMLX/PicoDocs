@@ -51,30 +51,34 @@ public struct PPTXExporter: DocumentExporter {
         let fragmentSlides = Dictionary(uniqueKeysWithValues: zip(fragments, headings.map(\.slide)))
         var pkg = try OOXMLPackageWriter()
         try pkg.addCoreProperties(result)
-        try pkg.addXML("[Content_Types].xml", OOXMLPackageWriter.withCoreContentType(Self.contentTypes(slideCount: count, noteSlideIDs: noteSlideIDs)))
-        try pkg.addXML("_rels/.rels", OOXMLPackageWriter.withCoreRelationship(Self.rootRels))
-        try pkg.addXML("ppt/presentation.xml", Self.presentationXML(slideCount: count))
-        try pkg.addXML("ppt/_rels/presentation.xml.rels", Self.presentationRels(slideCount: count))
-        try pkg.addXML("ppt/slideMasters/slideMaster1.xml", PPTXTemplates.slideMaster)
-        try pkg.addXML("ppt/slideMasters/_rels/slideMaster1.xml.rels", PPTXTemplates.slideMasterRels)
-        try pkg.addXML("ppt/slideLayouts/slideLayout1.xml", PPTXTemplates.slideLayout)
-        try pkg.addXML("ppt/slideLayouts/_rels/slideLayout1.xml.rels", PPTXTemplates.slideLayoutRels)
-        try pkg.addXML("ppt/theme/theme1.xml", PPTXTemplates.theme)
+        func addXML(_ path: String, _ xml: String) throws {
+            try packageBudget.admitXML(path, xml)
+            try pkg.addXML(path, xml)
+        }
+        try addXML("[Content_Types].xml", OOXMLPackageWriter.withCoreContentType(Self.contentTypes(slideCount: count, noteSlideIDs: noteSlideIDs)))
+        try addXML("_rels/.rels", OOXMLPackageWriter.withCoreRelationship(Self.rootRels))
+        try addXML("ppt/presentation.xml", Self.presentationXML(slideCount: count))
+        try addXML("ppt/_rels/presentation.xml.rels", Self.presentationRels(slideCount: count))
+        try addXML("ppt/slideMasters/slideMaster1.xml", PPTXTemplates.slideMaster)
+        try addXML("ppt/slideMasters/_rels/slideMaster1.xml.rels", PPTXTemplates.slideMasterRels)
+        try addXML("ppt/slideLayouts/slideLayout1.xml", PPTXTemplates.slideLayout)
+        try addXML("ppt/slideLayouts/_rels/slideLayout1.xml.rels", PPTXTemplates.slideLayoutRels)
+        try addXML("ppt/theme/theme1.xml", PPTXTemplates.theme)
         for (i, slide) in effectiveSlides.enumerated() {
             var relationships = SlideRelationships(packageBudget: packageBudget)
-            try pkg.addXML("ppt/slides/slide\(i + 1).xml", try Self.slideXML(slide, fragmentSlides: fragmentSlides, relationships: &relationships))
+            try addXML("ppt/slides/slide\(i + 1).xml", try Self.slideXML(slide, fragmentSlides: fragmentSlides, relationships: &relationships))
             var extraRels = relationships.xml
             if let notes = slide.notes {
-                var noteRelationships = SlideRelationships(packageBudget: packageBudget)
+                var noteRelationships = SlideRelationships(packageBudget: packageBudget, notes: true)
                 let number = i + 1
-                try pkg.addXML("ppt/notesSlides/notesSlide\(number).xml", try Self.notesXML(notes, relationships: &noteRelationships))
+                try addXML("ppt/notesSlides/notesSlide\(number).xml", try Self.notesXML(notes, fragmentSlides: fragmentSlides, relationships: &noteRelationships))
                 let backlink = "<Relationship Id=\"slide\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"../slides/slide\(number).xml\"/>"
                 let noteRels = OOXMLPackageWriter.xmlDeclaration + "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" + backlink + noteRelationships.xml + "</Relationships>"
-                try pkg.addXML("ppt/notesSlides/_rels/notesSlide\(number).xml.rels", noteRels)
+                try addXML("ppt/notesSlides/_rels/notesSlide\(number).xml.rels", noteRels)
                 extraRels += "<Relationship Id=\"notes\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide\" Target=\"../notesSlides/notesSlide\(number).xml\"/>"
             }
             let rels = PPTXTemplates.slideRels.replacingOccurrences(of: "</Relationships>", with: extraRels + "</Relationships>")
-            try pkg.addXML("ppt/slides/_rels/slide\(i + 1).xml.rels", rels)
+            try addXML("ppt/slides/_rels/slide\(i + 1).xml.rels", rels)
         }
         return try pkg.data()
     }
@@ -86,8 +90,22 @@ public struct PPTXExporter: DocumentExporter {
         private let maximumParts: Int
         private var relationships: Int
         private var bytes: Int
-        init(maximumParts: Int = 16_384, maximumRelationships: Int = 65_536, maximumBytes: Int = 16 * 1024 * 1024) {
+        private let xmlBudget: PowerPointXML.Budget
+        init(maximumParts: Int = 16_384, maximumRelationships: Int = 65_536, maximumBytes: Int = 16 * 1024 * 1024, xmlBudget: PowerPointXML.Budget = .init()) {
+            self.xmlBudget = xmlBudget
             self.maximumParts = maximumParts; relationships = maximumRelationships; bytes = maximumBytes
+        }
+        /// Use the reader's SAX admission on actual generated XML before ZIP
+        /// retention. Slides/notes and their cached layout/master/theme share the
+        /// same allowance; manifests and relationship XML have independent parses.
+        func admitXML(_ path: String, _ xml: String) throws {
+            try Task.checkCancellation()
+            let shared = !path.contains("/_rels/") && ["ppt/slides/", "ppt/notesSlides/", "ppt/slideLayouts/", "ppt/slideMasters/", "ppt/theme/"].contains { path.hasPrefix($0) }
+            let allowance = shared ? xmlBudget : (path == "[Content_Types].xml" ? .init(nodes: 16_385, attributes: 32_768, bytes: 8 * 1024 * 1024) : .init())
+            guard PowerPointXML.normalize(Data(xml.utf8), budget: allowance) != nil else {
+                try Task.checkCancellation()
+                throw ExporterError.serializationFailed("PPTX XML exceeds the reader's supported envelope: \(path)")
+            }
         }
         func admitStructure(slides: Int, noteSlideIDs: Set<Int>) throws {
             guard slides > 0, maximumParts >= 10, slides <= (maximumParts - 10) / 2,
@@ -132,18 +150,26 @@ public struct PPTXExporter: DocumentExporter {
         private(set) var xml = ""
         private var remainingBytes: Int
         private let packageBudget: PackageBudget
-        init(maximumBytes: Int = 8 * 1024 * 1024, packageBudget: PackageBudget = PackageBudget()) {
+        private let notes: Bool
+        init(maximumBytes: Int = 8 * 1024 * 1024, packageBudget: PackageBudget = PackageBudget(), notes: Bool = false) {
+            self.notes = notes
             self.packageBudget = packageBudget
             remainingBytes = max(0, maximumBytes - 1024) // package wrapper/layout relationship
         }
+        func slideTarget(_ number: Int) -> String { (notes ? "../slides/" : "") + "slide\(number).xml" }
         mutating func add(target: String, jump: Bool) throws -> String {
+            guard target.utf8.count <= 32 * 1024 else {
+                throw ExporterError.serializationFailed("PPTX relationship target exceeds the reader's 32 KiB limit")
+            }
             let key = (jump ? "slide:" : "external:") + target
             if let id = identifiers[key] { return id }
             guard identifiers.count < 65_536, target.utf8.count <= remainingBytes / 6 else {
                 throw ExporterError.serializationFailed("Slide relationships exceed the supported budget")
             }
             let id = "hyperlink\(identifiers.count + 1)"
-            let type = jump ? "slide" : "hyperlink"
+            // Notes retain one implicit slide backlink. Explicit jumps use the
+            // permitted internal hyperlink relationship instead of another backlink.
+            let type = jump && !notes ? "slide" : "hyperlink"
             let mode = jump ? "" : " TargetMode=\"External\""
             try packageBudget.reserveRelationship(id: id, suffix: type, target: target)
             let fragment = "<Relationship Id=\"\(id)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/\(type)\" Target=\"\(OOXMLPackageWriter.escapeAttribute(target))\"\(mode)/>"
@@ -421,7 +447,7 @@ public struct PPTXExporter: DocumentExporter {
                         output += try runs(label, bold: bold, italic: italic, fragmentSlides: fragmentSlides, relationships: &relationships)
                         continue
                     }
-                    id = try relationships.add(target: "slide\(targetSlide).xml", jump: true)
+                    id = try relationships.add(target: relationships.slideTarget(targetSlide), jump: true)
                     jump = true
                 } else {
                     id = try relationships.add(target: OOXMLPackageWriter.relationshipURI(destination), jump: false)
@@ -449,7 +475,7 @@ public struct PPTXExporter: DocumentExporter {
 
     /// Native presenter notes live in a notes-slide part with a backlink to the
     /// owning slide. External hyperlinks/styles use the same run writer as slides.
-    private static func notesXML(_ paragraphs: [Paragraph], relationships: inout SlideRelationships) throws -> String {
+    private static func notesXML(_ paragraphs: [Paragraph], fragmentSlides: [String: Int], relationships: inout SlideRelationships) throws -> String {
         var body = ""
         for paragraph in paragraphs {
             try Task.checkCancellation()
@@ -464,7 +490,7 @@ public struct PPTXExporter: DocumentExporter {
             }
             var nodes = paragraph.inlines ?? [.text(paragraph.text)]
             if paragraph.ordered == true, !(1...32767).contains(paragraph.number) { nodes.insert(.text("\(paragraph.number). "), at: 0) }
-            body += "<a:p>" + properties + (try runs(nodes, fragmentSlides: [:], relationships: &relationships)) + "</a:p>"
+            body += "<a:p>" + properties + (try runs(nodes, fragmentSlides: fragmentSlides, relationships: &relationships)) + "</a:p>"
         }
         if body.isEmpty { body = "<a:p/>" }
         return OOXMLPackageWriter.xmlDeclaration + """

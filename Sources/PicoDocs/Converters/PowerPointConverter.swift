@@ -529,7 +529,7 @@ public struct PowerPointConverter: DocumentConverter {
         if !relation.external {
             // Preserve the canonical fragment attached to a generated native
             // slide jump, without treating other internal relationships as URLs.
-            guard relation.isType("/slide"), (try? click?.attr("action")) == "ppaction://hlinksldjump",
+            guard (relation.isType("/slide") || relation.isType("/hyperlink")), (try? click?.attr("action")) == "ppaction://hlinksldjump",
                   let click, let extensions = selectedChild(of: click, named: "a:extlst"),
                   let item = selectedChildren(in: extensions).first(where: { (try? $0.attr("uri")) == "https://picomlx.github.io/picodocs/markdown/slideFragment" }),
                   let marker = selectedChild(of: item, named: "pd:slidefragment"),
