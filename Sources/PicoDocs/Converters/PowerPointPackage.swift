@@ -162,7 +162,8 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
     ]
 
     static func normalize(_ data: Data, maximumOutputBytes: Int = 64 * 1024 * 1024, maximumNodes: Int = 250_000, maximumAttributes: Int = 500_000, maximumAttributesPerElement: Int = 256, maximumAttributeBytes: Int = 8 * 1024 * 1024, budget: Budget? = nil) -> String? {
-        guard lexicalPreflight(data, maximumAttributesPerElement: maximumAttributesPerElement) else { return nil }
+        guard lexicalPreflight(data, maximumAttributesPerElement: maximumAttributesPerElement,
+                               maximumAttributeBytes: min(maximumAttributeBytes, budget?.attributeBytes ?? maximumAttributeBytes)) else { return nil }
         let parser = XMLParser(data: data)
         let delegate = PowerPointXML()
         delegate.maximumOutputBytes = min(maximumOutputBytes, budget?.bytes ?? maximumOutputBytes)
@@ -186,7 +187,9 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
 
     /// Inspect ASCII markup as encoded code units, without allocating attribute
     /// dictionaries or deleting NUL bytes from valid non-ASCII UTF-16 text.
-    static func lexicalPreflight(_ data: Data, maximumAttributesPerElement: Int = 256) -> Bool {
+    static func lexicalPreflight(_ data: Data, maximumAttributesPerElement: Int = 256,
+                                 maximumAttributeBytesPerElement: Int = 64 * 1024,
+                                 maximumAttributeBytes: Int = 8 * 1024 * 1024) -> Bool {
         data.withUnsafeBytes { buffer in
             let bytes = buffer.bindMemory(to: UInt8.self)
             var width = 1, little = false
@@ -215,7 +218,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
                 return true
             }
             func space(_ value: UInt32) -> Bool { value == 32 || value == 9 || value == 10 || value == 13 }
-            var i = 0
+            var i = 0, attributeBytes = 0
             func skip(to token: [UInt8]) -> Bool {
                 while i < count {
                     if i % 4096 == 0, Task.isCancelled { return false }
@@ -240,7 +243,16 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
                     if i % 4096 == 0, Task.isCancelled { return false }
                     i += 1
                 }
-                var attributes = 0
+                var attributes = 0, elementAttributeBytes = 0
+                // Bound encoded names/values before Foundation allocates its
+                // attribute dictionary. Decoded semantic bytes are checked again
+                // by the delegate; encoded entities and UTF-16 can cost more.
+                func chargeAttributeUnit() -> Bool {
+                    guard width <= maximumAttributeBytesPerElement - elementAttributeBytes,
+                          width <= maximumAttributeBytes - attributeBytes else { return false }
+                    elementAttributeBytes += width; attributeBytes += width
+                    return true
+                }
                 while i < count {
                     while i < count, space(unit(i)) {
                         if i % 4096 == 0, Task.isCancelled { return false }
@@ -253,6 +265,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
                     while i < count, !space(unit(i)), unit(i) != 61 {
                         if i % 4096 == 0, Task.isCancelled { return false }
                         if unit(i) == 62 || unit(i) == 47 { return false }
+                        guard chargeAttributeUnit() else { return false }
                         i += 1
                     }
                     while i < count, space(unit(i)) {
@@ -268,6 +281,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
                     guard i < count, quote == 34 || quote == 39 else { return false }; i += 1
                     while i < count, unit(i) != quote {
                         if i % 4096 == 0, Task.isCancelled { return false }
+                        guard chargeAttributeUnit() else { return false }
                         i += 1
                     }
                     guard i < count else { return false }; i += 1
@@ -345,6 +359,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         }
         scopes.append(scope); scopeBytes.append(bytes)
         var settings = compatibility.last!
+        var chargedIgnoredCopy = false, chargedProcessedCopy = false
         var canonicalAttributes: Set<String> = []
         for (key, value) in attributes where key != "xmlns" && !key.hasPrefix("xmlns:") {
             let attribute = name(key, scope: scope, attribute: true)
@@ -352,12 +367,29 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
             if ["mc:Ignorable", "mc:ProcessContent", "mc:MustUnderstand", "Requires"].contains(attribute), compatibilityTokens(value, parser: parser) == nil { return }
             if attribute == "mc:Ignorable" {
                 for prefix in compatibilityTokens(value, parser: parser) ?? [] {
-                    if let uri = scope[String(prefix)] { settings.ignored.insert(uri) }
+                    if let uri = scope[String(prefix)] {
+                        if !settings.ignored.contains(uri) {
+                            if !chargedIgnoredCopy {
+                                let work = settings.ignored.count + 1
+                                guard work <= maximumNamespaceWork - namespaceWork else { hasError = true; parser.abortParsing(); return }
+                                namespaceWork += work; chargedIgnoredCopy = true
+                            }
+                            settings.ignored.insert(uri)
+                        }
+                    }
                     else { hasError = true }
                 }
             } else if attribute == "mc:ProcessContent" {
                 for qname in compatibilityTokens(value, parser: parser) ?? [] {
-                    settings.processed.insert(name(String(qname), scope: scope))
+                    let canonical = name(String(qname), scope: scope)
+                    if !settings.processed.contains(canonical) {
+                        if !chargedProcessedCopy {
+                            let work = settings.processed.count + 1
+                            guard work <= maximumNamespaceWork - namespaceWork else { hasError = true; parser.abortParsing(); return }
+                            namespaceWork += work; chargedProcessedCopy = true
+                        }
+                        settings.processed.insert(canonical)
+                    }
                 }
             }
         }
