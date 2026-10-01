@@ -5,7 +5,7 @@ import Foundation
 enum OfficeDocumentBlocks {
     /// These writers do not serialize result.cover; do not silently discard it
     /// when it is the only payload. Custom exporters remain free to support it.
-    static func validateInput(_ result: ConverterResult, maximumBytes: Int = 64 * 1024 * 1024) throws {
+    static func validateInput(_ result: ConverterResult, includesNativeNotes: Bool = false, maximumBytes: Int = 64 * 1024 * 1024) throws {
         if !(result.cover?.isEmpty ?? true), PicoDocsEngine.isEmptyForExport(result, includingCover: false) {
             throw PicoDocsError.emptyDocument
         }
@@ -45,6 +45,18 @@ enum OfficeDocumentBlocks {
                 try charge(fixed)
                 guard notes.utf8.count <= remaining / 3 else { throw ExporterError.serializationFailed("Office slide notes exceed the supported byte budget") }
                 try charge(notes.utf8.count * 3)
+                if includesNativeNotes {
+                    // Notes metadata can exist without the visible Notes suffix.
+                    // Admit its native run/paragraph projection independently.
+                    try charge(1024)
+                    for scalar in notes.unicodeScalars {
+                        let value = scalar.value
+                        let bytes = value <= 0x7F ? 1 : value <= 0x7FF ? 2 : value <= 0xFFFF ? 3 : 4
+                        try charge(bytes * 7)
+                        if "*_[]`<>()".unicodeScalars.contains(scalar) { try charge(64) }
+                        if scalar == "\n" || scalar == "\r" { try charge(256) }
+                    }
+                }
             }
             let projectedTitle = section.kind == .sheet ? (section.sheetName ?? section.metadata["sheetName"] ?? section.title) : section.title
             for title in Set([section.title, projectedTitle].compactMap({ $0 })) {
@@ -101,7 +113,11 @@ enum OfficeDocumentBlocks {
             blocks += MarkdownBlockParser.parse(pending.joined(separator: "\n\n"))
             pending.removeAll(keepingCapacity: true)
         }
-        for section in result.sections where section.kind != .image {
+        for original in result.sections where original.kind != .image {
+            var section = original
+            if section.metadata["powerPointWhitespace"] == "1" {
+                section.markdown = decodedPowerPointWhitespace(section.markdown)
+            }
             if let csv = section.metadata["csv"] ?? (section.kind == .sheet && section.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil),
                !csv.isEmpty || [.sheet, .table].contains(section.kind) {
                 flush()
@@ -141,4 +157,22 @@ enum OfficeDocumentBlocks {
         flush()
         return blocks
     }
+    /// Numeric whitespace belongs only to marked PowerPoint producers. Literal
+    /// ampersands already carry an odd backslash prefix and stay literal.
+    static func decodedPowerPointWhitespace(_ text: String) -> String {
+        let regex = try! NSRegularExpression(pattern: #"&#([0-9]{1,7});"#)
+        let source = text as NSString
+        var output = "", offset = 0
+        regex.enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, _ in
+            guard let match, let value = UInt32(source.substring(with: match.range(at: 1))),
+                  let scalar = UnicodeScalar(value), CharacterSet.whitespaces.contains(scalar) else { return }
+            var before = match.range.location, slashes = 0
+            while before > 0, source.character(at: before - 1) == 92 { before -= 1; slashes += 1 }
+            guard slashes.isMultiple(of: 2) else { return }
+            output += source.substring(with: NSRange(location: offset, length: match.range.location - offset)) + String(scalar)
+            offset = NSMaxRange(match.range)
+        }
+        return output + source.substring(from: offset)
+    }
+
 }

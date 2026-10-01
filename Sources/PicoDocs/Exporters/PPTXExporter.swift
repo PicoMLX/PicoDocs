@@ -24,7 +24,7 @@ public struct PPTXExporter: DocumentExporter {
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .pptx else { throw ExporterError.notAccepted }
-        try OfficeDocumentBlocks.validateInput(result)
+        try OfficeDocumentBlocks.validateInput(result, includesNativeNotes: true)
         let sanitized = OOXMLPackageWriter.sanitizedDocument(result)
         guard !PicoDocsEngine.isEmptyForExport(sanitized) else { throw PicoDocsError.emptyDocument }
         let result = PicoDocsEngine.withSynthesizedImageReferences(sanitized)
@@ -34,7 +34,7 @@ public struct PPTXExporter: DocumentExporter {
            !slides.contains(where: { !$0.title.isEmpty || !$0.body.isEmpty }) {
             throw PicoDocsError.emptyDocument
         }
-        guard slides.allSatisfy({ $0.body.allSatisfy { $0.level <= 8 } }) else {
+        guard slides.allSatisfy({ ($0.body + ($0.notes ?? [])).allSatisfy { $0.level <= 8 } }) else {
             throw ExporterError.serializationFailed("PPTX supports at most nine native list levels")
         }
         let count = max(slides.count, 1)
@@ -48,7 +48,7 @@ public struct PPTXExporter: DocumentExporter {
         let fragmentSlides = Dictionary(uniqueKeysWithValues: zip(fragments, headings.map(\.slide)))
         var pkg = try OOXMLPackageWriter()
         try pkg.addCoreProperties(result)
-        try pkg.addXML("[Content_Types].xml", OOXMLPackageWriter.withCoreContentType(Self.contentTypes(slideCount: count)))
+        try pkg.addXML("[Content_Types].xml", OOXMLPackageWriter.withCoreContentType(Self.contentTypes(slideCount: count, noteSlideIDs: Set(effectiveSlides.indices.filter { effectiveSlides[$0].notes != nil }.map { $0 + 1 }))))
         try pkg.addXML("_rels/.rels", OOXMLPackageWriter.withCoreRelationship(Self.rootRels))
         try pkg.addXML("ppt/presentation.xml", Self.presentationXML(slideCount: count))
         try pkg.addXML("ppt/_rels/presentation.xml.rels", Self.presentationRels(slideCount: count))
@@ -60,7 +60,17 @@ public struct PPTXExporter: DocumentExporter {
         for (i, slide) in effectiveSlides.enumerated() {
             var relationships = SlideRelationships()
             try pkg.addXML("ppt/slides/slide\(i + 1).xml", try Self.slideXML(slide, fragmentSlides: fragmentSlides, relationships: &relationships))
-            let rels = PPTXTemplates.slideRels.replacingOccurrences(of: "</Relationships>", with: relationships.xml + "</Relationships>")
+            var extraRels = relationships.xml
+            if let notes = slide.notes {
+                var noteRelationships = SlideRelationships()
+                let number = i + 1
+                try pkg.addXML("ppt/notesSlides/notesSlide\(number).xml", try Self.notesXML(notes, relationships: &noteRelationships))
+                let backlink = "<Relationship Id=\"slide\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"../slides/slide\(number).xml\"/>"
+                let noteRels = OOXMLPackageWriter.xmlDeclaration + "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" + backlink + noteRelationships.xml + "</Relationships>"
+                try pkg.addXML("ppt/notesSlides/_rels/notesSlide\(number).xml.rels", noteRels)
+                extraRels += "<Relationship Id=\"notes\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide\" Target=\"../notesSlides/notesSlide\(number).xml\"/>"
+            }
+            let rels = PPTXTemplates.slideRels.replacingOccurrences(of: "</Relationships>", with: extraRels + "</Relationships>")
             try pkg.addXML("ppt/slides/_rels/slide\(i + 1).xml.rels", rels)
         }
         return try pkg.data()
@@ -113,7 +123,7 @@ public struct PPTXExporter: DocumentExporter {
             self.init(text: nodes.plainText, ordered: ordered, number: number, level: level, inlines: nodes)
         }
     }
-    struct Slide { let title: String; let body: [Paragraph]; var titleInlines: [MarkdownInline]? = nil }
+    struct Slide { let title: String; let body: [Paragraph]; var titleInlines: [MarkdownInline]? = nil; var notes: [Paragraph]? = nil }
 
     private static func slides(from result: ConverterResult) throws -> [Slide] {
         // Preserve associated tables, including slides containing only tables.
@@ -181,7 +191,12 @@ public struct PPTXExporter: DocumentExporter {
                           }
                           return bodyLines(blocks)
                       }
-                return Slide(title: title, body: body, titleInlines: titleInlines)
+                let noteSections = sections.filter { $0.kind == .slide }.compactMap { section -> DocumentSection? in
+                    guard let notes = section.metadata["notes"] else { return nil }
+                    return DocumentSection(markdown: OOXMLPackageWriter.xmlSafeText(notes), metadata: ["powerPointWhitespace": section.metadata["powerPointWhitespace"] ?? "0"])
+                }
+                let notes = noteSections.isEmpty ? nil : bodyLines(OfficeDocumentBlocks.parse(ConverterResult(sections: noteSections), includeSlideTitles: false))
+                return Slide(title: title, body: body, titleInlines: titleInlines, notes: notes)
             }
         }
 
@@ -370,6 +385,31 @@ public struct PPTXExporter: DocumentExporter {
         return output
     }
 
+    /// Native presenter notes live in a notes-slide part with a backlink to the
+    /// owning slide. External hyperlinks/styles use the same run writer as slides.
+    private static func notesXML(_ paragraphs: [Paragraph], relationships: inout SlideRelationships) throws -> String {
+        var body = ""
+        for paragraph in paragraphs {
+            try Task.checkCancellation()
+            let properties: String
+            if paragraph.ordered == true, (1...32767).contains(paragraph.number) {
+                properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buAutoNum type=\"arabicPeriod\" startAt=\"\(paragraph.number)\"/></a:pPr>"
+            } else if paragraph.ordered == false {
+                properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buChar char=\"•\"/></a:pPr>"
+            } else {
+                let provenance = paragraph.listContinuation ? "<a:extLst><a:ext uri=\"https://picomlx.github.io/picodocs/markdown/listContinuation\"><pd:listContinuation xmlns:pd=\"https://picomlx.github.io/picodocs/markdown\"/></a:ext></a:extLst>" : ""
+                properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buNone/>" + provenance + "</a:pPr>"
+            }
+            var nodes = paragraph.inlines ?? [.text(paragraph.text)]
+            if paragraph.ordered == true, !(1...32767).contains(paragraph.number) { nodes.insert(.text("\(paragraph.number). "), at: 0) }
+            body += "<a:p>" + properties + (try runs(nodes, fragmentSlides: [:], relationships: &relationships)) + "</a:p>"
+        }
+        if body.isEmpty { body = "<a:p/>" }
+        return OOXMLPackageWriter.xmlDeclaration + """
+        <p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree>        <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>        <p:sp><p:nvSpPr><p:cNvPr id="2" name="Notes"/><p:cNvSpPr/><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr><p:spPr/>        <p:txBody><a:bodyPr/><a:lstStyle/>\(body)</p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notes>
+        """
+    }
+
     // MARK: - Package parts (dynamic)
 
     private static let rootRels = OOXMLPackageWriter.xmlDeclaration + """
@@ -378,7 +418,7 @@ public struct PPTXExporter: DocumentExporter {
     </Relationships>
     """
 
-    private static func contentTypes(slideCount: Int) -> String {
+    private static func contentTypes(slideCount: Int, noteSlideIDs: Set<Int>) -> String {
         var overrides = """
         <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>\
         <Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>\
@@ -387,6 +427,9 @@ public struct PPTXExporter: DocumentExporter {
         """
         for i in 1...slideCount {
             overrides += "<Override PartName=\"/ppt/slides/slide\(i).xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"
+        }
+        for number in noteSlideIDs.sorted() {
+            overrides += "<Override PartName=\"/ppt/notesSlides/notesSlide\(number).xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml\"/>"
         }
         return OOXMLPackageWriter.xmlDeclaration + """
         <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\

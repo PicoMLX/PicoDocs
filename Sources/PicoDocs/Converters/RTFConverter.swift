@@ -99,6 +99,7 @@ public struct RTFConverter: DocumentConverter {
 
         var runs: [Run] = []
         var canonical = false
+        var encounteredBody = false
         let canonicalMarker = Array("{\\*\\picodocsmarkdown1}")
         var nativeParagraphs: [[Run]] = []
         var paragraphs: [String] = []
@@ -119,6 +120,7 @@ public struct RTFConverter: DocumentConverter {
             if instruction, let field { field.appendInstruction(s); return }
             let code = field?.target != nil && monospacedFonts.contains(font)
             guard !ignore, !s.isEmpty else { return }
+            encounteredBody = true
             if var last = runs.last, last.bold == bold, last.italic == italic, last.link == field?.target, last.code == code, last.field === field {
                 last.text += s
                 runs[runs.count - 1] = last
@@ -197,7 +199,7 @@ public struct RTFConverter: DocumentConverter {
             case "{":
                 // Only the parsed top-level ignorable destination emitted by our
                 // writer signals canonical Markdown. Binary/ignored payloads do not.
-                if stack.count == 1, !ignore, chars[i...].starts(with: canonicalMarker) { canonical = true }
+                if stack.count == 1, !ignore, !encounteredBody, chars[i...].starts(with: canonicalMarker) { canonical = true }
                 stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip, field: field, instruction: instruction, font: font, fontTable: fontTable, fontNameIgnored: fontNameIgnored))
                 i += 1
 
@@ -236,7 +238,7 @@ public struct RTFConverter: DocumentConverter {
                     case "fldinst": instruction = field != nil; ignore = true
                     case "fldrslt": instruction = false
                     case "par", "row", "sect", "page":
-                        if !ignore { flushParagraph() }   // a \par inside a skipped destination isn't a body break
+                        if !ignore { encounteredBody = true; flushParagraph() }   // a \par inside a skipped destination isn't a body break
                     case "line":
                         appendText("  \n")                // Markdown hard break (matches the DOCX w:br path)
                     case "tab", "cell":

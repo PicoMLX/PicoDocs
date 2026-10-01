@@ -498,7 +498,7 @@ public struct PowerPointConverter: DocumentConverter {
                   let click, let extensions = selectedChild(of: click, named: "a:extlst"),
                   let item = selectedChildren(in: extensions).first(where: { (try? $0.attr("uri")) == "https://picomlx.github.io/picodocs/markdown/slideFragment" }),
                   let marker = selectedChild(of: item, named: "pd:slidefragment"),
-                  let fragment = try? marker.attr("val"), fragment.hasPrefix("#"), fragment.count > 1,
+                  let fragment = try? marker.attr("val"), fragment.hasPrefix("#"),
                   isValidTarget(fragment, isImage: false) else { return nil }
             let target = Self.resolvePartPath(relation.target, relativeTo: directory(of: context.partPath))
             guard context.archive.entry(target) != nil else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
