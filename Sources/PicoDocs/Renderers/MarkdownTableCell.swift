@@ -46,9 +46,9 @@ enum MarkdownTableCell {
         })
     }
 
-    static func inlineText(_ text: String, breakText: String = "\n", inline: (String) -> String) -> String {
+    static func inlineText(_ text: String, breakText: String = "\n", inline: (String) throws -> String) rethrows -> String {
         let protected = protectBreakSentinels(text)
-        return restoreBreakSentinels(inline(decodeBreaks(protected, breakText: breakToken)), breakText: breakText)
+        return restoreBreakSentinels(try inline(decodeBreaks(protected, breakText: breakToken)), breakText: breakText)
     }
 
     static func protectBreakSentinels(_ text: String) -> String {

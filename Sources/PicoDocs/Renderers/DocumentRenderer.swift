@@ -129,9 +129,10 @@ public enum DocumentRenderer {
         let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
         let parsed = parseBlocks(bodyMarkdown)
         let numbers = footnoteNumbers(blocks: parsed, notes: notes)
-        let blocks = htmlBlocks(parsed, footnoteNumbers: numbers)
+        let budget = HTMLBudget()
+        let blocks = try htmlBlocks(parsed, footnoteNumbers: numbers, budget: budget)
         var bodyHTML = blocks.joined(separator: "\n")
-        let footnotes = footnotesHTML(notes: notes, numbers: numbers)
+        let footnotes = try footnotesHTML(notes: notes, numbers: numbers, budget: budget)
         if !footnotes.isEmpty { bodyHTML += "\n" + footnotes }
         let title = result.title.map { "<title>\(escapeHTML($0))</title>\n" } ?? ""
         var html = """
@@ -223,31 +224,31 @@ public enum DocumentRenderer {
     /// links inside `inlineHTML` (so code spans are protected and code blocks,
     /// which never reach `inlineHTML`, keep literal markers).
     private static func htmlBlocks(_ parsed: [Block], footnoteNumbers numbers: [String: Int],
-                                   depth: Int = 0) -> [String] {
-        parsed.map { block in
+                                   depth: Int = 0, budget: HTMLBudget) throws -> [String] {
+        try parsed.map { block in
             switch block {
             case .heading(let level, let text):
-                return "<h\(level)>\(inlineHTML(text, footnoteNumbers: numbers))</h\(level)>"
+                return "<h\(level)>\(try inlineHTML(text, footnoteNumbers: numbers, budget: budget))</h\(level)>"
             case .paragraph(let text):
-                let html = inlineHTML(text, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: "<br>\n")
+                let html = try inlineHTML(text, footnoteNumbers: numbers, budget: budget).replacingOccurrences(of: "\n", with: "<br>\n")
                 return "<p>\(html)</p>"
             case .code(let code):
                 return "<pre><code>\(escapeHTML(code))</code></pre>"
             case .rule:
                 return "<hr>"
             case .blockquote(let lines):
-                let inner = lines.map { inlineHTML($0, footnoteNumbers: numbers) }.joined(separator: "<br>\n")
+                let inner = try lines.map { try inlineHTML($0, footnoteNumbers: numbers, budget: budget) }.joined(separator: "<br>\n")
                 return "<blockquote>\(inner)</blockquote>"
             case .list(let ordered, let start, let items):
                 let tag = ordered ? "ol" : "ul"
                 var expected = start
-                let lis = items.map { item -> String in
+                let lis = try items.map { item -> String in
                     let value = item.number.map { $0 == expected ? "" : " value=\"\($0)\"" } ?? ""
                     if let number = item.number { expected = number + 1 }
                     let (lead, nested) = listItemContent(listItemText(item), depth: depth)
-                    var html = MarkdownList.inlineText(lead, breakText: "<br>") { inlineHTML($0, footnoteNumbers: numbers) }
+                    var html = try MarkdownList.inlineText(lead, breakText: "<br>") { try inlineHTML($0, footnoteNumbers: numbers, budget: budget) }
                     if !nested.isEmpty {
-                        html += "\n" + htmlBlocks(nested, footnoteNumbers: numbers, depth: depth + 1).joined(separator: "\n")
+                        html += "\n" + (try htmlBlocks(nested, footnoteNumbers: numbers, depth: depth + 1, budget: budget).joined(separator: "\n"))
                         if case .list? = nested.last {} else { html += "\n" }
                     }
                     return "<li\(value)>\(html)</li>"
@@ -255,18 +256,18 @@ public enum DocumentRenderer {
                 let startAttribute = ordered && start != 1 ? " start=\"\(start)\"" : ""
                 return "<\(tag)\(startAttribute)>\n\(lis.joined(separator: "\n"))\n</\(tag)>"
             case .table(let rows):
-                return renderHTMLTable(rows, footnoteNumbers: numbers)
+                return try renderHTMLTable(rows, footnoteNumbers: numbers, budget: budget)
             }
         }
     }
 
-    private static func renderHTMLTable(_ rows: [[String]], footnoteNumbers: [String: Int] = [:]) -> String {
+    private static func renderHTMLTable(_ rows: [[String]], footnoteNumbers: [String: Int] = [:], budget: HTMLBudget) throws -> String {
         guard let header = rows.first else { return "" }
         var out = "<table>\n<thead>\n<tr>"
-        out += header.map { "<th>\(MarkdownTableCell.inlineText($0, breakText: "<br>") { inlineHTML($0, footnoteNumbers: footnoteNumbers) })</th>" }.joined()
+        out += try header.map { "<th>\(try MarkdownTableCell.inlineText($0, breakText: "<br>") { try inlineHTML($0, footnoteNumbers: footnoteNumbers, budget: budget) })</th>" }.joined()
         out += "</tr>\n</thead>\n<tbody>\n"
         for row in rows.dropFirst() {
-            out += "<tr>" + row.map { "<td>\(MarkdownTableCell.inlineText($0, breakText: "<br>") { inlineHTML($0, footnoteNumbers: footnoteNumbers) })</td>" }.joined() + "</tr>\n"
+            out += "<tr>" + (try row.map { "<td>\(try MarkdownTableCell.inlineText($0, breakText: "<br>") { try inlineHTML($0, footnoteNumbers: footnoteNumbers, budget: budget) })</td>" }).joined() + "</tr>\n"
         }
         out += "</tbody>\n</table>"
         return out
@@ -459,15 +460,15 @@ public enum DocumentRenderer {
 
     /// The trailing `<section class="footnotes">` list of referenced notes, ordered
     /// by number. Returns "" when no note is referenced.
-    private static func footnotesHTML(notes: [(id: String, text: String)], numbers: [String: Int]) -> String {
-        let items = referencedNotes(notes, numbers)
+    private static func footnotesHTML(notes: [(id: String, text: String)], numbers: [String: Int], budget: HTMLBudget) throws -> String {
+        let items = try referencedNotes(notes, numbers)
             .map { note -> String in
                 // Escape the id for attribute context (it comes from document text).
                 // Render the note body with the same numbers so a reference inside a
                 // note is rendered too. No backreference link: references omit a
                 // per-occurrence `id`, so there's no unique anchor to return to
                 // (which keeps element ids unique under repeated references).
-                let inner = inlineHTML(note.text.replacingOccurrences(of: "\n", with: " "), footnoteNumbers: numbers)
+                let inner = try inlineHTML(note.text.replacingOccurrences(of: "\n", with: " "), footnoteNumbers: numbers, budget: budget)
                 return "<li id=\"fn-\(escapeHTML(note.id))\">\(inner)</li>"
             }
             .joined(separator: "\n")
@@ -965,7 +966,9 @@ public enum DocumentRenderer {
     /// Converts inline Markdown to HTML. Code spans and links/images are pulled
     /// out first (so their contents/URLs aren't touched by escaping or emphasis),
     /// the remaining text is HTML-escaped and emphasized, then they're restored.
-    private static func inlineHTML(_ text: String, footnoteNumbers: [String: Int] = [:]) -> String {
+    private final class HTMLBudget { var remaining = 64 * 1024 * 1024 }
+
+    private static func inlineHTML(_ text: String, footnoteNumbers: [String: Int] = [:], budget: HTMLBudget) throws -> String {
         let (afterCode, spans) = extractCodeSpans(text)
         let protected = protectEscapes(afterCode)
         let (afterLinks, links) = extractLinks(protected)
@@ -992,11 +995,13 @@ public enum DocumentRenderer {
             }
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: tag)
         }
-        result = restoreWhitespaceReferences(result, html: true)
+        result = try boundedHTMLWhitespaceReferences(result, maximumBytes: budget.remaining)
         result = restoreEscapes(result, html: true)
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
         }
+        guard result.utf8.count <= budget.remaining else { throw PicoDocsError.fileCorrupted }
+        budget.remaining -= result.utf8.count
         return result
     }
 
@@ -1063,10 +1068,31 @@ public enum DocumentRenderer {
 
     private static let whitespaceReference = try! NSRegularExpression(pattern: #"&#([0-9]{1,7});"#)
     private static let htmlWhitespaceReference = try! NSRegularExpression(pattern: #"&amp;#([0-9]{1,7});"#)
+    static func boundedHTMLWhitespaceReferences(_ text: String, maximumBytes: Int = 64 * 1024 * 1024) throws -> String {
+        var projected = 0, exceeded = false
+        restoreWhitespaceFragments(text, html: true) { fragment in
+            guard !exceeded else { return }
+            let bytes = fragment.utf8.count
+            if bytes > maximumBytes - projected { exceeded = true }
+            else { projected += bytes }
+        }
+        guard !exceeded else { throw PicoDocsError.fileCorrupted }
+        var output = ""
+        output.reserveCapacity(projected)
+        restoreWhitespaceFragments(text, html: true) { output += $0 }
+        return output
+    }
+
     private static func restoreWhitespaceReferences(_ text: String, html: Bool) -> String {
+        var output = ""
+        restoreWhitespaceFragments(text, html: html) { output += $0 }
+        return output
+    }
+
+    private static func restoreWhitespaceFragments(_ text: String, html: Bool, emit: @escaping (String) -> Void) {
         let source = text as NSString
-        var output = "", last = 0, inTag = false, inSpan = false
-        func closeSpan() { if inSpan { output += "</span>"; inSpan = false } }
+        var last = 0, inTag = false, inSpan = false
+        func closeSpan() { if inSpan { emit("</span>"); inSpan = false } }
         (html ? htmlWhitespaceReference : whitespaceReference).enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, _ in
             guard let match, let value = UInt32(source.substring(with: match.range(at: 1))),
                   let scalar = UnicodeScalar(value), CharacterSet.whitespaces.contains(scalar) else { return }
@@ -1079,19 +1105,18 @@ public enum DocumentRenderer {
                     else if character == ">" { inTag = false }
                 }
             }
-            output += preceding
+            emit(preceding)
             if html {
-                if inTag { closeSpan(); output += source.substring(with: match.range) }
+                if inTag { closeSpan(); emit(source.substring(with: match.range)) }
                 else {
-                    if !inSpan { output += "<span style=\"white-space:pre-wrap\">"; inSpan = true }
-                    output += "&#\(value);"
+                    if !inSpan { emit("<span style=\"white-space:pre-wrap\">"); inSpan = true }
+                    emit("&#\(value);")
                 }
-            } else { output.unicodeScalars.append(scalar) }
+            } else { emit(String(scalar)) }
             last = match.range.location + match.range.length
         }
         closeSpan()
-        output += source.substring(from: last)
-        return output
+        emit(source.substring(from: last))
     }
 
     private static func decodedFootnoteID(_ id: String) -> String {
