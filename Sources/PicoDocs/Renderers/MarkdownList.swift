@@ -12,12 +12,12 @@ struct MarkdownList {
         return String(leading) + escaped + String(trailing)
     }
 
-    static func inlineText(_ text: String, breakText: String, inline: (String) -> String) -> String {
+    static func inlineText(_ text: String, breakText: String, inline: (String) throws -> String) rethrows -> String {
         let hardBreak = MarkdownTableCell.breakToken
         let protected = MarkdownTableCell.mapCodeSpans(MarkdownTableCell.protectBreakSentinels(text), code: { $0 }, plain: {
             $0.replacingOccurrences(of: " {2,}\n", with: hardBreak, options: .regularExpression)
         })
-        return MarkdownTableCell.restoreBreakSentinels(inline(protected).replacingOccurrences(of: "\n", with: " "), breakText: breakText)
+        return MarkdownTableCell.restoreBreakSentinels(try inline(protected).replacingOccurrences(of: "\n", with: " "), breakText: breakText)
     }
 
     struct Item {

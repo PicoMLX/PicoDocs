@@ -5,6 +5,17 @@ import SwiftSoup
 @testable import PicoDocs
 
 struct PowerPointThirdStackReviewTests {
+    @Test func separatedWhitespaceExpansionIsPreflighted() throws {
+        let input = String(repeating: "&amp;#32;a", count: 100)
+        let html = try DocumentRenderer.boundedHTMLWhitespaceReferences(input)
+        let bytes = html.utf8.count
+        #expect(html.components(separatedBy: "white-space:pre-wrap").count - 1 == 100)
+        #expect(try DocumentRenderer.boundedHTMLWhitespaceReferences(input, maximumBytes: bytes) == html)
+        #expect(throws: PicoDocsError.fileCorrupted) { try DocumentRenderer.boundedHTMLWhitespaceReferences(input, maximumBytes: bytes - 1) }
+        let result = ConverterResult(sections: [DocumentSection(kind: .body, markdown: String(repeating: "&#32;a", count: 1_700_000))])
+        #expect(throws: PicoDocsError.fileCorrupted) { () throws -> Void in _ = try DocumentRenderer.render(result, to: .html) }
+    }
+
     typealias B = PowerPointConverterTests
     static let rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
 
@@ -55,7 +66,7 @@ struct PowerPointThirdStackReviewTests {
         let styled = try Self.replacing(data, part: "ppt/presentation.xml") { $0.replacingOccurrences(of: "</p:presentation>", with: "<p:defaultTextStyle><a:lvl1pPr><a:buAutoNum type='arabicPeriod' startAt='3'/><a:defRPr b='1' i='1'/></a:lvl1pPr></p:defaultTextStyle></p:presentation>") }
         let result = try await PowerPointConverter().convert(styled, info: StreamInfo(detectedFormat: .pptx))
         #expect(result.sections.first?.metadata["notes"]?.contains("3. ***Note***") == true)
-        #expect(result.sections.first?.metadata["notes"]?.contains("3. ***Cell***") == true, Comment(rawValue: result.sections.first?.metadata["notes"] ?? "missing notes"))
+        #expect(result.sections.first?.metadata["notes"]?.contains("3. ***Cell***") == true)
     }
 
     @Test func notesPicturesAndOLEPreviewsShareCarriersAndReserveExternalNames() async throws {
@@ -68,7 +79,7 @@ struct PowerPointThirdStackReviewTests {
         let reference = try #require(carrier.metadata["markdownReference"])
         #expect(reference != "note.png")
         let notes = try #require(result.sections.first?.metadata["notes"])
-        #expect(notes.components(separatedBy: "![Notes](\(reference))").count - 1 == 2, Comment(rawValue: notes))
+        #expect(notes.components(separatedBy: "![Notes](\(reference))").count - 1 == 2)
         #expect(notes.contains("![Notes](note.png)"))
         #expect(result.sections.filter { $0.kind == .image }.count == 1)
     }
