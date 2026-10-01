@@ -373,11 +373,11 @@ public struct RTFConverter: DocumentConverter {
         nativeParagraphs = nativeParagraphs.map { paragraph in
             var trimmed = paragraph
             for index in trimmed.indices {
-                trimmed[index].text = String(trimmed[index].text.drop { $0.isWhitespace })
+                trimmed[index].text = String(trimmed[index].text.drop { $0 == " " || $0 == "\t" || $0 == "\r" || $0 == "\n" })
                 if !trimmed[index].text.isEmpty { break }
             }
             for index in trimmed.indices.reversed() {
-                trimmed[index].text = String(trimmed[index].text.reversed().drop { $0.isWhitespace }.reversed())
+                trimmed[index].text = String(trimmed[index].text.reversed().drop { $0 == " " || $0 == "\t" || $0 == "\r" || $0 == "\n" }.reversed())
                 if !trimmed[index].text.isEmpty { break }
             }
             return trimmed.filter { !$0.text.isEmpty }

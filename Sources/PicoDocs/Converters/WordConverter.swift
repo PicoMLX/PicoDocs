@@ -783,10 +783,23 @@ public struct WordConverter: DocumentConverter {
     /// The relationship Target (e.g. "media/image1.png") an image references via
     /// `a:blip/@r:embed` (DrawingML) or `v:imagedata/@r:id` (legacy VML).
     private static func imageTarget(in drawing: Element, relationships: [String: String]) -> String? {
-        var relId = (try? drawing.getElementsByTag("a:blip").first()?.attr("r:embed")) ?? ""
+        var relId = (try? drawing.getElementsByTag("a:blip").first()).map(imageRelationshipID) ?? ""
         if relId.isEmpty { relId = (try? drawing.getElementsByTag("v:imagedata").first()?.attr("r:id")) ?? "" }
         guard !relId.isEmpty, let target = relationships[relId], !target.isEmpty else { return nil }
         return target
+    }
+
+    /// Prefer the Office SVG extension to its optional raster fallback, using
+    /// the same relationship identity for Markdown and retained image bytes.
+    private static func imageRelationshipID(_ blip: Element) -> String {
+        if let extensions = try? blip.getElementsByTag("a:ext").array() {
+            for ext in extensions where (try? ext.attr("uri")) == "{96DAC541-7B7A-43D3-8B79-37D633B846F1}" {
+                if let svg = try? ext.getElementsByTag("asvg:svgBlip").first(),
+                   (try? svg.attr("xmlns:asvg")) == "http://schemas.microsoft.com/office/drawing/2016/SVG/main",
+                   let id = try? svg.attr("r:embed"), !id.isEmpty { return id }
+            }
+        }
+        return (try? blip.attr("r:embed")) ?? ""
     }
 
     /// Alt text for an image: `descr` then `name` (from `wp:docPr`, then
@@ -818,7 +831,7 @@ public struct WordConverter: DocumentConverter {
 
         var sections: [DocumentSection] = []
         for element in blips + vmlImages {
-            var relId = (try? element.attr("r:embed")) ?? ""
+            var relId = imageRelationshipID(element)
             if relId.isEmpty { relId = (try? element.attr("r:id")) ?? "" }
             guard !relId.isEmpty, let target = relationships[relId], !target.isEmpty else { continue }
 

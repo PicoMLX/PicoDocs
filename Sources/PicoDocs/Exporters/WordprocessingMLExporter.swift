@@ -224,12 +224,12 @@ public struct WordprocessingMLExporter: DocumentExporter {
     struct DrawingBudget {
         private var remaining: Int
         init(maximumBytes: Int = 16 * 1024 * 1024) { remaining = maximumBytes }
-        mutating func reserve(filename: String, alt: String) throws {
+        mutating func reserve(filename: String, alt: String, additionalBytes: Int = 0) throws {
             let names = filename.utf8.count, description = alt.utf8.count
-            guard remaining >= 1024, names <= (remaining - 1024) / 12 else {
+            guard additionalBytes >= 0, additionalBytes <= remaining, remaining - additionalBytes >= 1024, names <= (remaining - additionalBytes - 1024) / 12 else {
                 throw ExporterError.serializationFailed("DOCX drawing markup exceeds its 16 MiB budget")
             }
-            let fixed = 1024 + names * 12
+            let fixed = 1024 + names * 12 + additionalBytes
             guard description <= (remaining - fixed) / 6 else {
                 throw ExporterError.serializationFailed("DOCX drawing markup exceeds its 16 MiB budget")
             }
@@ -476,8 +476,8 @@ public struct WordprocessingMLExporter: DocumentExporter {
         private func checkedImageRun(alt: String, source: String) throws -> String? {
             guard let image = try images.lookup(source), let data = try image.decodedData() else { return nil }
             let filename = image.mediaFilename
-            try drawingBudget.reserve(filename: filename, alt: alt)
             let ext = (filename as NSString).pathExtension.lowercased()
+            try drawingBudget.reserve(filename: filename, alt: alt, additionalBytes: ext == "svg" ? 256 : 0)
 
             // One media part + one relationship per distinct file; reuse for repeats.
             let relID: String
@@ -505,13 +505,18 @@ public struct WordprocessingMLExporter: DocumentExporter {
             let descr = alt.isEmpty ? "" : " descr=\"\(OOXMLPackageWriter.escapeAttribute(alt))\""
             // Fit the intrinsic aspect ratio inside the existing 5 × 3.75-inch box.
             let (cx, cy) = WordprocessingMLExporter.imageExtents(data, metadata: image.metadata)
+            // Office 2019+ consumes SVG through this extension. Do not label SVG
+            // bytes as a raster blip or synthesize a blank raster fallback.
+            let blip = ext == "svg"
+                ? "<a:blip><a:extLst><a:ext uri=\"{96DAC541-7B7A-43D3-8B79-37D633B846F1}\"><asvg:svgBlip xmlns:asvg=\"http://schemas.microsoft.com/office/drawing/2016/SVG/main\" r:embed=\"\(relID)\"/></a:ext></a:extLst></a:blip>"
+                : "<a:blip r:embed=\"\(relID)\"/>"
             return """
             <w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">\
             <wp:extent cx="\(cx)" cy="\(cy)"/>\
             <wp:docPr id="\(docPrID)" name="\(name)"\(descr)/>\
             <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">\
             <pic:pic><pic:nvPicPr><pic:cNvPr id="\(docPrID)" name="\(name)"/><pic:cNvPicPr/></pic:nvPicPr>\
-            <pic:blipFill><a:blip r:embed="\(relID)"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>\
+            <pic:blipFill>\(blip)<a:stretch><a:fillRect/></a:stretch></pic:blipFill>\
             <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(cx)" cy="\(cy)"/></a:xfrm>\
             <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>\
             </a:graphicData></a:graphic></wp:inline></w:drawing></w:r>

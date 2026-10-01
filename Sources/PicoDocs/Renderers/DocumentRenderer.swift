@@ -622,7 +622,8 @@ public enum DocumentRenderer {
         }
         let namedSheets = result.sections.filter { $0.kind == .sheet }.count
         for section in result.sections where section.kind != .image {
-            if let rawCSV = section.metadata["csv"] {
+            if let rawCSV = section.metadata["csv"], !rawCSV.isEmpty ||
+               ([SectionKind.sheet, .table].contains(section.kind) && section.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
                 flush()
                 if namedSheets > 1, section.kind == .sheet, let name = section.sheetName ?? section.metadata["sheetName"] ?? section.title {
                     parts.append(csvField(name))

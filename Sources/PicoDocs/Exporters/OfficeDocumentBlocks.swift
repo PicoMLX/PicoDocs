@@ -119,7 +119,7 @@ enum OfficeDocumentBlocks {
                 section.markdown = decodedPreservedWhitespace(section.markdown)
             }
             if let csv = section.metadata["csv"] ?? (section.kind == .sheet && section.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil),
-               !csv.isEmpty || [.sheet, .table].contains(section.kind) {
+               !csv.isEmpty || ([.sheet, .table].contains(section.kind) && section.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
                 flush()
                 if section.kind == .sheet, let title = section.sheetName ?? section.metadata["sheetName"] ?? section.title, !title.isEmpty {
                     let escaped = title.map { #"\`*_{}[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined()

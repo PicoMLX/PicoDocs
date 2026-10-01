@@ -39,6 +39,9 @@ public struct PPTXExporter: DocumentExporter {
         }
         let count = max(slides.count, 1)
         let effectiveSlides = slides.isEmpty ? [Slide(title: "", body: [])] : slides
+        let noteSlideIDs = Set(effectiveSlides.indices.filter { effectiveSlides[$0].notes != nil }.map { $0 + 1 })
+        let packageBudget = PackageBudget()
+        try packageBudget.admitStructure(slides: count, noteSlideIDs: noteSlideIDs)
 
         let headings = effectiveSlides.enumerated().flatMap { index, slide in
             let titles = (slide.title.isEmpty ? [] : [slide.title]) + slide.body.filter(\.isHeading).map(\.text)
@@ -48,7 +51,7 @@ public struct PPTXExporter: DocumentExporter {
         let fragmentSlides = Dictionary(uniqueKeysWithValues: zip(fragments, headings.map(\.slide)))
         var pkg = try OOXMLPackageWriter()
         try pkg.addCoreProperties(result)
-        try pkg.addXML("[Content_Types].xml", OOXMLPackageWriter.withCoreContentType(Self.contentTypes(slideCount: count, noteSlideIDs: Set(effectiveSlides.indices.filter { effectiveSlides[$0].notes != nil }.map { $0 + 1 }))))
+        try pkg.addXML("[Content_Types].xml", OOXMLPackageWriter.withCoreContentType(Self.contentTypes(slideCount: count, noteSlideIDs: noteSlideIDs)))
         try pkg.addXML("_rels/.rels", OOXMLPackageWriter.withCoreRelationship(Self.rootRels))
         try pkg.addXML("ppt/presentation.xml", Self.presentationXML(slideCount: count))
         try pkg.addXML("ppt/_rels/presentation.xml.rels", Self.presentationRels(slideCount: count))
@@ -58,11 +61,11 @@ public struct PPTXExporter: DocumentExporter {
         try pkg.addXML("ppt/slideLayouts/_rels/slideLayout1.xml.rels", PPTXTemplates.slideLayoutRels)
         try pkg.addXML("ppt/theme/theme1.xml", PPTXTemplates.theme)
         for (i, slide) in effectiveSlides.enumerated() {
-            var relationships = SlideRelationships()
+            var relationships = SlideRelationships(packageBudget: packageBudget)
             try pkg.addXML("ppt/slides/slide\(i + 1).xml", try Self.slideXML(slide, fragmentSlides: fragmentSlides, relationships: &relationships))
             var extraRels = relationships.xml
             if let notes = slide.notes {
-                var noteRelationships = SlideRelationships()
+                var noteRelationships = SlideRelationships(packageBudget: packageBudget)
                 let number = i + 1
                 try pkg.addXML("ppt/notesSlides/notesSlide\(number).xml", try Self.notesXML(notes, relationships: &noteRelationships))
                 let backlink = "<Relationship Id=\"slide\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"../slides/slide\(number).xml\"/>"
@@ -76,11 +79,61 @@ public struct PPTXExporter: DocumentExporter {
         return try pkg.data()
     }
 
+    /// Matches the reader's package-wide part and relationship envelopes.
+    /// Structural graph reservations precede any package serialization; links
+    /// share this counter across every slide and notes part.
+    final class PackageBudget {
+        private let maximumParts: Int
+        private var relationships: Int
+        private var bytes: Int
+        init(maximumParts: Int = 16_384, maximumRelationships: Int = 65_536, maximumBytes: Int = 16 * 1024 * 1024) {
+            self.maximumParts = maximumParts; relationships = maximumRelationships; bytes = maximumBytes
+        }
+        func admitStructure(slides: Int, noteSlideIDs: Set<Int>) throws {
+            guard slides > 0, maximumParts >= 10, slides <= (maximumParts - 10) / 2,
+                  noteSlideIDs.count <= (maximumParts - 10 - slides * 2) / 2,
+                  noteSlideIDs.allSatisfy({ (1...slides).contains($0) }) else {
+                throw ExporterError.serializationFailed("PPTX parts exceed the reader's package-entry limit")
+            }
+            for part in ["", "ppt/presentation.xml", "ppt/slideMasters/slideMaster1.xml", "ppt/slideLayouts/slideLayout1.xml", "ppt/theme/theme1.xml"] { try reserveMap(part) }
+            try reserveRelationship(id: "rId1", suffix: "officeDocument", target: "ppt/presentation.xml")
+            try reserveRelationship(id: "coreProperties", suffix: "metadata/core-properties", target: "docProps/core.xml", packageType: true)
+            try reserveRelationship(id: "rId1", suffix: "slideMaster", target: "slideMasters/slideMaster1.xml")
+            try reserveRelationship(id: "rId1", suffix: "slideLayout", target: "../slideLayouts/slideLayout1.xml")
+            try reserveRelationship(id: "rId2", suffix: "theme", target: "../theme/theme1.xml")
+            try reserveRelationship(id: "rId1", suffix: "slideMaster", target: "../slideMasters/slideMaster1.xml")
+            for number in 1...slides {
+                try Task.checkCancellation()
+                try reserveMap("ppt/slides/slide\(number).xml")
+                try reserveRelationship(id: "rId\(number + 1)", suffix: "slide", target: "slides/slide\(number).xml")
+                try reserveRelationship(id: "rId1", suffix: "slideLayout", target: "../slideLayouts/slideLayout1.xml")
+                if noteSlideIDs.contains(number) {
+                    try reserveMap("ppt/notesSlides/notesSlide\(number).xml")
+                    try reserveRelationship(id: "notes", suffix: "notesSlide", target: "../notesSlides/notesSlide\(number).xml")
+                    try reserveRelationship(id: "slide", suffix: "slide", target: "../slides/slide\(number).xml")
+                }
+            }
+        }
+        private func reserveMap(_ part: String) throws { try reserveBytes(part.utf8.count + 64) }
+        private func reserveBytes(_ count: Int) throws {
+            guard count <= bytes else { throw ExporterError.serializationFailed("PPTX relationship storage exceeds the reader's aggregate limit") }
+            bytes -= count
+        }
+        func reserveRelationship(id: String, suffix: String, target: String, packageType: Bool = false) throws {
+            guard relationships > 0 else { throw ExporterError.serializationFailed("PPTX relationships exceed the reader's aggregate limit") }
+            let prefix = packageType ? "http://schemas.openxmlformats.org/package/2006/relationships/" : "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+            try reserveBytes(id.utf8.count + prefix.utf8.count + suffix.utf8.count + target.utf8.count + 96)
+            relationships -= 1
+        }
+    }
+
     struct SlideRelationships {
         private var identifiers: [String: String] = [:]
         private(set) var xml = ""
         private var remainingBytes: Int
-        init(maximumBytes: Int = 8 * 1024 * 1024) {
+        private let packageBudget: PackageBudget
+        init(maximumBytes: Int = 8 * 1024 * 1024, packageBudget: PackageBudget = PackageBudget()) {
+            self.packageBudget = packageBudget
             remainingBytes = max(0, maximumBytes - 1024) // package wrapper/layout relationship
         }
         mutating func add(target: String, jump: Bool) throws -> String {
@@ -92,6 +145,7 @@ public struct PPTXExporter: DocumentExporter {
             let id = "hyperlink\(identifiers.count + 1)"
             let type = jump ? "slide" : "hyperlink"
             let mode = jump ? "" : " TargetMode=\"External\""
+            try packageBudget.reserveRelationship(id: id, suffix: type, target: target)
             let fragment = "<Relationship Id=\"\(id)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/\(type)\" Target=\"\(OOXMLPackageWriter.escapeAttribute(target))\"\(mode)/>"
             guard fragment.utf8.count <= remainingBytes else {
                 throw ExporterError.serializationFailed("Slide relationships exceed the supported budget")
@@ -111,7 +165,8 @@ public struct PPTXExporter: DocumentExporter {
         var number: Int = 1
         var level: Int = 0
         var inlines: [MarkdownInline]? = nil
-        var isHeading = false
+        var headingLevel: Int?
+        var isHeading: Bool { headingLevel != nil }
         var listContinuation = false
 
         init(text: String, ordered: Bool? = nil, number: Int = 1, level: Int = 0, inlines: [MarkdownInline]? = nil) {
@@ -235,9 +290,9 @@ public struct PPTXExporter: DocumentExporter {
         var lines: [Paragraph] = []
         for block in blocks {
             switch block {
-            case .heading(_, let text):
+            case .heading(let level, let text):
                 var paragraph = Paragraph(markdown: text)
-                paragraph.isHeading = true
+                paragraph.headingLevel = level
                 lines.append(paragraph)
             case .paragraph(let text):
                 lines.append(Paragraph(markdown: text, normalizeLineBreaks: true))
@@ -291,6 +346,13 @@ public struct PPTXExporter: DocumentExporter {
 
     // MARK: - Slide part
 
+    private static func paragraphProvenance(_ paragraph: Paragraph) -> String {
+        if let level = paragraph.headingLevel, (1...6).contains(level) {
+            return "<a:extLst><a:ext uri=\"https://picomlx.github.io/picodocs/markdown/heading\"><pd:heading xmlns:pd=\"https://picomlx.github.io/picodocs/markdown\" level=\"\(level)\"/></a:ext></a:extLst>"
+        }
+        return paragraph.listContinuation ? "<a:extLst><a:ext uri=\"https://picomlx.github.io/picodocs/markdown/listContinuation\"><pd:listContinuation xmlns:pd=\"https://picomlx.github.io/picodocs/markdown\"/></a:ext></a:extLst>" : ""
+    }
+
     private static func slideXML(_ slide: Slide, fragmentSlides: [String: Int], relationships: inout SlideRelationships) throws -> String {
         let titleRuns = "<a:p>\(try runs(slide.titleInlines ?? [.text(slide.title)], fragmentSlides: fragmentSlides, relationships: &relationships))</a:p>"
         let bodyParagraphs: String
@@ -307,7 +369,7 @@ public struct PPTXExporter: DocumentExporter {
                 case true?: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buAutoNum type=\"arabicPeriod\" startAt=\"\(paragraph.number)\"/></a:pPr>"
                 case false?: properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buChar char=\"•\"/></a:pPr>"
                 case nil:
-                    let provenance = paragraph.listContinuation ? "<a:extLst><a:ext uri=\"https://picomlx.github.io/picodocs/markdown/listContinuation\"><pd:listContinuation xmlns:pd=\"https://picomlx.github.io/picodocs/markdown\"/></a:ext></a:extLst>" : ""
+                    let provenance = paragraphProvenance(paragraph)
                     properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buNone/>\(provenance)</a:pPr>"
                 }
                 let runs = try runs(nodes, fragmentSlides: fragmentSlides, relationships: &relationships)
@@ -397,7 +459,7 @@ public struct PPTXExporter: DocumentExporter {
             } else if paragraph.ordered == false {
                 properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buChar char=\"•\"/></a:pPr>"
             } else {
-                let provenance = paragraph.listContinuation ? "<a:extLst><a:ext uri=\"https://picomlx.github.io/picodocs/markdown/listContinuation\"><pd:listContinuation xmlns:pd=\"https://picomlx.github.io/picodocs/markdown\"/></a:ext></a:extLst>" : ""
+                let provenance = paragraphProvenance(paragraph)
                 properties = "<a:pPr lvl=\"\(min(paragraph.level, 8))\"><a:buNone/>" + provenance + "</a:pPr>"
             }
             var nodes = paragraph.inlines ?? [.text(paragraph.text)]

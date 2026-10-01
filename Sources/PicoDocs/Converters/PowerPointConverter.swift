@@ -967,6 +967,18 @@ public struct PowerPointConverter: DocumentConverter {
                 continue
             }
 
+            if case .plain = mode, let properties,
+               let extensions = selectedChild(of: properties, named: "a:extlst"),
+               let entry = selectedChildren(in: extensions).first(where: {
+                   $0.tagName().lowercased() == "a:ext" && (try? $0.attr("uri")) == "https://picomlx.github.io/picodocs/markdown/heading"
+               }), let heading = entry.children().first(), heading.tagName().lowercased() == "pd:heading",
+               let headingLevel = integerValue(try? heading.attr("level")), (1...6).contains(headingLevel) {
+                flushList()
+                let prefix = String(repeating: "#", count: headingLevel) + " "
+                appendBlock(paragraphBudget?.join([prefix, text]) ?? (prefix + text))
+                continue
+            }
+
             let marker: String?
             switch mode {
             case .plain:
