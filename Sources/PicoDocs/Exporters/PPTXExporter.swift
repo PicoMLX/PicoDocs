@@ -193,7 +193,7 @@ public struct PPTXExporter: DocumentExporter {
                       }
                 let noteSections = sections.filter { $0.kind == .slide }.compactMap { section -> DocumentSection? in
                     guard let notes = section.metadata["notes"] else { return nil }
-                    return DocumentSection(markdown: OOXMLPackageWriter.xmlSafeText(notes), metadata: ["powerPointWhitespace": section.metadata["powerPointWhitespace"] ?? "0"])
+                    return DocumentSection(markdown: OOXMLPackageWriter.xmlSafeText(notes), metadata: ["preservedWhitespace": section.metadata["preservedWhitespace"] ?? "0"])
                 }
                 let notes = noteSections.isEmpty ? nil : bodyLines(OfficeDocumentBlocks.parse(ConverterResult(sections: noteSections), includeSlideTitles: false))
                 return Slide(title: title, body: body, titleInlines: titleInlines, notes: notes)

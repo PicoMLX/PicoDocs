@@ -115,8 +115,8 @@ enum OfficeDocumentBlocks {
         }
         for original in result.sections where original.kind != .image {
             var section = original
-            if section.metadata["powerPointWhitespace"] == "1" {
-                section.markdown = decodedPowerPointWhitespace(section.markdown)
+            if section.metadata["preservedWhitespace"] == "1" {
+                section.markdown = decodedPreservedWhitespace(section.markdown)
             }
             if let csv = section.metadata["csv"] ?? (section.kind == .sheet && section.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil),
                !csv.isEmpty || [.sheet, .table].contains(section.kind) {
@@ -157,9 +157,9 @@ enum OfficeDocumentBlocks {
         flush()
         return blocks
     }
-    /// Numeric whitespace belongs only to marked PowerPoint producers. Literal
+    /// Numeric whitespace belongs only to producers carrying the ownership flag. Literal
     /// ampersands already carry an odd backslash prefix and stay literal.
-    static func decodedPowerPointWhitespace(_ text: String) -> String {
+    static func decodedPreservedWhitespace(_ text: String) -> String {
         let regex = try! NSRegularExpression(pattern: #"&#([0-9]{1,7});"#)
         let source = text as NSString
         var output = "", offset = 0

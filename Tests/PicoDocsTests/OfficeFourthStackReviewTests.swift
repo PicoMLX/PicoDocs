@@ -13,7 +13,7 @@ struct OfficeFourthStackReviewTests {
         #expect(native.contains("Presenter"))
         let converted = try await PicoDocsEngine.convert(data: first, filename: "notes.pptx")
         let convertedNotes = try #require(converted.sections.first?.metadata["notes"])
-        #expect(OfficeDocumentBlocks.decodedPowerPointWhitespace(convertedNotes) == notes)
+        #expect(OfficeDocumentBlocks.decodedPreservedWhitespace(convertedNotes) == notes)
         let second = try PicoDocsEngine.write(converted, to: .pptx)
         let again = try await PicoDocsEngine.convert(data: second, filename: "notes-again.pptx")
         #expect(again.sections.first?.metadata["notes"] == convertedNotes)
