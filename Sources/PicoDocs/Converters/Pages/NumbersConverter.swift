@@ -71,7 +71,7 @@ public struct NumbersConverter: DocumentConverter {
         for sheet in sheets {
             let tables = attribution.byRoot[sheet.id] ?? []
             var markdown = tables.joined(separator: "\n\n")
-            if let name = sheet.name { markdown = "## " + MarkdownLiteral.escapePunctuation(name, characters: #"\`*_{}[]<>#&"#).replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ") + "\n\n" + markdown }
+            if let name = sheet.name { markdown = "## " + Self.literalHeading(name) + "\n\n" + markdown }
             sections.append(DocumentSection(title: sheet.name, kind: .sheet, markdown: markdown, sheetName: sheet.name))
         }
         // Partial reachability must not drop the remaining physical tables.
@@ -89,17 +89,36 @@ public struct NumbersConverter: DocumentConverter {
         let sheetObjects = objects.filter { $0.type == sheetArchiveType }
         let byID = Dictionary(sheetObjects.map { ($0.identifier, $0) }, uniquingKeysWith: { first, _ in first })
 
-        var order: [UInt64] = []
+        var order: [UInt64] = [], seen: Set<UInt64> = []
         if let document = objects.first(where: { $0.type == documentArchiveType }) {
             var reader = ProtobufReader(document.payload)
             while let field = reader.next() {
                 guard field.number == 1, case .length(let reference) = field.value,
-                      let id = referencedID(reference), byID[id] != nil, !order.contains(id) else { continue }
+                      let id = referencedID(reference), byID[id] != nil, seen.insert(id).inserted else { continue }
                 order.append(id)
             }
         }
-        if order.isEmpty { order = sheetObjects.map(\.identifier) }
+        // Retain stream-order recovery after the references that did resolve.
+        for sheet in sheetObjects where seen.insert(sheet.identifier).inserted { order.append(sheet.identifier) }
         return order.map { ($0, byID[$0].flatMap(sheetName)) }
+    }
+
+    private static func literalHeading(_ name: String) -> String {
+        let text = name.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+        let scalars = text.unicodeScalars
+        let leading = scalars.prefix { CharacterSet.whitespaces.contains($0) }.count
+        let trailing = scalars.reversed().prefix { CharacterSet.whitespaces.contains($0) }.count
+        let end = scalars.count - trailing
+        var heading = ""
+        for (index, scalar) in scalars.enumerated() {
+            if index < leading || index >= end || scalar == "\t" {
+                heading += "&#\(scalar.value);"
+            } else {
+                if #"\`*_{}[]<>#&"#.unicodeScalars.contains(scalar) { heading += "\\" }
+                heading.unicodeScalars.append(scalar)
+            }
+        }
+        return heading
     }
 
     private static func sheetName(_ sheet: IWAArchive.Object) -> String? {
