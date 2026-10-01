@@ -23,6 +23,62 @@ import PDFKit
 
 @Suite("OCR (Vision)")
 struct OCRTests {
+    @Test func recognizedFrameTextSharesCodeContextAndRetainsPageGaps() throws {
+        let literal = ConverterResult(sections: ImageOCRConverter.sections(from: [#"C:\*"#], filename: "scan.png"))
+        for format in [ExportFileType.html, .plaintext] {
+            #expect(try DocumentRenderer.render(literal, to: format).contains(#"C:\*"#))
+        }
+        let sections = ImageOCRConverter.sections(from:["```","",#"a\*b"#,"```"],filename:"frames.tiff")
+        #expect(sections.map(\.pageRange) == [1...1,3...3,4...4])
+        #expect(sections.allSatisfy { $0.metadata["extractionMethod"] == "vision-ocr" })
+        let result = ConverterResult(sections:sections)
+        for format in [ExportFileType.html,.plaintext] {
+            let text = try DocumentRenderer.render(result,to:format)
+            #expect(text.contains(#"a\*b"#)); #expect(!text.contains(#"a\\*b"#))
+        }
+    }
+
+    @Test func PDFCodeFencesSpanPageBoundaries() async throws {
+        let data = NSMutableData()
+        let consumer = CGDataConsumer(data: data as CFMutableData)!
+        var box = CGRect(x:0,y:0,width:800,height:200)
+        let context = CGContext(consumer:consumer,mediaBox:&box,nil)!
+        let attributes: [CFString:Any] = [kCTFontAttributeName:CTFontCreateWithName("Courier" as CFString,28,nil)]
+        for text in ["```", #"a\*b"#, "```"] {
+            context.beginPDFPage(nil)
+            context.textPosition = CGPoint(x:30,y:80)
+            CTLineDraw(CTLineCreateWithAttributedString(CFAttributedStringCreate(nil,text as CFString,attributes as CFDictionary)!),context)
+            context.endPDFPage()
+        }
+        context.closePDF()
+        let result = try await PicoDocsEngine.convert(data:data as Data,filename:"pages.pdf")
+        #expect(result.sections.count == 3)
+        #expect(result.sections[1].pageRange == 2...2)
+        for format in [ExportFileType.html,.plaintext] {
+            let output = try DocumentRenderer.render(result,to:format)
+            #expect(output.contains(#"a\*b"#)); #expect(!output.contains(#"a\\*b"#))
+        }
+    }
+
+
+    @Test("Selectable PDF backslashes survive rendered exports")
+    func selectablePDFLiteralBackslashes() async throws {
+        let literal = ##"Path \* and \#"##
+        let data = NSMutableData()
+        let consumer = CGDataConsumer(data: data as CFMutableData)!
+        var mediaBox = CGRect(x: 0, y: 0, width: 800, height: 200)
+        let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil)!
+        context.beginPDFPage(nil)
+        let attributes: [CFString: Any] = [kCTFontAttributeName: CTFontCreateWithName("Helvetica" as CFString, 28, nil)]
+        let line = CTLineCreateWithAttributedString(CFAttributedStringCreate(nil, literal as CFString, attributes as CFDictionary)!)
+        context.textPosition = CGPoint(x: 30, y: 80)
+        CTLineDraw(line, context)
+        context.endPDFPage(); context.closePDF()
+        let result = try await PicoDocsEngine.convert(data: data as Data, filename: "literal.pdf")
+        for format in [ExportFileType.html,.plaintext,.csv] { #expect(try DocumentRenderer.render(result, to: format).contains(literal)) }
+    }
+
+
 
     @Test("Image OCR converter extracts text from an image")
     func imageOCR() async throws {

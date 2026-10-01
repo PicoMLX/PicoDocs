@@ -191,6 +191,7 @@ enum IWATable {
     /// traits and link URLs pre-resolved so rendering needs no further object lookups.
     private struct BodyStorage {
         let units: [UInt16]
+        let escapedBackslashes: [Int]
         let paragraphStyles: [(offset: Int, id: UInt64?)]
         let characterStyles: [(offset: Int, id: UInt64?)]
         let smartFields: [(offset: Int, id: UInt64?)]
@@ -211,7 +212,7 @@ enum IWATable {
         for id in Set(smartFields.compactMap(\.id)) where objects[id]?.type == hyperlinkFieldType {
             if let url = hyperlinkURL(of: id, in: objects) { links[id] = url }
         }
-        return BodyStorage(units: Array(text.utf16),
+        return BodyStorage(units: Array(text.utf16), escapedBackslashes: MarkdownLiteral.backslashEscapeCounts(text, paragraphSeparators: [0x0A, 0x0D, 0x2029]),
                            paragraphStyles: indexedReferences(in: storage, field: 5),
                            characterStyles: characterStyles, smartFields: smartFields,
                            traits: traits, links: links)
@@ -284,6 +285,7 @@ enum IWATable {
             if emphasis { trait = referenceID(at: index, in: body.characterStyles).flatMap { body.traits[$0] } }
             let url = referenceID(at: index, in: body.smartFields).flatMap { body.links[$0] }
             items.append((unit, trait?.bold ?? false, trait?.italic ?? false, url))
+            for _ in 0..<body.escapedBackslashes[index] { items.append((unit, trait?.bold ?? false, trait?.italic ?? false, url)) }
         }
         var output = ""
         var i = 0

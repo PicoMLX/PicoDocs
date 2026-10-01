@@ -141,7 +141,7 @@ public struct KeynoteConverter: DocumentConverter {
 
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
         let title = (info.filename?.isEmpty == false) ? info.filename : nil
-        return ConverterResult(title: title, sections: sections)
+        return ConverterResult(title: title, sections: MarkdownLiteral.escapeSectionBackslashes(sections))
     }
 
     // MARK: - Slide identification

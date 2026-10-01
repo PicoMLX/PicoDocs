@@ -14,6 +14,23 @@ import Testing
 @testable import PicoDocs
 
 struct PagesConverterTests {
+    @Test func literalPagesBackslashesSurviveInlineAndFallbackExtraction() async throws {
+        let source = #"C:\* and `code\*`"#
+        let inline = Self.makePagesFile(paragraphs: [source])
+        let fallback = Self.makeZip([(name: "Index/Alternate.iwa", data: Self.snappyFrame(Self.makeIWAStream(runs: [source])))])
+        for data in [inline, fallback] {
+            let result = try await PicoDocsEngine.convert(data: data, filename: "literal.pages")
+            for format in [ExportFileType.html, .plaintext] {
+                let text = try DocumentRenderer.render(result, to: format)
+                #expect(text.contains(#"C:\*"#)); #expect(text.contains(#"code\*"#))
+                #expect(!text.contains(#"code\\*"#))
+            }
+        }
+        let paragraphs = Self.makePagesFile(paragraphs: ["`open", #"\* `close"#])
+        let result = try await PicoDocsEngine.convert(data: paragraphs, filename: "paragraphs.pages")
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains(#"\* `close"#))
+    }
+
 
     // MARK: - Snappy
 

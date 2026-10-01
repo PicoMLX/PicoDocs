@@ -77,7 +77,7 @@ public struct RTFConverter: DocumentConverter {
         var pendingBytes: [UInt8] = []
 
         var runs: [Run] = []
-        var paragraphs: [String] = []
+        var paragraphs: [[Run]] = []
 
         func appendText(_ s: String) {
             guard !ignore, !s.isEmpty else { return }
@@ -99,10 +99,8 @@ public struct RTFConverter: DocumentConverter {
         }
 
         func flushParagraph() {
-            let rendered = runs.map { renderRun($0) }.joined()
+            if runs.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) { paragraphs.append(runs) }
             runs.removeAll(keepingCapacity: true)
-            let trimmed = rendered.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { paragraphs.append(trimmed) }
         }
 
         while i < n {
@@ -267,7 +265,26 @@ public struct RTFConverter: DocumentConverter {
         }
         flushBytes()
         flushParagraph()
-        return paragraphs.joined(separator: "\n\n")
+        // Compute escaping from source text before inserting style delimiters,
+        // retaining code context across runs and paragraph boundaries.
+        let source = paragraphs.map { $0.map(\.text).joined() }.joined(separator: "\n\n")
+        let escapes = MarkdownLiteral.backslashEscapeCounts(source)
+        var offset = 0
+        return paragraphs.map { paragraph in
+            let rendered = paragraph.map { run in
+                var escapedRun = run
+                var units: [UInt16] = []
+                for unit in run.text.utf16 {
+                    units.append(unit)
+                    for _ in 0..<escapes[offset] { units.append(unit) }
+                    offset += 1
+                }
+                escapedRun.text = String(decoding: units, as: UTF16.self)
+                return renderRun(escapedRun)
+            }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+            offset += 2
+            return rendered
+        }.joined(separator: "\n\n")
     }
 
     /// Windows code pages that are double-byte (DBCS): one character may span two
