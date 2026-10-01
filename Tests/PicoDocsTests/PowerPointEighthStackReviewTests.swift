@@ -49,6 +49,26 @@ struct PowerPointEighthStackReviewTests {
         #expect(try await PicoDocsEngine.convert(data: data).markdown() == hinted.markdown())
     }
 
+    @Test func inheritedBackgroundUsesItsOwningPartAndExplicitOverrides() async throws {
+        let background = "<p:bg><p:bgPr><a:blipFill><a:blip r:embed='bg'/></a:blipFill></p:bgPr></p:bg>"
+        for owner in ["layout", "master"] {
+            let layout = "<p:sldLayout " + B.namespaces + "><p:cSld>" + (owner == "layout" ? background : "") + "<p:spTree/></p:cSld></p:sldLayout>"
+            let master = "<p:sldMaster " + B.namespaces + "><p:cSld>" + (owner == "master" ? background : "") + "<p:spTree/></p:cSld></p:sldMaster>"
+            let layoutRelations = B.relationshipsXML([("master", N.rel + "slideMaster", "../slideMasters/m.xml")] + (owner == "layout" ? [("bg", N.rel + "image", "../media/background.png")] : []))
+            let masterRelations = B.relationshipsXML(owner == "master" ? [("bg", N.rel + "image", "../media/background.png")] : [])
+            let seed = B.deck(slides: [.init(file: "s.xml", shapes: "", relationships: [("layout", N.rel + "slideLayout", "../slideLayouts/l.xml")])], extraParts: [("ppt/slideLayouts/l.xml", Array(layout.utf8)), ("ppt/slideLayouts/_rels/l.xml.rels", Array(layoutRelations.utf8)), ("ppt/slideMasters/m.xml", Array(master.utf8)), ("ppt/slideMasters/_rels/m.xml.rels", Array(masterRelations.utf8)), ("ppt/media/background.png", [1, 2, 3])])
+            let result = try await PowerPointConverter().convert(seed, info: StreamInfo(detectedFormat: .pptx))
+            #expect(result.markdown() == "![image](background.png)")
+            #expect(result.sections.last?.sourcePath == "ppt/media/background.png")
+            let overridden = try R.replacing(seed, part: "ppt/slides/s.xml") {
+                $0.replacingOccurrences(of: "<p:spTree>", with: "<p:bg><p:bgPr><a:solidFill><a:srgbClr val='FFFFFF'/></a:solidFill></p:bgPr></p:bg><p:spTree>" + B.titleShape("Override"))
+            }
+            let overrideResult = try await PowerPointConverter().convert(overridden, info: StreamInfo(detectedFormat: .pptx))
+            #expect(overrideResult.markdown() == "## Override")
+            #expect(!overrideResult.sections.contains { $0.kind == .image })
+        }
+    }
+
     @Test func textBoxesUseBodyStyleWhileShapesUseOtherStyle() async throws {
         let shape = N.text("Shape text")
         let textBox = N.text("Box text").replacingOccurrences(of: "<p:cNvSpPr/>", with: "<p:cNvSpPr txBox='1'/>")

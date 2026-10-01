@@ -433,11 +433,21 @@ public struct PowerPointConverter: DocumentConverter {
         }
         var title: String?
         var blocks: [String] = []
-        if let background = selectedChild(of: common, named: "p:bg"),
-           let properties = selectedChild(of: background, named: "p:bgpr"),
-           let fill = selectedChild(of: properties, named: "a:blipfill"),
-           let image = blipMarkdown(fill, properties: nil, context: &context) {
-            context.appendBlock(image, to: &blocks)
+        let backgroundOwners = [(common, Optional(context.partPath)),
+                                (context.layout?.children().first().flatMap { context.styles.child(of: $0, named: "p:csld") }, context.layoutPath),
+                                (context.master?.children().first().flatMap { context.styles.child(of: $0, named: "p:csld") }, context.masterPath)]
+        for (owner, path) in backgroundOwners {
+            guard let owner, let path, let background = context.styles.child(of: owner, named: "p:bg") else { continue }
+            if let properties = context.styles.child(of: background, named: "p:bgpr"),
+               let fill = context.styles.child(of: properties, named: "a:blipfill") {
+                var backgroundContext = context
+                backgroundContext.partPath = path
+                backgroundContext.relationships = relationships(context.archive, forPart: path)
+                if let image = blipMarkdown(fill, properties: nil, context: &backgroundContext) { context.appendBlock(image, to: &blocks) }
+            }
+            // Any explicitly defined background overrides its ancestors,
+            // including solid fills and theme background references.
+            break
         }
         let showInherited = !["0", "false"].contains(booleanValue((try? root.attr("showMasterSp")) ?? ""))
         let showMaster = !["0", "false"].contains(booleanValue((try? context.layout?.children().first()?.attr("showMasterSp")) ?? ""))
