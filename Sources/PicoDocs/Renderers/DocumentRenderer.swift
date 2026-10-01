@@ -29,7 +29,7 @@ public enum DocumentRenderer {
         case .markdown:
             return result.markdown()
         case .plaintext:
-            return renderPlaintext(result)
+            return try renderPlaintext(result)
         case .html:
             return try renderHTML(result)
         case .xml:
@@ -41,10 +41,10 @@ public enum DocumentRenderer {
 
     // MARK: - Plaintext
 
-    private static func renderPlaintext(_ result: ConverterResult) -> String {
+    private static func renderPlaintext(_ result: ConverterResult) throws -> String {
         let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
         let parsed = parseBlocks(bodyMarkdown)
-        let numbers = footnoteNumbers(blocks: parsed, notes: notes)
+        let numbers = try footnoteNumbers(blocks: parsed, notes: notes)
         let out = plaintextBlocks(parsed, footnoteNumbers: numbers)
         var text = out.joined(separator: "\n\n")
         // Append numbered definitions for referenced notes (parseBlocks would
@@ -128,7 +128,7 @@ public enum DocumentRenderer {
     private static func renderHTML(_ result: ConverterResult) throws -> String {
         let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
         let parsed = parseBlocks(bodyMarkdown)
-        let numbers = footnoteNumbers(blocks: parsed, notes: notes)
+        let numbers = try footnoteNumbers(blocks: parsed, notes: notes, maximumProtectedBytes: 64 * 1024 * 1024)
         let budget = HTMLBudget()
         let blocks = try htmlBlocks(parsed, footnoteNumbers: numbers, budget: budget)
         var bodyHTML = blocks.joined(separator: "\n")
@@ -395,7 +395,7 @@ public enum DocumentRenderer {
     /// numbered while visible body numbers stay in document order. Unreferenced
     /// definitions get no number (and so aren't rendered), matching how Markdown
     /// footnote processors treat them.
-    private static func footnoteNumbers(blocks: [Block], notes: [(id: String, text: String)]) -> [String: Int] {
+    private static func footnoteNumbers(blocks: [Block], notes: [(id: String, text: String)], maximumProtectedBytes: Int = Int.max) throws -> [String: Int] {
         guard !notes.isEmpty else { return [:] }
         let noteText = Dictionary(notes.map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })
         var numbers: [String: Int] = [:]
@@ -408,11 +408,11 @@ public enum DocumentRenderer {
             numbers[id] = next; next += 1
             pending.append(id)        // defer scanning its body (breadth-first)
         }
-        func scan(_ text: String) {
+        func scan(_ text: String) throws {
             // Mirror inlineHTML/stripInline: code spans and links become
             // placeholders, so a `[^id]` inside them isn't treated as a reference.
             let (afterCode, _) = extractCodeSpans(text)
-            let protected = protectEscapes(afterCode)
+            let protected = try boundedProtectEscapes(afterCode, maximumBytes: maximumProtectedBytes)
             let (afterLinks, _) = extractLinks(protected)
             var cursor = afterLinks.startIndex
             while let open = afterLinks.range(of: "[^", range: cursor..<afterLinks.endIndex) {
@@ -422,26 +422,26 @@ public enum DocumentRenderer {
             }
         }
 
-        func scanBlocks(_ blocks: [Block], depth: Int = 0) {
+        func scanBlocks(_ blocks: [Block], depth: Int = 0) throws {
             for block in blocks {
                 switch block {
                 case .code, .rule: continue        // code blocks never render footnote refs
-                case .heading(_, let text): scan(text)
-                case .paragraph(let text): scan(text)
-                case .blockquote(let lines): lines.forEach(scan)
+                case .heading(_, let text): try scan(text)
+                case .paragraph(let text): try scan(text)
+                case .blockquote(let lines): try lines.forEach(scan)
                 case .list(_, _, let items):
-                    if depth < maxListNesting { items.forEach { scanBlocks(parseBlocks(listItemText($0)), depth: depth + 1) } }
-                    else { items.forEach { scan(listItemText($0)) } }
-                case .table(let rows): rows.forEach { $0.forEach(scan) }
+                    if depth < maxListNesting { try items.forEach { try scanBlocks(parseBlocks(listItemText($0)), depth: depth + 1) } }
+                    else { try items.forEach { try scan(listItemText($0)) } }
+                case .table(let rows): try rows.forEach { try $0.forEach(scan) }
                 }
             }
         }
-        scanBlocks(blocks)
+        try scanBlocks(blocks)
         // Number notes referenced only from other notes after all body references
         // (breadth-first), so visible body numbers stay in document order.
         var index = 0
         while index < pending.count {
-            scan(noteText[pending[index]] ?? "")
+            try scan(noteText[pending[index]] ?? "")
             index += 1
         }
         return numbers
@@ -970,7 +970,7 @@ public enum DocumentRenderer {
 
     private static func inlineHTML(_ text: String, footnoteNumbers: [String: Int] = [:], budget: HTMLBudget) throws -> String {
         let (afterCode, spans) = extractCodeSpans(text)
-        let protected = protectEscapes(afterCode)
+        let protected = try boundedProtectEscapes(afterCode, maximumBytes: budget.remaining)
         let (afterLinks, links) = extractLinks(protected)
         var result = applyEmphasisHTML(escapeHTML(afterLinks))
         // Footnote references: `[^id]` -> a superscript link. Done here, where code
@@ -1139,6 +1139,27 @@ public enum DocumentRenderer {
             offset = NSMaxRange(match.range)
         }
         return output + ns.substring(from: offset)
+    }
+
+    static func boundedProtectEscapes(_ text: String, maximumBytes: Int = 64 * 1024 * 1024) throws -> String {
+        let scalars = text.unicodeScalars
+        var projected = 0, index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index], next = scalars.index(after: index)
+            let bytes: Int
+            if scalar == "\u{E006}" { bytes = 6; index = next }
+            else if scalar == "\\", next < scalars.endIndex,
+                    #"\`*_{}[]<>()#+-.!|&"#.unicodeScalars.contains(scalars[next]) {
+                bytes = 6; index = scalars.index(after: next)
+            } else {
+                let value = scalar.value
+                bytes = value <= 0x7F ? 1 : value <= 0x7FF ? 2 : value <= 0xFFFF ? 3 : 4
+                index = next
+            }
+            guard bytes <= maximumBytes - projected else { throw PicoDocsError.fileCorrupted }
+            projected += bytes
+        }
+        return protectEscapes(text)
     }
 
     private static func protectEscapes(_ text: String) -> String {
