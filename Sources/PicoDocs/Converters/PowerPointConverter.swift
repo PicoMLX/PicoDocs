@@ -198,7 +198,7 @@ public struct PowerPointConverter: DocumentConverter {
         return paths
     }
 
-    /// Speaker notes for a slide, from its notes-slide part's body placeholder.
+    /// Visible Notes Page content, including inherited non-placeholder master shapes.
     static func notes(forSlide slidePath: String, relationships: [String: Relationship], archive: PowerPointPackage, parts: inout PartCache, renderBudget: RenderBudget? = nil, defaultTextStyle: Element? = nil, images: ImageCollector? = nil) -> String? {
         let noteRelations = relationshipsOfType("/notesSlide", archive: archive, part: slidePath, map: relationships)
         guard noteRelations.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
@@ -229,6 +229,7 @@ public struct PowerPointConverter: DocumentConverter {
             let path = Self.resolvePartPath(master.target, relativeTo: directory(of: notesPath))
             guard let document = parts.document(path, root: "p:notesmaster") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
             context.master = document
+            context.masterPath = path
             context.placeholders = parts.placeholders
             context.styles = StyleChildCache(shared: parts.styles)
         }
@@ -263,6 +264,18 @@ public struct PowerPointConverter: DocumentConverter {
                     if let image = pictureMarkdown(shape, context: &context) { context.appendBlock(image, to: &paragraphs) }
                 }
             }
+        }
+        if !["0", "false"].contains((try? root.attr("showMasterSp")) ?? ""),
+           let master = context.master, let path = context.masterPath,
+           let masterRoot = master.children().first(),
+           let common = context.styles.child(of: masterRoot, named: "p:csld"),
+           let masterTree = context.styles.child(of: common, named: "p:sptree") {
+            var masterContext = context
+            masterContext.partPath = path
+            masterContext.relationships = Self.relationships(archive, forPart: path)
+            var ignoredTitle: String?
+            renderShapes(in: masterTree, title: &ignoredTitle, blocks: &paragraphs, context: &masterContext, inheritedOnly: true)
+            context.renderedBlockBytes = masterContext.renderedBlockBytes
         }
         appendNotes(in: tree)
         let text = (renderBudget?.join(paragraphs, separator: "\n\n") ?? paragraphs.joined(separator: "\n\n")).trimmingCharacters(in: .whitespacesAndNewlines)
