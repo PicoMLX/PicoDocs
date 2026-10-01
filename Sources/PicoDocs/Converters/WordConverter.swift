@@ -215,20 +215,24 @@ public struct WordConverter: DocumentConverter {
         let heading: Int?
         if let numbering { heading = numbering.headingLevel(style: style, paragraphProperties: properties) }
         else { heading = headingLevel(forStyle: style) }
-        let prefix = numbering.map { $0.prefix(numPr: numPr, style: style, visibleMarker: heading == nil, paragraphProperties: properties) } ?? (numPr != nil ? "- " : nil)
-        guard !text.isEmpty else { return heading == nil ? prefix : nil }
+        let prefix: String?
+        if let numbering {
+            prefix = numbering.prefix(numPr: numPr, style: style, visibleMarker: heading == nil, paragraphProperties: properties)
+                ?? (numPr?.children().size() == 0 ? "- " : nil)
+        } else { prefix = numPr != nil ? "- " : nil }
+        let boundary = numbering?.listRestartIndent.map {
+            String(repeating: " ", count: $0) + MarkdownLiteral.listRestartBoundary + "\n\n"
+        } ?? ""
+        guard !text.isEmpty else { return heading == nil ? prefix.map { boundary + $0 } : nil }
 
         if let level = heading {
             return String(repeating: "#", count: level) + " " + text
         }
         guard let prefix else { return text }
-        // Keep a multi-line item (manual `w:br`) inside the item.
+        // Preserve Word's marker width while protecting literal continuation blocks.
         let continuation = "\n" + String(repeating: " ", count: WordListNumbering.displayWidth(prefix))
-        let escaped = MarkdownTableCell.mapCodeSpans(text, code: { $0.replacingOccurrences(of: "  \n", with: " ").replacingOccurrences(of: "\n", with: " ") }, plain: { plain in
-            plain.replacingOccurrences(of: #"(\n[ \t]*)([-*+])(?=\s|$)"#, with: #"$1\\$2"#, options: .regularExpression)
-                .replacingOccurrences(of: #"(\n[ \t]*)([0-9]+)([.)])(?=\s|$)"#, with: #"$1$2\\$3"#, options: .regularExpression)
-        })
-        return prefix + escaped.replacingOccurrences(of: "\n", with: continuation)
+        return boundary + prefix + text.components(separatedBy: "\n")
+            .map { MarkdownLiteral.escapeBlockStart($0) }.joined(separator: continuation)
     }
 
     static func headingLevel(forStyle style: String?) -> Int? {
@@ -245,48 +249,16 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Inline content (runs, hyperlinks)
 
-    /// Code delimiters can span Word runs, so escape using paragraph-wide source
-    /// context before adding generated emphasis or hyperlink syntax.
-    private final class InlineEscapes {
-        let counts: [Int]
-        var offset = 0
-        init(_ element: Element) { counts = MarkdownLiteral.backslashEscapeCounts(Self.source(element)) }
-        private static func source(_ element: Element) -> String {
-            switch element.tagName().lowercased() {
-            case "w:ppr", "w:rpr", "w:drawing", "w:pict": return ""
-            case "w:t": return element.getChildNodes().compactMap { ($0 as? TextNode)?.getWholeText() }.joined()
-            case "w:tab": return "\t"
-            case "w:br", "w:cr": return "  \n"
-            default: return element.children().array().map(source).joined()
-            }
-        }
-        func escape(_ text: String) -> String {
-            var units: [UInt16] = []
-            for unit in text.utf16 {
-                units.append(unit)
-                if counts.indices.contains(offset), counts[offset] > 0 {
-                    units += Array(repeating: 0x5C, count: counts[offset])
-                }
-                offset += 1
-            }
-            return String(decoding: units, as: UTF16.self)
-        }
-    }
-
     static func renderInline(_ container: Element, relationships: [String: String]) -> String {
-        renderInline(container, relationships: relationships, escapes: InlineEscapes(container))
-    }
-
-    private static func renderInline(_ container: Element, relationships: [String: String], escapes: InlineEscapes) -> String {
         var out = ""
         for child in container.children().array() {
             switch child.tagName().lowercased() {
             case "w:ppr":
                 continue // paragraph properties, not content
             case "w:r":
-                out += renderRun(child, relationships: relationships, escapes: escapes)
+                out += renderRun(child, relationships: relationships)
             case "w:hyperlink":
-                let inner = renderInline(child, relationships: relationships, escapes: escapes)
+                let inner = renderInline(child, relationships: relationships)
                 let relId = (try? child.attr("r:id")) ?? ""
                 if let url = relationships[relId], !url.isEmpty, !inner.isEmpty {
                     if isImageOnlyMarkdown(inner) {
@@ -303,24 +275,22 @@ public struct WordConverter: DocumentConverter {
                         // label needs a structured inline representation (a run-level
                         // "contains image" signal) — a deliberately deferred
                         // enhancement for this narrow icon+label case.
-                        out += "[\(escapeLinkLabel(inner))](\(escapeLinkDestination(url)))"
+                        out += "[\(escapeCanonicalLabel(inner))](\(escapeLinkDestination(url)))"
                     }
                 } else {
                     out += inner
                 }
             default:
                 // smartTag / ins / proofErr / other wrappers: recurse for nested runs.
-                out += renderInline(child, relationships: relationships, escapes: escapes)
+                out += renderInline(child, relationships: relationships)
             }
         }
         return out
     }
 
     static func renderRun(_ run: Element, relationships: [String: String]) -> String {
-        renderRun(run, relationships: relationships, escapes: InlineEscapes(run))
-    }
+        // Source text is escaped once before generated inline formatting.
 
-    private static func renderRun(_ run: Element, relationships: [String: String], escapes: InlineEscapes) -> String {
         // The run's own `w:rPr` only — not one from a text box drawn inside it.
         let properties = child(of: run, named: "w:rpr")
         let bold = isFormattingEnabled(properties, tag: "w:b")
@@ -345,16 +315,12 @@ public struct WordConverter: DocumentConverter {
                 // Read raw text nodes to preserve significant whitespace
                 // (w:t may carry xml:space="preserve").
                 for child in node.getChildNodes() {
-                    if let textNode = child as? TextNode {
-                        // Literal source backslashes must survive canonical
-                        // Markdown escape decoding in downstream renderers.
-                        textBuffer += escapes.escape(textNode.getWholeText())
-                    }
+                    if let textNode = child as? TextNode { textBuffer += escapeLiteralText(textNode.getWholeText()) }
                 }
             case "w:tab":
-                textBuffer += escapes.escape("\t")
+                textBuffer += "\t"
             case "w:br", "w:cr":
-                textBuffer += escapes.escape("  \n")
+                textBuffer += "  \n"
             case "w:drawing", "w:pict":
                 flushText()
                 out += imageMarkdown(in: node, relationships: relationships)   // not wrapped in emphasis
@@ -383,8 +349,24 @@ public struct WordConverter: DocumentConverter {
         return true
     }
 
-    private static func escapeLinkLabel(_ text: String) -> String {
-        MarkdownTableCell.mapCodeSpans(text, code: { $0 }, plain: { MarkdownLiteral.escapeStructural($0, characters: "[]") })
+    private static func escapeLiteralText(_ text: String) -> String {
+        MarkdownLiteral.escapePunctuation(text, characters: #"\`*_{}[]<>"#)
+    }
+
+    /// Generated inline content already has escaped source text. Preserve those
+    /// pairs while protecting brackets introduced by embedded image markup.
+    private static func escapeCanonicalLabel(_ text: String) -> String {
+        var result = "", index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            if text[index] == "\\", next < text.endIndex {
+                result.append(text[index]); result.append(text[next]); index = text.index(after: next)
+            } else {
+                if text[index] == "[" || text[index] == "]" { result.append("\\") }
+                result.append(text[index]); index = next
+            }
+        }
+        return result
     }
 
     /// Whether `text` is exactly a single Markdown image (produced by an image
@@ -396,6 +378,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     private static func escapeLinkDestination(_ url: String) -> String {
+        let url = url.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E")
         // Spaces / parens break inline link destinations; wrap in <> (a valid
         // CommonMark destination form) when present.
         if url.contains(" ") || url.contains("(") || url.contains(")") {
@@ -617,7 +600,7 @@ public struct WordConverter: DocumentConverter {
     static func imageMarkdown(in drawing: Element, relationships: [String: String]) -> String {
         guard let target = imageTarget(in: drawing, relationships: relationships) else { return "" }
         let filename = (target as NSString).lastPathComponent
-        return "![\(escapeLinkLabel(imageAltText(in: drawing).replacingOccurrences(of: "\\", with: "\\\\")))](\(escapeLinkDestination(filename)))"
+        return "![\(escapeLiteralText(imageAltText(in: drawing)))](\(escapeLinkDestination(filename)))"
     }
 
     /// The relationship Target (e.g. "media/image1.png") an image references via

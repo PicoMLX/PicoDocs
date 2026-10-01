@@ -58,6 +58,14 @@ struct MarkdownList {
         return Marker(indent: indent, contentIndent: contentIndent, number: number, text: String(tail.dropFirst(padding.count)), padding: padding.isEmpty ? " " : String(padding), delimiter: delimiter)
     }
 
+    /// Preserve source numbering, delimiter and padding in the block renderer.
+    static func item(from line: String) -> Item? {
+        guard let marker = marker(line) else { return nil }
+        return Item(number: marker.number, text: marker.text, padding: marker.padding, delimiter: marker.delimiter)
+    }
+
+    static func contentIndent(of line: String) -> Int? { marker(line)?.contentIndent }
+
     static func isOrderedMarker(_ line: String) -> Bool? { marker(line).map { $0.number != nil } }
 
     static func parse(_ lines: [String], index: inout Int, depth: Int = 0, minimumIndent: Int = 0) -> MarkdownList? {

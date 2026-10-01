@@ -13,7 +13,6 @@ import Testing
 
 @Suite("Tier A converters")
 struct ConverterTests {
-
     @Test("DOCX converts to Markdown with heading and body text")
     func docx() async throws {
         let result = try await PicoDocsEngine.convert(data: Fixture.data("sample", "docx"), filename: "sample.docx")
@@ -200,11 +199,15 @@ struct ConverterTests {
 
         An interlude paragraph.
 
+        \(MarkdownLiteral.listRestartBoundary)
+
         -\tApples
 
             -\tConference
 
         -\tPears
+
+        \(MarkdownLiteral.listRestartBoundary)
 
         1.\tRestarted one
 
@@ -212,6 +215,39 @@ struct ConverterTests {
 
         End.
         """)
+    }
+
+    @Test("DOCX loose lists retain bullet siblings and leading empty items")
+    func docxLooseListReviewRegressions() async throws {
+        let namespace = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\""
+        for ordered in [false, true] {
+            let numbering = """
+            <w:numbering \(namespace)><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0">\
+            <w:start w:val="1"/><w:numFmt w:val="\(ordered ? "decimal" : "bullet")"/><w:suff w:val="space"/>\
+            </w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>
+            """
+            for emptyCount in [0, 1, 2] {
+                let items = Array(repeating: "", count: emptyCount) + ["First", "Second"]
+                let paragraphs = items.map {
+                    "<w:p><w:pPr><w:numPr><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>\($0)</w:t></w:r></w:p>"
+                }.joined()
+                let document = "<w:document \(namespace)><w:body>\(paragraphs)</w:body></w:document>"
+                let data = PagesConverterTests.makeZip([
+                    (name: "word/document.xml", data: Array(document.utf8)),
+                    (name: "word/numbering.xml", data: Array(numbering.utf8)),
+                ])
+                let result = try await PicoDocsEngine.convert(data: data, filename: "loose.docx")
+                let expected = items.enumerated().map { index, text in
+                    (ordered ? "\(index + 1)." : "-") + (text.isEmpty ? "" : " " + text)
+                }.joined(separator: "\n")
+                let html = try DocumentRenderer.render(result, to: .html)
+                let opening = ordered ? "<ol>" : "<ul>"
+                #expect(html.components(separatedBy: opening).count - 1 == 1)
+                #expect(html.components(separatedBy: "<li>").count - 1 == items.count)
+                #expect(html.components(separatedBy: "<li></li>").count - 1 == emptyCount)
+                #expect(try DocumentRenderer.render(result, to: .plaintext) == expected)
+            }
+        }
     }
 
     @Test("DOCX lists: style numbering, start overrides, unnumbered levels, missing definitions")
@@ -264,9 +300,11 @@ struct ConverterTests {
 
            - a. Styled nested
 
+        \(MarkdownLiteral.listRestartBoundary)
+
         5. From five
 
-        6. Six  
+        6. Six\u{20}\u{20}
            with a manual break
 
         Unnumbered level
@@ -888,5 +926,36 @@ struct DocumentRendererTests {
         let csv = try DocumentRenderer.render(result, to: .csv)
         #expect(csv.contains("| grep foo | wc -l |"))
         #expect(!csv.contains("grep foo,wc -l"))
+    }
+
+    @Test("Renderers keep nested lists nested and honor list start numbers")
+    func renderNestedLists() throws {
+        let markdown = "3. Three\n   - sub a\n   - sub b\n4. Four\n   1. deep\n      more\n5.\n6. Six"
+        let result = ConverterResult(title: "T", sections: [DocumentSection(kind: .body, markdown: markdown)])
+        #expect(try DocumentRenderer.render(result, to: .plaintext) == """
+        3. Three
+           - sub a
+           - sub b
+        4. Four
+           1. deep more
+        5.
+        6. Six
+        """)
+        let html = try DocumentRenderer.render(result, to: .html)
+        #expect(html.contains("""
+        <ol start="3">
+        <li>Three
+        <ul>
+        <li>sub a</li>
+        <li>sub b</li>
+        </ul></li>
+        <li>Four
+        <ol>
+        <li>deep more</li>
+        </ol></li>
+        <li></li>
+        <li>Six</li>
+        </ol>
+        """))
     }
 }
