@@ -39,6 +39,16 @@ import ZIPFoundation
         #expect(try DocumentRenderer.render(result, to: .plaintext).hasPrefix(name + "\n\n"))
     }
 
+    @Test(arguments: ["#", "Plan #", "Plan ###", "Plan #\u{0301}"])
+    func sheetHeadingClosingHashesRemainLiteral(_ name: String) async throws {
+        let result = try await NumbersConverter().convert(Self.workbook(name: name), info: StreamInfo(detectedFormat: .numbers))
+        #expect(result.sections.first?.sheetName == name)
+        #expect(result.sections.first?.title == name)
+        let parsed = try AttributedString(markdown: result.markdown())
+        #expect(String(parsed.characters).hasPrefix(name))
+        #expect(try DocumentRenderer.render(result, to: .plaintext).hasPrefix(name + "\n\n"))
+    }
+
     @Test func directoryWorkbookIsNotAdvertisedAsConvertible() {
         #expect(!UTType.numbers.isSupported)
         #expect(UTType.numbersSingleFile.isSupported)

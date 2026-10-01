@@ -71,7 +71,7 @@ public struct NumbersConverter: DocumentConverter {
         for sheet in sheets {
             guard let tables = attribution.byRoot[sheet.id], !tables.isEmpty else { continue }
             var markdown = tables.joined(separator: "\n\n")
-            if let name = sheet.name { markdown = "## " + MarkdownLiteral.escapePunctuation(name, characters: #"\`*_{}[]<>"#).replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ") + "\n\n" + markdown }
+            if let name = sheet.name { markdown = "## " + MarkdownLiteral.escapePunctuation(name, characters: #"\`*_{}[]<>#"#).replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ") + "\n\n" + markdown }
             sections.append(DocumentSection(title: sheet.name, kind: .sheet, markdown: markdown, sheetName: sheet.name))
         }
         // Partial reachability must not drop the remaining physical tables.
