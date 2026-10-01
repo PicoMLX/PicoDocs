@@ -163,7 +163,10 @@ public struct PPTXExporter: DocumentExporter {
                 Slide(title: sections.first(where: { $0.kind == .slide })?.title ?? "",
                       body: sections.flatMap { section in
                           var visible = section
-                          if section.kind == .slide, let notes = section.metadata["notes"], !notes.isEmpty {
+                          if section.kind == .slide, let originalNotes = section.metadata["notes"] {
+                              // Match the same XML-safe text already used for
+                              // visible Markdown, including notes cleaned to empty.
+                              let notes = OOXMLPackageWriter.xmlSafeText(originalNotes)
                               let suffix = "### Notes\n\n" + notes
                               if visible.markdown == suffix { visible.markdown = "" }
                               else if visible.markdown.hasSuffix("\n\n" + suffix) { visible.markdown.removeLast(suffix.count + 2) }

@@ -83,8 +83,20 @@ struct OfficeSecondStackReviewTests {
 
     @Test func slideNoteMetadataIsChargedBeforeSuffixConstruction() throws {
         let result = ConverterResult(sections: [.init(kind: .slide, markdown: "x", metadata: ["notes": "1234"])])
-        // Section 256 + two suffix copies 32 + Markdown 7 + line 128.
-        try OfficeDocumentBlocks.validateInput(result, maximumBytes: 423)
-        #expect(throws: ExporterError.self) { try OfficeDocumentBlocks.validateInput(result, maximumBytes: 422) }
+        // Section 256 + sanitized notes and suffix copies 36 + Markdown 7 + line 128.
+        try OfficeDocumentBlocks.validateInput(result, maximumBytes: 427)
+        #expect(throws: ExporterError.self) { try OfficeDocumentBlocks.validateInput(result, maximumBytes: 426) }
+    }
+
+    @Test func sanitizedCanonicalNotesNeverBecomeVisibleSlideBody() throws {
+        for notes in ["Se\u{0}cret\u{0B}", "\u{0}\u{0B}", ""] {
+            let source = ConverterResult(sections: [.init(title: "Talk", kind: .slide, markdown: "## Talk\n\nPublic\n\n### Notes\n\n" + notes, slideNumber: 1, metadata: ["notes": notes])])
+            let xml = try O.xml(PicoDocsEngine.write(source, to: .pptx), "ppt/slides/slide1.xml")
+            #expect(xml.contains("Public"))
+            #expect(!xml.contains("Secret"))
+            #expect(!xml.contains(">Notes<"))
+        }
+        let authored = ConverterResult(sections: [.init(kind: .slide, markdown: "### Notes\n\nAuthored", slideNumber: 1)])
+        #expect(try O.xml(PicoDocsEngine.write(authored, to: .pptx), "ppt/slides/slide1.xml").contains("Authored"))
     }
 }
