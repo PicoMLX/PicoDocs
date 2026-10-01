@@ -130,15 +130,15 @@ public struct XLSXExporter: DocumentExporter {
             case .heading(_, let text):
                 rows.append([plain(text)])
             case .paragraph(let text):
-                for line in text.components(separatedBy: "\n") where !line.isEmpty {
-                    rows.append([plain(line)])
+                for line in plain(text).components(separatedBy: "\n") where !line.isEmpty {
+                    rows.append([line])
                 }
             case .list(let list):
                 rows += list.plaintext(inline: plain).components(separatedBy: "\n").map { [$0] }
             case .code(let code):
                 for line in code.components(separatedBy: "\n") { rows.append([line]) }
             case .blockquote(let lines):
-                for line in lines { rows.append([plain(line)]) }
+                rows += plain(lines.joined(separator: "\n")).components(separatedBy: "\n").map { [$0] }
             case .rule:
                 rows.append(["---"])
             }
@@ -189,7 +189,8 @@ public struct XLSXExporter: DocumentExporter {
         let space: Unicode.Scalar = " "
         let cleanedScalars = name.unicodeScalars.filter(OOXMLPackageWriter.isValidXMLScalar).map { invalid.contains($0) || [9, 10, 13].contains($0.value) ? space : $0 }
         let cleaned = String(String.UnicodeScalarView(cleanedScalars))
-        return truncateSheetName(cleaned, limit: 31).trimmingCharacters(in: CharacterSet(charactersIn: "'"))
+        let name = truncateSheetName(cleaned, limit: 31).trimmingCharacters(in: CharacterSet(charactersIn: "'"))
+        return name.lowercased() == "history" ? "History (2)" : name
     }
 
     // MARK: - Package parts

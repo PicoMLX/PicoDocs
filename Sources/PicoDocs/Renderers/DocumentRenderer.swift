@@ -517,12 +517,12 @@ public enum DocumentRenderer {
         }
         let namedSheets = result.sections.filter { $0.kind == .sheet }.count
         for section in result.sections where section.kind != .image {
-            if let rawCSV = section.metadata["csv"], !rawCSV.isEmpty {
+            if let rawCSV = section.metadata["csv"] {
                 flush()
                 if namedSheets > 1, section.kind == .sheet, let name = section.sheetName ?? section.metadata["sheetName"] ?? section.title {
                     parts.append(csvField(name))
                 }
-                parts.append(rawCSV)
+                if !rawCSV.isEmpty { parts.append(rawCSV) }
             } else { markdown.append(section.markdown) }
         }
         flush()
@@ -868,6 +868,8 @@ public enum DocumentRenderer {
         return output + ns.substring(from: offset)
     }
 
+    private static let escapableMarkdownScalars = Set(#"\`*_{}[]<>()#+-.!|&~"#.unicodeScalars)
+
     static func boundedProtectEscapes(_ text: String, maximumBytes: Int = 64 * 1024 * 1024) throws -> String {
         let scalars = text.unicodeScalars
         var projected = 0, index = scalars.startIndex
@@ -876,7 +878,7 @@ public enum DocumentRenderer {
             let bytes: Int
             if scalar == "\u{E006}" { bytes = 6; index = next }
             else if scalar == "\\", next < scalars.endIndex,
-                    #"\`*_{}[]<>()#+-.!|&"#.unicodeScalars.contains(scalars[next]) {
+                    escapableMarkdownScalars.contains(scalars[next]) {
                 bytes = 6; index = scalars.index(after: next)
             } else {
                 let value = scalar.value
@@ -897,7 +899,7 @@ public enum DocumentRenderer {
             if scalar == "\u{E006}" {
                 output += "\u{E006}\u{E006}"; index = next
             } else if scalar == "\\", next < scalars.endIndex,
-                      #"\`*_{}[]<>()#+-.!|&~"#.unicodeScalars.contains(scalars[next]) {
+                      escapableMarkdownScalars.contains(scalars[next]) {
                 output.unicodeScalars.append("\u{E006}")
                 output.unicodeScalars.append(UnicodeScalar(0xE100 + scalars[next].value)!)
                 index = scalars.index(after: next)

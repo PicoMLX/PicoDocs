@@ -24,9 +24,9 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .docx else { throw ExporterError.notAccepted }
+        try OfficeDocumentBlocks.validateInput(result)
         let sanitized = OOXMLPackageWriter.sanitizedDocument(result)
         guard !PicoDocsEngine.isEmptyForExport(sanitized) else { throw PicoDocsError.emptyDocument }
-        try OfficeDocumentBlocks.validateInput(sanitized)
         let result = PicoDocsEngine.withSynthesizedImageReferences(sanitized)
 
         let blocks = OfficeDocumentBlocks.parse(result)

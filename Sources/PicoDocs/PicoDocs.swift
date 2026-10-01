@@ -58,7 +58,7 @@ public enum PicoDocsEngine {
         // considered empty: their byte carriers live in `.image` sections. Empty
         // worksheet sections also represent valid workbook structure.)
         if sanitized.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           !sanitized.sections.contains(where: { $0.kind == .image || $0.kind == .sheet }) {
+           !sanitized.sections.contains(where: { $0.kind == .image || $0.kind == .sheet || $0.kind == .slide }) {
             throw PicoDocsError.emptyDocument
         }
         return sanitized
@@ -111,7 +111,9 @@ public enum PicoDocsEngine {
 
     /// Custom writers may consume covers; built-ins validate their own support.
     static func isEmptyForExport(_ result: ConverterResult, includingCover: Bool = true) -> Bool {
-        let isEmpty = result.markdown().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let isEmpty = !result.sections.lazy.filter { $0.kind != .image }.contains { section in
+            section.markdown.unicodeScalars.contains { !CharacterSet.whitespacesAndNewlines.contains($0) }
+        }
         let hasImages = result.sections.contains { $0.kind == .image }
         let hasCover = includingCover && !(result.cover?.isEmpty ?? true)
         let hasCSV = result.sections.contains { !($0.metadata["csv"] ?? "").isEmpty }

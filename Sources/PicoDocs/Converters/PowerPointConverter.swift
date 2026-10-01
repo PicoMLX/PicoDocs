@@ -138,7 +138,7 @@ public struct PowerPointConverter: DocumentConverter {
             if !slideText.isEmpty { blocks.append(slideText) }
             if let notes { blocks.append(renderBudget.join(["### Notes\n\n", notes])) }
             try archive.check()
-            guard !blocks.isEmpty else { continue }   // empty slide: keep its number, emit nothing
+            // Empty slides still carry native deck structure for Office round trips.
 
             let section = DocumentSection(
                 title: context.plainTitle,

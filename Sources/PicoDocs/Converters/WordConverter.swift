@@ -46,6 +46,13 @@ public struct WordConverter: DocumentConverter {
         try Self.collectHeadings(in: body, relationships: relationships, numbering: previewNumbering, observe: observe)
         for (heading, slug) in zip(headings, MarkdownHeadingAnchors.slugs(titles)) {
             for bookmark in try heading.getElementsByTag("w:bookmarkStart").array() {
+                var parent = bookmark.parent()
+                var nestedFlow = false
+                while let ancestor = parent, ancestor !== heading {
+                    if ["w:p", "w:txbxContent"].contains(ancestor.tagName()) { nestedFlow = true; break }
+                    parent = ancestor.parent()
+                }
+                if nestedFlow { continue }
                 let name = try bookmark.attr("w:name")
                 if !name.isEmpty { relationships["#" + name] = "#" + slug }
             }

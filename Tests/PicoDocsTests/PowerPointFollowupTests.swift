@@ -1625,7 +1625,9 @@ struct PowerPointFollowupTests {
             await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(entries), filename: "bad-tree.pptx") }
         }
         let valid = try await PicoDocsEngine.convert(data: data, filename: "empty-slide.pptx")
-        #expect(valid.sections.count == 1)
+        #expect(valid.sections.count == 2)
+        #expect(valid.sections.last?.slideNumber == 2)
+        #expect(valid.sections.last?.markdown.isEmpty == true)
     }
 
     @Test func cellsAndOtherPlaceholdersInheritTheirOwnListStyles() async throws {

@@ -28,9 +28,9 @@ public struct AttributedStringDOCXExporter: DocumentExporter {
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .docx else { throw ExporterError.notAccepted }
         #if canImport(AppKit)
+        try OfficeDocumentBlocks.validateInput(result)
         let result = OOXMLPackageWriter.sanitizedDocument(result)
         guard !PicoDocsEngine.isEmptyForExport(result) else { throw PicoDocsError.emptyDocument }
-        try OfficeDocumentBlocks.validateInput(result)
         let attributed = AttributedStringDocumentBuilder.attributedString(from: result)
         guard attributed.length > 0 else { throw PicoDocsError.emptyDocument }
         var properties: [NSAttributedString.DocumentAttributeKey: Any] = [.documentType: NSAttributedString.DocumentType.officeOpenXML]

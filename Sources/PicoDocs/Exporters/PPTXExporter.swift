@@ -24,9 +24,9 @@ public struct PPTXExporter: DocumentExporter {
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
         guard format == .pptx else { throw ExporterError.notAccepted }
+        try OfficeDocumentBlocks.validateInput(result)
         let sanitized = OOXMLPackageWriter.sanitizedDocument(result)
         guard !PicoDocsEngine.isEmptyForExport(sanitized) else { throw PicoDocsError.emptyDocument }
-        try OfficeDocumentBlocks.validateInput(sanitized)
         let result = PicoDocsEngine.withSynthesizedImageReferences(sanitized)
 
         let slides = try Self.slides(from: result)
@@ -160,8 +160,9 @@ public struct PPTXExporter: DocumentExporter {
             }
             guard groups.count <= 10_000 else { throw ExporterError.serializationFailed("Slide count exceeds the supported deck size") }
             return groups.map { sections in
-                Slide(title: sections.first(where: { $0.kind == .slide })?.title ?? "",
-                      body: sections.flatMap { section in
+                let title = sections.first(where: { $0.kind == .slide })?.title ?? ""
+                var titleInlines: [MarkdownInline]?
+                let body = sections.flatMap { section in
                           var visible = section
                           if section.kind == .slide, let originalNotes = section.metadata["notes"] {
                               // Match the same XML-safe text already used for
@@ -175,10 +176,12 @@ public struct PPTXExporter: DocumentExporter {
                           if section.kind == .slide, let title = section.title,
                              case .heading(_, let text)? = blocks.first,
                              MarkdownInlineParser.parse(text).plainText == title {
+                              if titleInlines == nil { titleInlines = MarkdownInlineParser.parse(text) }
                               blocks.removeFirst()
                           }
                           return bodyLines(blocks)
-                      })
+                      }
+                return Slide(title: title, body: body, titleInlines: titleInlines)
             }
         }
 
