@@ -74,38 +74,43 @@ public enum DocumentRenderer {
         var remaining = 64 * 1024 * 1024
         var sections: [String] = []
         for section in result.sections where section.kind != .image {
-            var bytes = section.markdown.utf8.count
-            for scalar in section.markdown.unicodeScalars where scalar == "\u{E008}" || scalar == "\u{E009}" {
-                guard bytes <= remaining - 3 else { throw PicoDocsError.fileCorrupted }; bytes += 3
-            }
-            guard bytes <= remaining else { throw PicoDocsError.fileCorrupted }
-            var text = section.markdown.replacingOccurrences(of: "\u{E008}", with: "\u{E008}\u{E008}").replacingOccurrences(of: "\u{E009}", with: "\u{E009}\u{E009}")
-            if section.metadata["preservedWhitespace"] == "1" {
-                let source = text as NSString
-                var offset = 0, output = "", exceeded = false
-                whitespaceReference.enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, stop in
-                    guard let match, let value = UInt32(source.substring(with: match.range(at: 1))),
-                          let scalar = UnicodeScalar(value), CharacterSet.whitespaces.contains(scalar) else { return }
-                    var preceding = match.range.location, slashes = 0
-                    while preceding > 0, source.character(at: preceding - 1) == 92 { preceding -= 1; slashes += 1 }
-                    guard slashes.isMultiple(of: 2) else { return }
-                    let token = "\u{E008}\(value)\u{E009}"
-                    let growth = token.utf8.count - source.substring(with: match.range).utf8.count
-                    guard growth <= remaining - bytes else { exceeded = true; stop.pointee = true; return }
-                    bytes += growth
-                    output += source.substring(with: NSRange(location: offset, length: match.range.location - offset)) + token
-                    offset = NSMaxRange(match.range)
-                }
-                guard !exceeded else { throw PicoDocsError.fileCorrupted }
-                output += source.substring(from: offset)
-                text = output
-            }
-            remaining -= bytes
+            let text = try preparedMarkdown(section, remaining: &remaining)
             guard sections.isEmpty || remaining >= 2 else { throw PicoDocsError.fileCorrupted }
             if !sections.isEmpty { remaining -= 2 }
             sections.append(text)
         }
         return sections.joined(separator: "\n\n")
+    }
+
+    private static func preparedMarkdown(_ section: DocumentSection, remaining: inout Int) throws -> String {
+        var bytes = section.markdown.utf8.count
+        for scalar in section.markdown.unicodeScalars where scalar == "\u{E008}" || scalar == "\u{E009}" {
+            guard bytes <= remaining - 3 else { throw PicoDocsError.fileCorrupted }; bytes += 3
+        }
+        guard bytes <= remaining else { throw PicoDocsError.fileCorrupted }
+        var text = section.markdown.replacingOccurrences(of: "\u{E008}", with: "\u{E008}\u{E008}").replacingOccurrences(of: "\u{E009}", with: "\u{E009}\u{E009}")
+        if section.metadata["preservedWhitespace"] == "1" {
+            let source = text as NSString
+            var offset = 0, output = "", exceeded = false
+            whitespaceReference.enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, stop in
+                guard let match, let value = UInt32(source.substring(with: match.range(at: 1))),
+                  let scalar = UnicodeScalar(value), CharacterSet.whitespaces.contains(scalar) else { return }
+                var preceding = match.range.location, slashes = 0
+                while preceding > 0, source.character(at: preceding - 1) == 92 { preceding -= 1; slashes += 1 }
+                guard slashes.isMultiple(of: 2) else { return }
+                let token = "\u{E008}\(value)\u{E009}"
+                let growth = token.utf8.count - source.substring(with: match.range).utf8.count
+                guard growth <= remaining - bytes else { exceeded = true; stop.pointee = true; return }
+                bytes += growth
+                output += source.substring(with: NSRange(location: offset, length: match.range.location - offset)) + token
+                offset = NSMaxRange(match.range)
+            }
+            guard !exceeded else { throw PicoDocsError.fileCorrupted }
+            output += source.substring(from: offset)
+            text = output
+        }
+        remaining -= bytes
+        return text
     }
 
     // MARK: - Plaintext
@@ -140,7 +145,7 @@ public enum DocumentRenderer {
             case .paragraph(let text):
                 return stripInline(text, footnoteNumbers: numbers)
             case .code(let code):
-                return code
+                return restoredCodeText(code)
             case .rule:
                 return "---"
             case .blockquote(let lines):
@@ -342,7 +347,7 @@ public enum DocumentRenderer {
                 let html = try inlineHTML(text, footnoteNumbers: numbers, budget: budget).replacingOccurrences(of: "\n", with: "<br>\n")
                 return "<p>\(html)</p>"
             case .code(let code):
-                let escaped = try boundedEscapeHTML(code, maximumBytes: budget.remaining)
+                let escaped = try boundedEscapeHTML(restoredCodeText(code), maximumBytes: budget.remaining)
                 budget.remaining -= escaped.utf8.count
                 return "<pre><code>\(escaped)</code></pre>"
             case .rule:
@@ -643,6 +648,7 @@ public enum DocumentRenderer {
         try preflightRenderInput(result, markdownFallbackOnly: true)
         var parts: [String] = []
         var markdown: [String] = []
+        var remaining = 64 * 1024 * 1024
         func flush() {
             let rows = csvRows(fromMarkdown: markdown.joined(separator: "\n\n"))
             if !rows.isEmpty { parts.append(rows.joined(separator: "\n")) }
@@ -657,7 +663,7 @@ public enum DocumentRenderer {
                     parts.append(csvField(name))
                 }
                 if !rawCSV.isEmpty { parts.append(rawCSV) }
-            } else { markdown.append(section.markdown) }
+            } else { markdown.append(try preparedMarkdown(section, remaining: &remaining)) }
         }
         flush()
         return parts.joined(separator: "\n")
@@ -908,6 +914,15 @@ public enum DocumentRenderer {
             if (0xE000...0xE003).contains(scalar.value) { output.unicodeScalars.append(scalar) }
         }
         return output
+    }
+
+    private static func restoredCodeText(_ code: String) -> String {
+        var text = restoreWhitespaceReferences(code, html: false)
+        for value in [0xE008, 0xE009] {
+            let scalar = String(UnicodeScalar(value)!)
+            text = text.replacingOccurrences(of: scalar + scalar, with: scalar)
+        }
+        return text
     }
 
     private static func restoreInlineSentinels(_ text: String) -> String {
