@@ -130,6 +130,7 @@ final class PowerPointXML: NSObject, XMLParserDelegate {
         "http://purl.org/dc/dcmitype/": "dcmitype",
         "http://www.w3.org/2001/XMLSchema-instance": "xsi",
         "http://schemas.openxmlformats.org/package/2006/metadata/core-properties": "cp",
+        "http://purl.oclc.org/ooxml/package/metadata/core-properties": "cp",
         "http://purl.oclc.org/ooxml/presentationml/main": "p",
         "http://purl.oclc.org/ooxml/drawingml/main": "a",
         "http://purl.oclc.org/ooxml/officeDocument/relationships": "r",

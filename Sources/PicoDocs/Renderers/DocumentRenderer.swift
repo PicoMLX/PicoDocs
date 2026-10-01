@@ -31,7 +31,7 @@ public enum DocumentRenderer {
         case .plaintext:
             return renderPlaintext(result)
         case .html:
-            return renderHTML(result)
+            return try renderHTML(result)
         case .xml:
             return renderXML(result)
         case .csv:
@@ -125,7 +125,7 @@ public enum DocumentRenderer {
 
     // MARK: - HTML
 
-    private static func renderHTML(_ result: ConverterResult) -> String {
+    private static func renderHTML(_ result: ConverterResult) throws -> String {
         let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
         let parsed = parseBlocks(bodyMarkdown)
         let numbers = footnoteNumbers(blocks: parsed, notes: notes)
@@ -148,7 +148,7 @@ public enum DocumentRenderer {
         // Make HTML export self-contained: rewrite `<img src="filename">`
         // references to data URLs using the bytes carried on `.image` sections
         // (the body Markdown keeps clean filename refs for the other formats).
-        html = embedImageDataURLs(html, sections: result.sections)
+        html = try embedImageDataURLs(html, sections: result.sections)
         return html
     }
 
@@ -163,7 +163,7 @@ public enum DocumentRenderer {
     /// every image a clean, unique/path-aware name would need generation-time
     /// threading through the converters — a deferred follow-up; standard documents
     /// (unique media names) embed exactly as before.
-    private static func embedImageDataURLs(_ html: String, sections: [DocumentSection]) -> String {
+    private static func embedImageDataURLs(_ html: String, sections: [DocumentSection]) throws -> String {
         let imageSections = sections.filter { $0.kind == .image }
         // Count basenames among *embeddable* sections; a basename shared by two of
         // them is ambiguous and skipped below.
@@ -179,12 +179,36 @@ public enum DocumentRenderer {
             // Parameters are metadata, not part of the payload delimiter syntax.
             let mime = (section.metadata["mimeType"] ?? "application/octet-stream")
                 .split(separator: ";", maxSplits: 1).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? "application/octet-stream"
-            result = result.replacingOccurrences(
-                of: "src=\"\(escapeHTML(filename))\"",
-                with: "src=\"\(escapeHTML("data:\(mime);base64,\(base64)"))\""
-            )
+            result = try boundedImageReplacement(result, reference: filename, mime: mime, base64: base64)
         }
+        guard result.utf8.count <= 64 * 1024 * 1024 else { throw PicoDocsError.fileCorrupted }
         return result
+    }
+
+    /// Charge every projected occurrence before materializing any data URLs.
+    static func boundedImageReplacement(_ html: String, reference: String, mime: String, base64: String, maximumBytes: Int = 64 * 1024 * 1024) throws -> String {
+        let needle = "src=\"\(escapeHTML(reference))\""
+        var projectedBytes = html.utf8.count
+        guard projectedBytes <= maximumBytes else { throw PicoDocsError.fileCorrupted }
+        guard html.range(of: needle, options: .literal) != nil else { return html }
+        var replacementBytes = 19 // src="data: + ;base64, + closing quote
+        for text in [mime, base64] {
+            guard text.utf8.count <= maximumBytes - replacementBytes else { throw PicoDocsError.fileCorrupted }
+            replacementBytes += text.utf8.count
+            for scalar in text.unicodeScalars {
+                let growth = scalar == "&" ? 4 : (scalar == "<" || scalar == ">" ? 3 : (scalar == "\"" ? 5 : 0))
+                guard growth <= maximumBytes - replacementBytes else { throw PicoDocsError.fileCorrupted }
+                replacementBytes += growth
+            }
+        }
+        let growth = replacementBytes - needle.utf8.count
+        var start = html.startIndex
+        while let range = html.range(of: needle, options: .literal, range: start..<html.endIndex) {
+            if growth > 0, growth > maximumBytes - projectedBytes { throw PicoDocsError.fileCorrupted }
+            projectedBytes += growth
+            start = range.upperBound
+        }
+        return html.replacingOccurrences(of: needle, with: "src=\"\(escapeHTML("data:\(mime);base64,\(base64)"))\"", options: .literal)
     }
 
     /// The serialized destination carried by an image producer, or its source
@@ -1041,11 +1065,13 @@ public enum DocumentRenderer {
     private static let htmlWhitespaceReference = try! NSRegularExpression(pattern: #"&amp;#([0-9]{1,7});"#)
     private static func restoreWhitespaceReferences(_ text: String, html: Bool) -> String {
         let source = text as NSString
-        var output = "", last = 0, inTag = false
+        var output = "", last = 0, inTag = false, inSpan = false
+        func closeSpan() { if inSpan { output += "</span>"; inSpan = false } }
         (html ? htmlWhitespaceReference : whitespaceReference).enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, _ in
             guard let match, let value = UInt32(source.substring(with: match.range(at: 1))),
                   let scalar = UnicodeScalar(value), CharacterSet.whitespaces.contains(scalar) else { return }
             let preceding = source.substring(with: NSRange(location: last, length: match.range.location - last))
+            if !preceding.isEmpty { closeSpan() }
             if html {
                 // References in href/src/IDs are attribute data, never text spans.
                 for character in preceding {
@@ -1055,11 +1081,15 @@ public enum DocumentRenderer {
             }
             output += preceding
             if html {
-                output += inTag ? source.substring(with: match.range)
-                    : "<span style=\"white-space:pre-wrap\">&#\(value);</span>"
+                if inTag { closeSpan(); output += source.substring(with: match.range) }
+                else {
+                    if !inSpan { output += "<span style=\"white-space:pre-wrap\">"; inSpan = true }
+                    output += "&#\(value);"
+                }
             } else { output.unicodeScalars.append(scalar) }
             last = match.range.location + match.range.length
         }
+        closeSpan()
         output += source.substring(from: last)
         return output
     }

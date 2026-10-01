@@ -60,6 +60,9 @@ public struct PowerPointConverter: DocumentConverter {
         let defaultTextStyle = presentation.children().first().flatMap { Self.selectedChild(of: $0, named: "p:defaulttextstyle") }
         var sections: [DocumentSection] = []
         var remainingRenderedBytes = maximumRenderedBytes
+        var activeBudget: RenderBudget?
+        var activeFixedBytes = 0
+        var activeCopies = 1
         func charge(_ text: String?) throws {
             let bytes = text?.utf8.count ?? 0
             guard bytes <= remainingRenderedBytes else { throw PicoDocsError.fileCorrupted }
@@ -75,15 +78,21 @@ public struct PowerPointConverter: DocumentConverter {
         // Reserve all external image destinations first, including later slides,
         // so embedded references cannot claim an external occurrence's src.
         var externalReferences: Set<String> = []
-        for path in Set(slidePaths) {
+        var pendingParts = Array(Set(slidePaths)), visitedParts: Set<String> = []
+        while let path = pendingParts.popLast() {
             try Task.checkCancellation()
-            for relation in Self.relationships(archive, forPart: path).values
-                where relation.external && relation.isType("/image") {
-                externalReferences.insert(Self.linkDestination(relation.target))
+            guard visitedParts.insert(path).inserted else { continue }
+            for relation in Self.relationships(archive, forPart: path).values {
+                if relation.external && relation.isType("/image") {
+                    externalReferences.insert(Self.linkDestination(relation.target))
+                } else if !relation.external, ["/slideLayout", "/slideMaster", "/notesSlide", "/notesMaster"].contains(where: relation.isType) {
+                    pendingParts.append(WordConverter.resolvePartPath(relation.target, relativeTo: Self.directory(of: path)))
+                }
             }
         }
         let images = ImageCollector(reservedReferences: externalReferences, reserveCarrierBytes: { bytes in
-            guard bytes <= remainingRenderedBytes else { archive.fail(PicoDocsError.fileCorrupted); return false }
+            let retained = activeFixedBytes + activeCopies * (activeBudget?.retainedContentBytes ?? 0)
+            guard bytes <= remainingRenderedBytes - retained else { archive.fail(PicoDocsError.fileCorrupted); return false }
             remainingRenderedBytes -= bytes
             return true
         })
@@ -94,17 +103,21 @@ public struct PowerPointConverter: DocumentConverter {
             guard let slide = parts.document(slidePath, root: "p:sld", cache: false), slide.children().first()?.tagName().lowercased() == "p:sld" else { try archive.check(); throw PicoDocsError.fileCorrupted }
             let relationships = Self.relationships(archive, forPart: slidePath)
             var context = SlideContext(archive: archive, partPath: slidePath, relationships: relationships, images: images)
-            let renderBudget = RenderBudget(maximumBytes: remainingRenderedBytes - slidePath.utf8.count, archive: archive)
+            let renderBudget = RenderBudget(maximumBytes: remainingRenderedBytes - slidePath.utf8.count, archive: archive,
+                                            liveMaximum: { remainingRenderedBytes - slidePath.utf8.count })
+            activeBudget = renderBudget; activeFixedBytes = slidePath.utf8.count; activeCopies = 1
             context.renderBudget = renderBudget
             context.defaultTextStyle = defaultTextStyle
             context.placeholders = parts.placeholders
+            context.shapeBudget = parts.shapeBudget
             context.styles = StyleChildCache(shared: parts.styles)
             // Layout and master supply inherited list formatting for placeholders.
             let layoutPath = Self.relatedPart(of: slidePath, type: "/slideLayout", relationships: relationships, archive: archive)
+            context.layoutPath = layoutPath
             context.layout = layoutPath.flatMap { parts.document($0, root: "p:sldlayout") }
-            context.master = layoutPath
+            context.masterPath = layoutPath
                 .flatMap { Self.relatedPart(of: $0, type: "/slideMaster", relationships: Self.relationships(archive, forPart: $0), archive: archive) }
-                .flatMap { parts.document($0, root: "p:sldmaster") }
+            context.master = context.masterPath.flatMap { parts.document($0, root: "p:sldmaster") }
             let rendered = Self.renderSlide(slide, context: &context)
             try archive.check()
             let slideBlocks = (rendered.title.map { [renderBudget.join(["## ", $0])] } ?? []) + rendered.blocks
@@ -114,8 +127,12 @@ public struct PowerPointConverter: DocumentConverter {
             // their heading/key/separator, and the already retained section fields.
             let fixedBytes = slideText.utf8.count + (context.plainTitle?.utf8.count ?? 0) + slidePath.utf8.count
             let notesOverhead = "### Notes\n\n".utf8.count + "notes".utf8.count + (slideText.isEmpty ? 0 : 2)
-            let notesBudget = RenderBudget(maximumBytes: max(0, remainingRenderedBytes - fixedBytes - notesOverhead) / 2, archive: archive)
-            let notes = Self.notes(forSlide: slidePath, relationships: relationships, archive: archive, parts: &parts, renderBudget: notesBudget)
+            let notesBudget = RenderBudget(maximumBytes: max(0, remainingRenderedBytes - fixedBytes - notesOverhead) / 2, archive: archive,
+                                           liveMaximum: { max(0, remainingRenderedBytes - fixedBytes - notesOverhead) / 2 })
+            activeBudget = notesBudget; activeFixedBytes = fixedBytes + notesOverhead; activeCopies = 2
+            let notes = Self.notes(forSlide: slidePath, relationships: relationships, archive: archive, parts: &parts,
+                                   renderBudget: notesBudget, defaultTextStyle: defaultTextStyle, images: images)
+            activeBudget = nil; activeFixedBytes = 0; activeCopies = 1
 
             var blocks: [String] = []
             if !slideText.isEmpty { blocks.append(slideText) }
@@ -182,7 +199,7 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     /// Speaker notes for a slide, from its notes-slide part's body placeholder.
-    static func notes(forSlide slidePath: String, relationships: [String: Relationship], archive: PowerPointPackage, parts: inout PartCache, renderBudget: RenderBudget? = nil) -> String? {
+    static func notes(forSlide slidePath: String, relationships: [String: Relationship], archive: PowerPointPackage, parts: inout PartCache, renderBudget: RenderBudget? = nil, defaultTextStyle: Element? = nil, images: ImageCollector? = nil) -> String? {
         let noteRelations = relationshipsOfType("/notesSlide", archive: archive, part: slidePath, map: relationships)
         guard noteRelations.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         guard let relation = noteRelations.first else { return nil }
@@ -194,8 +211,11 @@ public struct PowerPointConverter: DocumentConverter {
               let tree = selectedChild(of: common, named: "p:sptree") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
         var context = SlideContext(archive: archive, partPath: notesPath,
                                    relationships: Self.relationships(archive, forPart: notesPath),
-                                   images: ImageCollector(), embedsImages: false)
+                                   images: images ?? ImageCollector(), embedsImages: images != nil)
         context.renderBudget = renderBudget
+        context.defaultTextStyle = defaultTextStyle
+        context.styles = StyleChildCache(shared: parts.styles)
+        context.shapeBudget = parts.shapeBudget
         let notesRels = Self.relationships(archive, forPart: notesPath)
         let backlinks = relationshipsOfType("/slide", archive: archive, part: notesPath, map: notesRels)
         guard backlinks.count == 1, let backlink = backlinks.first, !backlink.external,
@@ -229,12 +249,18 @@ public struct PowerPointConverter: DocumentConverter {
                         let rendered = renderParagraphs(body, inherited: inheritedBullets(for: shape, context: context), context: &context)
                         for paragraph in rendered { context.appendBlock(paragraph, to: &paragraphs) }
                     }
-                } else if shape.tagName().lowercased() == "p:graphicframe",
-                          let table = selectedDescendant(in: shape, named: "a:tbl") {
+                } else if shape.tagName().lowercased() == "p:graphicframe" {
                     context.defaultLink = link
-                    context.runDefaults = Array(repeating: [], count: 9)
-                    let text = renderTable(table, context: &context)
-                    if !text.isEmpty { context.appendBlock(text, to: &paragraphs) }
+                    if let table = selectedDescendant(in: shape, named: "a:tbl") {
+                        context.runDefaults = Array(repeating: [], count: 9)
+                        let text = renderTable(table, context: &context)
+                        if !text.isEmpty { context.appendBlock(text, to: &paragraphs) }
+                    } else if let object = selectedDescendant(in: shape, named: "p:oleobj"),
+                              let preview = selectedDescendant(in: object, named: "p:pic"), !isHidden(preview),
+                              let image = pictureMarkdown(preview, context: &context) { context.appendBlock(image, to: &paragraphs) }
+                } else if shape.tagName().lowercased() == "p:pic" {
+                    context.defaultLink = link
+                    if let image = pictureMarkdown(shape, context: &context) { context.appendBlock(image, to: &paragraphs) }
                 }
             }
         }
@@ -265,15 +291,19 @@ public struct PowerPointConverter: DocumentConverter {
     // MARK: - Slides
 
     final class RenderBudget {
-        let maximumBytes: Int
+        private let initialMaximum: Int
+        private let liveMaximum: (() -> Int)?
+        var maximumBytes: Int { max(0, min(initialMaximum, liveMaximum?() ?? initialMaximum)) }
+        var retainedContentBytes = 0
         let archive: PowerPointPackage
-        private(set) var failed = false
-        init(maximumBytes: Int, archive: PowerPointPackage) {
-            self.maximumBytes = max(0, maximumBytes); self.archive = archive
+        private var overLimit = false
+        var failed: Bool { overLimit || archive.failure != nil }
+        init(maximumBytes: Int, archive: PowerPointPackage, liveMaximum: (() -> Int)? = nil) {
+            self.initialMaximum = max(0, maximumBytes); self.archive = archive; self.liveMaximum = liveMaximum
         }
         func admit(_ bytes: Int, retained: inout Int) -> Bool {
             guard !failed, bytes >= 0, bytes <= maximumBytes - retained else {
-                failed = true; archive.fail(PicoDocsError.fileCorrupted); return false
+                overLimit = true; archive.fail(PicoDocsError.fileCorrupted); return false
             }
             retained += bytes; return true
         }
@@ -309,14 +339,16 @@ public struct PowerPointConverter: DocumentConverter {
     /// images collected so far (shared across the deck so each is emitted once).
     struct SlideContext {
         let archive: PowerPointPackage
-        let partPath: String
-        let relationships: [String: Relationship]
+        var partPath: String
+        var relationships: [String: Relationship]
         var images: ImageCollector
         var renderBudget: RenderBudget? = nil
+        var shapeBudget: ShapeBudget? = nil
         var renderedBlockBytes = 0
         mutating func appendBlock(_ text: String, to blocks: inout [String]) {
             if let renderBudget {
                 guard renderBudget.admit(text.utf8.count + (blocks.isEmpty && plainTitle == nil ? 0 : 2), retained: &renderedBlockBytes) else { return }
+                renderBudget.retainedContentBytes = renderedBlockBytes
             }
             blocks.append(text)
         }
@@ -327,6 +359,8 @@ public struct PowerPointConverter: DocumentConverter {
         /// The slide's layout and master parts, when resolvable.
         var layout: Document?
         var master: Document?
+        var layoutPath: String?
+        var masterPath: String?
         var defaultTextStyle: Element?
         var placeholders = PlaceholderCache()
         var styles = StyleChildCache()
@@ -338,6 +372,7 @@ public struct PowerPointConverter: DocumentConverter {
         private var documents: [String: Document?] = [:]
         let placeholders = PlaceholderCache()
         let styles = StyleChildCache()
+        let shapeBudget = ShapeBudget()
         private let budget: PowerPointXML.Budget
 
         init(archive: PowerPointPackage, budget: PowerPointXML.Budget = .init()) {
@@ -384,21 +419,39 @@ public struct PowerPointConverter: DocumentConverter {
         }
         var title: String?
         var blocks: [String] = []
+        let showInherited = !["0", "false"].contains((try? root.attr("showMasterSp")) ?? "")
+        let showMaster = !["0", "false"].contains((try? context.layout?.children().first()?.attr("showMasterSp")) ?? "")
+        if showInherited {
+            let inherited = [(showMaster ? context.master : nil, context.masterPath), (context.layout, context.layoutPath)]
+            for (part, path) in inherited {
+                guard let part, let path, let root = part.children().first(),
+                      let common = context.styles.child(of: root, named: "p:csld"),
+                      let tree = context.styles.child(of: common, named: "p:sptree") else { continue }
+                var inheritedContext = context
+                inheritedContext.partPath = path
+                inheritedContext.relationships = relationships(context.archive, forPart: path)
+                renderShapes(in: tree, title: &title, blocks: &blocks, context: &inheritedContext, inheritedOnly: true)
+                context.renderedBlockBytes = inheritedContext.renderedBlockBytes
+            }
+        }
         renderShapes(in: tree, title: &title, blocks: &blocks, context: &context)
         return (title, blocks)
     }
 
-    private static func isHidden(_ shape: Element) -> Bool {
+    private static func isHidden(_ shape: Element, cache: StyleChildCache? = nil) -> Bool {
         let nonvisualNames: Set<String> = ["p:nvsppr", "p:nvpicpr", "p:nvgraphicframepr", "p:nvgrpsppr", "p:nvcxnsppr"]
-        guard let properties = selectedChildren(in: shape).first(where: { nonvisualNames.contains($0.tagName().lowercased()) }),
-              let common = selectedChildren(in: properties).first(where: { $0.tagName().lowercased() == "p:cnvpr" }) else { return false }
+        let properties = cache.map { cache in nonvisualNames.compactMap { cache.child(of: shape, named: $0) }.first }
+            ?? selectedChildren(in: shape).first(where: { nonvisualNames.contains($0.tagName().lowercased()) })
+        guard let properties, let common = selectedChild(of: properties, named: "p:cnvpr", cache: cache) else { return false }
         return isOn(common, "hidden")
     }
 
-    private static func shapeClick(_ shape: Element) -> Element? {
+    private static func shapeClick(_ shape: Element, cache: StyleChildCache? = nil) -> Element? {
         let names: Set<String> = ["p:nvsppr", "p:nvpicpr", "p:nvgraphicframepr", "p:nvgrpsppr"]
-        let properties = selectedChildren(in: shape).first { names.contains($0.tagName().lowercased()) }
-        return properties.flatMap { selectedChild(of: $0, named: "p:cnvpr") }.flatMap { selectedChild(of: $0, named: "a:hlinkclick") }
+        let properties = cache.map { cache in names.compactMap { cache.child(of: shape, named: $0) }.first }
+            ?? selectedChildren(in: shape).first { names.contains($0.tagName().lowercased()) }
+        return properties.flatMap { selectedChild(of: $0, named: "p:cnvpr", cache: cache) }
+            .flatMap { selectedChild(of: $0, named: "a:hlinkclick", cache: cache) }
     }
 
     private static func shapeLink(_ shape: Element, context: SlideContext) -> String? {
@@ -422,17 +475,19 @@ public struct PowerPointConverter: DocumentConverter {
     /// Renders a shape tree (or group) in order. The first title placeholder
     /// becomes the slide title; nested groups and markup-compatibility branches
     /// are walked recursively.
-    private static func renderShapes(in container: Element, title: inout String?, blocks: inout [String], context: inout SlideContext, inheritedLink: String? = nil) {
-        for shape in container.children().array() {
+    private static func renderShapes(in container: Element, title: inout String?, blocks: inout [String], context: inout SlideContext, inheritedLink: String? = nil, inheritedOnly: Bool = false) {
+        for shape in context.styles.shapes(in: container) {
             if Task.isCancelled || context.renderBudget?.failed == true { return }
-            if isHidden(shape) { continue }
-            let click = shapeClick(shape)
+            if context.shapeBudget?.admit(context.archive) == false { return }
+            if inheritedOnly, placeholder(of: shape, cache: context.styles) != nil { continue }
+            if isHidden(shape, cache: context.styles) { continue }
+            let click = shapeClick(shape, cache: context.styles)
             context.defaultLink = click == nil ? inheritedLink : hyperlink(click, context: context)
             switch shape.tagName().lowercased() {
             case "p:sp":
                 let type = placeholderType(of: shape)
                 if let type, skippedPlaceholders.contains(type) { continue }
-                guard let body = textBody(of: shape) else { continue }
+                guard let body = context.styles.child(of: shape, named: "p:txbody") else { continue }
                 context.runDefaults = inheritedRunDefaults(for: shape, context: context)
                 if type == "title" || type == "ctrTitle" {
                     let paragraphs = renderParagraphs(body, inherited: noInheritance, context: &context)
@@ -452,6 +507,7 @@ public struct PowerPointConverter: DocumentConverter {
                         if let budget = context.renderBudget {
                             let bytes = 3 + text.utf8.count + (context.plainTitle?.utf8.count ?? 0) + (blocks.isEmpty ? 0 : 2)
                             guard budget.admit(bytes, retained: &context.renderedBlockBytes) else { return }
+                            budget.retainedContentBytes = context.renderedBlockBytes
                         }
                         continue
                     }
@@ -472,10 +528,10 @@ public struct PowerPointConverter: DocumentConverter {
             case "p:pic":
                 if let image = pictureMarkdown(shape, context: &context) { context.appendBlock(image, to: &blocks) }
             case "p:grpsp":
-                renderShapes(in: shape, title: &title, blocks: &blocks, context: &context, inheritedLink: context.defaultLink)
+                renderShapes(in: shape, title: &title, blocks: &blocks, context: &context, inheritedLink: context.defaultLink, inheritedOnly: inheritedOnly)
             case "mc:alternatecontent":
                 if let branch = selectedAlternateBranch(shape) {
-                    renderShapes(in: branch, title: &title, blocks: &blocks, context: &context, inheritedLink: inheritedLink)
+                    renderShapes(in: branch, title: &title, blocks: &blocks, context: &context, inheritedLink: inheritedLink, inheritedOnly: inheritedOnly)
                 }
             default:
                 continue
@@ -580,7 +636,7 @@ public struct PowerPointConverter: DocumentConverter {
     /// master, body/object placeholders fall back to bullets.
     static func inheritedBullets(for shape: Element, context: SlideContext) -> [Bullet?] {
         var fallback: Bullet?
-        var sources: [Element?] = [textBody(of: shape).flatMap { selectedChild(of: $0, named: "a:lststyle") }]
+        var sources: [Element?] = [listStyle(shape, cache: context.styles)]
         if let placeholder = placeholder(of: shape) {
             let type = ((try? placeholder.attr("type")) ?? "").isEmpty ? "obj" : ((try? placeholder.attr("type")) ?? "")
             let index = (try? placeholder.attr("idx")).flatMap { $0.isEmpty ? nil : $0 } ?? "0"
@@ -590,10 +646,10 @@ public struct PowerPointConverter: DocumentConverter {
                 fallback = bodyLike && type != "subTitle" ? .bullet : nil
             }
             if let layout = context.layout {
-                sources.append(matchingPlaceholder(in: layout, type: type, index: index, cache: context.placeholders).flatMap(listStyle))
+                sources.append(matchingPlaceholder(in: layout, type: type, index: index, cache: context.placeholders).flatMap { listStyle($0, cache: context.styles) })
             }
             if let master = context.master {
-                sources.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap(listStyle))
+                sources.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap { listStyle($0, cache: context.styles) })
                 let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
                 sources.append(masterTextStyle(master, named: style, cache: context.styles))
             }
@@ -611,15 +667,15 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// Run toggles inherit independently through the active paragraph level.
     private static func inheritedRunDefaults(for shape: Element, context: SlideContext) -> [[Element]] {
-        var styles: [Element?] = [textBody(of: shape).flatMap { selectedChild(of: $0, named: "a:lststyle") }]
+        var styles: [Element?] = [listStyle(shape, cache: context.styles)]
         if let placeholder = placeholder(of: shape) {
             let raw = (try? placeholder.attr("type")) ?? ""
             let type = raw.isEmpty ? "obj" : raw
             let index = (try? placeholder.attr("idx")).flatMap { $0.isEmpty ? nil : $0 } ?? "0"
             let bodyLike = ["obj", "body", "subTitle"].contains(type)
-            if let layout = context.layout { styles.append(matchingPlaceholder(in: layout, type: type, index: index, cache: context.placeholders).flatMap(listStyle)) }
+            if let layout = context.layout { styles.append(matchingPlaceholder(in: layout, type: type, index: index, cache: context.placeholders).flatMap { listStyle($0, cache: context.styles) }) }
             if let master = context.master {
-                styles.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap(listStyle))
+                styles.append(matchingPlaceholder(in: master, type: bodyLike ? "body" : type, index: "", cache: context.placeholders).flatMap { listStyle($0, cache: context.styles) })
                 let style = master.children().first()?.tagName().lowercased() == "p:notesmaster" ? "p:notesStyle" : (bodyLike ? "p:bodyStyle" : (["title", "ctrTitle"].contains(type) ? "p:titleStyle" : "p:otherStyle"))
                 styles.append(masterTextStyle(master, named: style, cache: context.styles))
             }
@@ -642,7 +698,7 @@ public struct PowerPointConverter: DocumentConverter {
 
     /// Index shared style containers once while keeping transient slide styles local.
     final class StyleChildCache {
-        private struct Index { let owner: Element; let children: [String: Element] }
+        private struct Index { let owner: Element; let children: [String: Element]; let shapes: [Element] }
         private var indexes: [ObjectIdentifier: Index] = [:]
         private(set) var buildCount = 0
         private let shared: StyleChildCache?
@@ -653,17 +709,37 @@ public struct PowerPointConverter: DocumentConverter {
             if let shared, let document = parent.ownerDocument(), shared.documents[ObjectIdentifier(document)] != nil {
                 return shared.child(of: parent, named: name)
             }
+            return index(parent).children[name]
+        }
+        func shapes(in parent: Element) -> [Element] {
+            if let shared, let document = parent.ownerDocument(), shared.documents[ObjectIdentifier(document)] != nil {
+                return shared.shapes(in: parent)
+            }
+            return index(parent).shapes
+        }
+        private func index(_ parent: Element) -> Index {
             let key = ObjectIdentifier(parent)
             if indexes[key] == nil {
                 var children: [String: Element] = [:]
-                for child in selectedChildren(in: parent) {
+                let selected = selectedChildren(in: parent)
+                for child in selected {
                     let name = child.tagName().lowercased()
                     if children[name] == nil { children[name] = child }
                 }
-                indexes[key] = Index(owner: parent, children: children)
+                let shapeNames: Set<String> = ["p:sp", "p:pic", "p:graphicframe", "p:grpsp"]
+                indexes[key] = Index(owner: parent, children: children, shapes: selected.filter { shapeNames.contains($0.tagName().lowercased()) })
                 buildCount += 1
             }
-            return indexes[key]?.children[name]
+            return indexes[key]!
+        }
+    }
+
+    /// Shared inherited shapes can render repeatedly without another XML parse.
+    final class ShapeBudget {
+        private var remaining = 250_000
+        func admit(_ archive: PowerPointPackage) -> Bool {
+            guard remaining > 0 else { archive.fail(PicoDocsError.fileCorrupted); return false }
+            remaining -= 1; return true
         }
     }
 
@@ -710,12 +786,16 @@ public struct PowerPointConverter: DocumentConverter {
         cache.match(in: part, type: type, index: index)
     }
 
-    private static func listStyle(_ shape: Element) -> Element? {
-        textBody(of: shape).flatMap { selectedChild(of: $0, named: "a:lststyle") }
+    private static func listStyle(_ shape: Element, cache: StyleChildCache) -> Element? {
+        cache.child(of: shape, named: "p:txbody").flatMap { cache.child(of: $0, named: "a:lststyle") }
     }
 
-    private static func placeholder(of shape: Element) -> Element? {
-        selectedChild(of: shape, named: "p:nvsppr").flatMap { selectedChild(of: $0, named: "p:nvpr") }.flatMap { selectedChild(of: $0, named: "p:ph") }
+    private static func placeholder(of shape: Element, cache: StyleChildCache? = nil) -> Element? {
+        let names: Set<String> = ["p:nvsppr", "p:nvpicpr", "p:nvgraphicframepr"]
+        let properties = cache.map { cache in names.compactMap { cache.child(of: shape, named: $0) }.first }
+            ?? selectedChildren(in: shape).first { names.contains($0.tagName().lowercased()) }
+        return properties.flatMap { selectedChild(of: $0, named: "p:nvpr", cache: cache) }
+            .flatMap { selectedChild(of: $0, named: "p:ph", cache: cache) }
     }
 
     private static func textBody(of shape: Element) -> Element? {
@@ -740,8 +820,9 @@ public struct PowerPointConverter: DocumentConverter {
         return children
     }
 
-    private static func selectedChild(of container: Element, named name: String) -> Element? {
-        selectedChildren(in: container).first { $0.tagName().lowercased() == name }
+    private static func selectedChild(of container: Element, named name: String, cache: StyleChildCache? = nil) -> Element? {
+        if let cache { return cache.child(of: container, named: name) }
+        return selectedChildren(in: container).first { $0.tagName().lowercased() == name }
     }
 
     private static func selectedParagraphs(in body: Element) -> [Element] {
@@ -856,8 +937,10 @@ public struct PowerPointConverter: DocumentConverter {
             case "a:r", "a:fld":
                 let properties = selectedChild(of: node, named: "a:rpr")
                 let textNode = selectedChild(of: node, named: "a:t")
-                let escaped = escapeMarkdown(textNode.map(wholeText) ?? "", budget: budget)
-                let text = preservesSpace(textNode) ? encodeWhitespace(escaped, budget: budget) : escaped
+                let runBudget = budget.map { RenderBudget(maximumBytes: $0.maximumBytes - retainedRunBytes, archive: context.archive) }
+                let escaped = escapeMarkdown(textNode.map(wholeText) ?? "", budget: runBudget)
+                let text = preservesSpace(textNode) ? encodeWhitespace(escaped, budget: runBudget) : escaped
+                if runBudget?.failed == true { return "" }
                 guard !text.isEmpty else { continue }
                 if let budget, !budget.admit(text.utf8.count, retained: &retainedRunBytes) { return "" }
                 let click = properties.flatMap { selectedChild(of: $0, named: "a:hlinkclick") }
@@ -1092,12 +1175,16 @@ public struct PowerPointConverter: DocumentConverter {
     /// merged-away cells render empty.
     static func renderTable(_ table: Element, context: inout SlideContext) -> String {
         var rows: [[String]] = []
-        let budget = context.renderBudget
+        let budget = context.renderBudget.map { RenderBudget(maximumBytes: $0.maximumBytes - context.renderedBlockBytes, archive: context.archive) }
         var cellBytes = 0
         for row in selectedChildren(in: table) where row.tagName().lowercased() == "a:tr" {
             if Task.isCancelled || budget?.failed == true { return "" }
             var cells: [String] = []
             for cell in selectedChildren(in: row) where cell.tagName().lowercased() == "a:tc" {
+                let cellBudget = budget.map { RenderBudget(maximumBytes: $0.maximumBytes - cellBytes, archive: context.archive) }
+                var cellContext = context
+                cellContext.renderBudget = cellBudget
+                cellContext.renderedBlockBytes = 0
                 let merged = isOn(cell, "hMerge") || isOn(cell, "vMerge")
                 var text = ""
                 if !merged, let body = textBody(ofCell: cell) {
@@ -1109,20 +1196,21 @@ public struct PowerPointConverter: DocumentConverter {
                         }
                         return nil
                     }
-                    context.runDefaults = (0..<9).map { level in
+                    cellContext.runDefaults = (0..<9).map { level in
                         styles.flatMap { style in
                             [context.styles.child(of: style, named: "a:lvl\(level + 1)ppr"), context.styles.child(of: style, named: "a:defppr")]
                                 .compactMap { $0.flatMap { context.styles.child(of: $0, named: "a:defrpr") } }
                         }
                     }
-                    let paragraphs = renderParagraphs(body, inherited: inherited, context: &context)
-                    text = budget?.join(paragraphs, separator: "\n") ?? paragraphs.joined(separator: "\n")
+                    let paragraphs = renderParagraphs(body, inherited: inherited, context: &cellContext)
+                    text = cellBudget?.join(paragraphs, separator: "\n") ?? paragraphs.joined(separator: "\n")
+                    if cellBudget?.failed == true { return "" }
                 }
                 if let budget {
                     var expanded = text.utf8.count
-                    guard budget.fits(expanded) else { return "" }
+                    guard cellBudget?.fits(expanded) != false else { return "" }
                     for scalar in text.unicodeScalars where scalar == "|" || scalar == "\n" {
-                        guard budget.admit(scalar == "\n" ? 3 : 1, retained: &expanded) else { return "" }
+                        guard cellBudget?.admit(scalar == "\n" ? 3 : 1, retained: &expanded) != false else { return "" }
                     }
                     guard budget.admit(expanded, retained: &cellBytes) else { return "" }
                 }
@@ -1182,13 +1270,15 @@ public struct PowerPointConverter: DocumentConverter {
         let title = (try? properties?.attr("title")) ?? ""
         let name = (try? properties?.attr("name")) ?? ""
         let alt = [description, title, name].first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) ?? "image"
-        let label = escapeMarkdown(normalizedWhitespace(alt), budget: context.renderBudget)
+        let budget = context.renderBudget.map { RenderBudget(maximumBytes: $0.maximumBytes - context.renderedBlockBytes, archive: context.archive) }
+        let label = escapeMarkdown(normalizedWhitespace(alt), budget: budget)
         let fragments = ["![", label, "](", linkDestination(source), ")"]
-        let image = context.renderBudget?.join(fragments) ?? fragments.joined()
+        let image = budget?.join(fragments) ?? fragments.joined()
+        if budget?.failed == true { return nil }
         let click = properties.flatMap { selectedChild(of: $0, named: "a:hlinkclick") }
         if let target = click == nil ? context.defaultLink : hyperlink(click, context: context) {
             let linked = ["[", image, "](", linkDestination(target), ")"]
-            return context.renderBudget?.join(linked) ?? linked.joined()
+            return budget?.join(linked) ?? linked.joined()
         }
         return image
     }
