@@ -5,13 +5,13 @@ import ZIPFoundation
 @testable import PicoDocs
 
 @Suite struct NumbersReviewTests {
-    static func workbook(name: String = "Sheet", orphan: Bool = false) -> Data {
+    static func workbook(name: String = "Sheet", orphan: Bool = false, cellValue: String = "Same") -> Data {
         typealias B = PagesConverterTests
         func table(_ id: UInt64) -> [(id: UInt64, type: UInt64, payload: [UInt8], references: [UInt64])] {
             // Two identical tables must remain distinct even when one is unclaimed.
             let cell: [UInt8] = [5, 3] + Array(repeating: 0, count: 10) + [1, 0, 0, 0]
             let tile = B.lengthField(5, B.lengthField(6, cell) + B.lengthField(7, [0, 0]))
-            let strings = B.varintField(1, 1) + B.lengthField(3, B.varintField(1, 1) + B.lengthField(3, Array("Same".utf8)))
+            let strings = B.varintField(1, 1) + B.lengthField(3, B.varintField(1, 1) + B.lengthField(3, Array(cellValue.utf8)))
             return [(id, 6001, [], [id + 1, id + 2]), (id + 1, 6002, tile, []), (id + 2, 6005, strings, [])]
         }
         let document = B.lengthField(1, B.varintField(1, 10))
@@ -108,6 +108,35 @@ import ZIPFoundation
         #expect(try Snappy.decompressIWA(frames, maximumOutputBytes: 24).count == 24)
         // A tiny block with an oversized declared expansion fails before reserve/copy.
         #expect(throws: Snappy.SnappyError.outputLimitExceeded) { try Snappy.decompressBlock(B.varint(1_000_000_000), maximumOutputBytes: 32) }
+    }
+
+    @Test(arguments: ["AT&amp;T", "&copy;", "&#35;", "\\&copy;"])
+    func entityLikeCellValuesRemainLiteral(_ value: String) async throws {
+        let result = try await NumbersConverter().convert(Self.workbook(cellValue: value), info: StreamInfo(detectedFormat: .numbers))
+        #expect(String(try AttributedString(markdown: result.markdown()).characters).contains(value))
+        #expect(try DocumentRenderer.render(result, to: .plaintext).contains(value))
+        #expect(try DocumentRenderer.render(result, to: .html).contains(value.replacingOccurrences(of: "&", with: "&amp;")))
+    }
+
+    @Test func cancellationDuringOneLargeSnappyBlockDoesNotReturnSuccess() async throws {
+        let size = 32 * 1024 * 1024
+        var block = PagesConverterTests.varint(UInt64(size)) + [0, UInt8(65)]
+        var remaining = size - 1
+        while remaining > 0 {
+            let count = min(64, remaining)
+            block += [UInt8((count - 1) << 2) | 2, 1, 0]
+            remaining -= count
+        }
+        let input = block
+        let task = Task.detached {
+            do {
+                _ = try Snappy.decompressBlock(input, maximumOutputBytes: size)
+                return false
+            } catch is CancellationError { return true }
+        }
+        try await Task.sleep(nanoseconds: 5_000_000)
+        task.cancel()
+        #expect(try await task.value)
     }
 
 }

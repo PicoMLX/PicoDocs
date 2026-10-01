@@ -138,11 +138,13 @@ public enum ContentTypeDetector {
         guard format == .zip, let zip = try? Archive(data: data, accessMode: .read) else { return format }
         // Detection remains a bounded hint; the converter validates the whole
         // package and its manifest after routing.
-        let package = PowerPointPackage(archive: zip, entryLimit: 1024 * 1024, totalLimit: 2 * 1024 * 1024)
+        // Read only the package relationships and main part, with the same
+        // per-part ceiling as conversion and a bounded allowance for both.
+        let package = PowerPointPackage(archive: zip, totalLimit: 128 * 1024 * 1024)
         let offices = PowerPointConverter.relationships(package, forPart: "").values.filter { $0.isType("/officeDocument") }
         guard offices.count == 1, let office = offices.first, !office.external else { return .zip }
         let path = PowerPointConverter.resolvePartPath(office.target, relativeTo: "")
-        guard PowerPointConverter.xml(package, path: path, maximumBytes: 1024 * 1024)?.children().first()?.tagName().lowercased() == "p:presentation",
+        guard PowerPointConverter.xml(package, path: path)?.children().first()?.tagName().lowercased() == "p:presentation",
               package.failure == nil else { return .zip }
         return .pptx
     }

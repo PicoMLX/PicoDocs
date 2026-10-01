@@ -1412,7 +1412,7 @@ enum IWATable {
                 || (0x7F...0x9F).contains(value)             // DEL + C1 controls
                 || value == 0xFFFC                           // object-replacement placeholder
         }
-        let escaped = MarkdownLiteral.escapePunctuation(String(scalars), characters: #"\`*_{}[]<>|"#)
+        let escaped = MarkdownLiteral.escapePunctuation(String(scalars), characters: #"\`*_{}[]<>|&"#)
         return escaped.trimmingCharacters(in: .whitespaces)
     }
 }
