@@ -82,7 +82,11 @@ public struct PowerPointConverter: DocumentConverter {
                 externalReferences.insert(Self.linkDestination(relation.target))
             }
         }
-        let images = ImageCollector(reservedReferences: externalReferences)
+        let images = ImageCollector(reservedReferences: externalReferences, reserveCarrierBytes: { bytes in
+            guard bytes <= remainingRenderedBytes else { archive.fail(PicoDocsError.fileCorrupted); return false }
+            remainingRenderedBytes -= bytes
+            return true
+        })
         var parts = PartCache(archive: archive)
         parts.styles.register(presentation)
         for (index, slidePath) in slidePaths.enumerated() {
@@ -131,7 +135,6 @@ public struct PowerPointConverter: DocumentConverter {
             try chargeSection(section)
             sections.append(section)
         }
-        for section in images.sections { try chargeSection(section) }
         sections += images.sections
         try archive.check()
         guard sections.contains(where: { $0.kind != .image }) else { throw PicoDocsError.emptyDocument }
@@ -226,6 +229,12 @@ public struct PowerPointConverter: DocumentConverter {
                         let rendered = renderParagraphs(body, inherited: inheritedBullets(for: shape, context: context), context: &context)
                         for paragraph in rendered { context.appendBlock(paragraph, to: &paragraphs) }
                     }
+                } else if shape.tagName().lowercased() == "p:graphicframe",
+                          let table = selectedDescendant(in: shape, named: "a:tbl") {
+                    context.defaultLink = link
+                    context.runDefaults = Array(repeating: [], count: 9)
+                    let text = renderTable(table, context: &context)
+                    if !text.isEmpty { context.appendBlock(text, to: &paragraphs) }
                 }
             }
         }
@@ -240,7 +249,7 @@ public struct PowerPointConverter: DocumentConverter {
         guard properties.count <= 1 else { archive.fail(PicoDocsError.fileCorrupted); return (nil, nil) }
         guard let relation = properties.first else { return (nil, nil) }
         let path = WordConverter.resolvePartPath(relation.target, relativeTo: "")
-        guard !relation.external, let core = xml(archive, path: path),
+        guard !relation.external, let core = xml(archive, path: path, maximumBytes: 1024 * 1024),
               core.children().first()?.tagName().lowercased() == "cp:coreproperties" else {
             archive.fail(PicoDocsError.fileCorrupted)
             return (nil, nil)
@@ -574,7 +583,7 @@ public struct PowerPointConverter: DocumentConverter {
         var sources: [Element?] = [textBody(of: shape).flatMap { selectedChild(of: $0, named: "a:lststyle") }]
         if let placeholder = placeholder(of: shape) {
             let type = ((try? placeholder.attr("type")) ?? "").isEmpty ? "obj" : ((try? placeholder.attr("type")) ?? "")
-            let index = (try? placeholder.attr("idx")) ?? ""
+            let index = (try? placeholder.attr("idx")).flatMap { $0.isEmpty ? nil : $0 } ?? "0"
             let bodyLike = ["obj", "body", "subTitle"].contains(type)
             if context.layout == nil, context.master == nil {
                 // No inheritance chain to read: content placeholders are bulleted.
@@ -606,7 +615,7 @@ public struct PowerPointConverter: DocumentConverter {
         if let placeholder = placeholder(of: shape) {
             let raw = (try? placeholder.attr("type")) ?? ""
             let type = raw.isEmpty ? "obj" : raw
-            let index = (try? placeholder.attr("idx")) ?? ""
+            let index = (try? placeholder.attr("idx")).flatMap { $0.isEmpty ? nil : $0 } ?? "0"
             let bodyLike = ["obj", "body", "subTitle"].contains(type)
             if let layout = context.layout { styles.append(matchingPlaceholder(in: layout, type: type, index: index, cache: context.placeholders).flatMap(listStyle)) }
             if let master = context.master {
@@ -675,7 +684,7 @@ public struct PowerPointConverter: DocumentConverter {
                         switch element.tagName().lowercased() {
                         case "p:sp":
                             guard let ph = PowerPointConverter.placeholder(of: element) else { continue }
-                            let id = (try? ph.attr("idx")) ?? ""
+                            let id = (try? ph.attr("idx")).flatMap { $0.isEmpty ? nil : $0 } ?? "0"
                             let raw = (try? ph.attr("type")) ?? ""
                             let kind = raw.isEmpty ? "obj" : raw
                             let equivalent = ["title", "ctrTitle"].contains(kind) ? "title" : (["body", "obj"].contains(kind) ? "body" : kind)
@@ -1192,9 +1201,11 @@ public struct PowerPointConverter: DocumentConverter {
         private var nextReference = 0
 
         private var remainingEncodedBytes: Int
+        private let reserveCarrierBytes: ((Int) -> Bool)?
 
-        init(reservedReferences: Set<String> = [], maximumEncodedBytes: Int = 32 * 1024 * 1024) {
+        init(reservedReferences: Set<String> = [], maximumEncodedBytes: Int = 32 * 1024 * 1024, reserveCarrierBytes: ((Int) -> Bool)? = nil) {
             usedReferences = reservedReferences
+            self.reserveCarrierBytes = reserveCarrierBytes
             remainingEncodedBytes = max(0, maximumEncodedBytes)
         }
 
@@ -1222,6 +1233,12 @@ public struct PowerPointConverter: DocumentConverter {
                 reference = "picodocs-embedded/\(nextReference)/" + filename
             }
             let emitted = PowerPointConverter.linkDestination(reference)
+            let mime = PowerPointConverter.contentType(path, archive: archive) ?? PowerPointConverter.mimeType(forExtension: (filename as NSString).pathExtension)
+            guard archive.failure == nil else { return nil }
+            let labelBytes = filename.utf8.count + filename.unicodeScalars.filter { #"\`*_{}[]<>&"#.unicodeScalars.contains($0) }.count
+            let carrierBytes = filename.utf8.count + path.utf8.count + labelBytes + 2 * emitted.utf8.count
+                + mime.utf8.count + "mimeType".utf8.count + "markdownReference".utf8.count + 5
+            guard reserveCarrierBytes?(carrierBytes) != false else { archive.fail(PicoDocsError.fileCorrupted); return nil }
             usedReferences.insert(emitted); references[path] = reference
             sections.append(DocumentSection(
                 title: filename,
@@ -1229,7 +1246,7 @@ public struct PowerPointConverter: DocumentConverter {
                 markdown: "![\(PowerPointConverter.escapeMarkdown(filename))](\(emitted))",
                 sourcePath: path,
                 metadata: [
-                    "mimeType": PowerPointConverter.contentType(path, archive: archive) ?? PowerPointConverter.mimeType(forExtension: (filename as NSString).pathExtension),
+                    "mimeType": mime,
                     "base64": bytes.base64EncodedString(),
                     "markdownReference": emitted,
                 ]
@@ -1241,7 +1258,7 @@ public struct PowerPointConverter: DocumentConverter {
     static func contentType(_ path: String, archive: PowerPointPackage) -> String? {
         if archive.contentTypes == nil {
             var types: [String: String] = [:]
-            guard let manifest = xml(archive, path: "[Content_Types].xml"),
+            guard let manifest = xml(archive, path: "[Content_Types].xml", budget: .init(nodes: 16_385, attributes: 32_768, bytes: 8 * 1024 * 1024), maximumBytes: 8 * 1024 * 1024),
                   let root = manifest.children().first(), root.tagName().lowercased() == "types" else {
                 archive.fail(PicoDocsError.fileCorrupted); return nil
             }
@@ -1368,8 +1385,8 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     /// Reads and parses an XML part, or nil when missing/unreadable.
-    static func xml(_ archive: PowerPointPackage, path: String, budget: PowerPointXML.Budget? = nil) -> Document? {
-        guard let data = archive.read(path),
+    static func xml(_ archive: PowerPointPackage, path: String, budget: PowerPointXML.Budget? = nil, maximumBytes: Int = Int.max) -> Document? {
+        guard let data = archive.read(path, maximumBytes: maximumBytes),
               let text = PowerPointXML.normalize(data, budget: budget) else { return nil }
         guard let document = try? SwiftSoup.parse(text, "", SwiftSoup.Parser.xmlParser()) else { return nil }
         // MustUnderstand applies to the processed tree, excluding ignored extension

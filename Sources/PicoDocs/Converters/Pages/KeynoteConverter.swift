@@ -51,6 +51,8 @@ public struct KeynoteConverter: DocumentConverter {
             try Task.checkCancellation()
             do {
                 streams.append((component.name, try Snappy.decompressIWA(component.bytes)))
+            } catch let error as CancellationError {
+                throw error
             } catch {
                 if Self.isSlide(component.name) { throw PicoDocsError.fileCorrupted }
             }
@@ -210,7 +212,7 @@ public struct KeynoteConverter: DocumentConverter {
         var components: [Component] = []
         for entry in archive where entry.type == .file
             && entry.path.hasPrefix("Index/") && entry.path.hasSuffix(".iwa") {
-            guard let data = Self.readEntry(archive, path: entry.path) else {
+            guard let data = try Self.readEntry(archive, path: entry.path) else {
                 // A present-but-unreadable slide is corruption (primary content);
                 // auxiliary components are skipped leniently.
                 if Self.isSlide(entry.path) { throw PicoDocsError.fileCorrupted }
@@ -224,12 +226,12 @@ public struct KeynoteConverter: DocumentConverter {
         // but can't be read/opened, the file is corrupt — not an unsupported
         // layout — so surface that distinctly rather than failing silently.
         if archive["Index.zip"] != nil {
-            guard let indexZip = Self.readEntry(archive, path: "Index.zip"),
+            guard let indexZip = try Self.readEntry(archive, path: "Index.zip"),
                   let inner = Archive(data: indexZip, accessMode: .read) else {
                 throw PicoDocsError.fileCorrupted
             }
             for entry in inner where entry.type == .file && entry.path.hasSuffix(".iwa") {
-                guard let data = Self.readEntry(inner, path: entry.path) else {
+                guard let data = try Self.readEntry(inner, path: entry.path) else {
                     if Self.isSlide(entry.path) { throw PicoDocsError.fileCorrupted }
                     continue
                 }
@@ -241,8 +243,8 @@ public struct KeynoteConverter: DocumentConverter {
 
     // MARK: - Helpers (mirror PagesConverter; see file note)
 
-    static func readEntry(_ archive: Archive, path: String) -> Data? {
-        ZIPEntryReader.read(archive, path: path)
+    static func readEntry(_ archive: Archive, path: String) throws -> Data? {
+        try ZIPEntryReader.read(archive, path: path)
     }
 
     /// Folds iWork's line/paragraph separators to `\n`, drops C0/C1 control

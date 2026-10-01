@@ -1722,8 +1722,8 @@ struct ExporterFollowupTests {
         let archive = try #require(Archive(data: data, accessMode: .read))
         #expect(WordListNumbering(archive: archive).failure != nil)
         let small = try #require(Archive(data: PagesConverterTests.makeZip([(name: "part", data: [1, 2, 3])]), accessMode: .read))
-        #expect(WordConverter.readEntry(small, path: "part", maxBytes: 2) == nil)
-        #expect(WordConverter.readEntry(small, path: "part", maxBytes: 3) == Data([1, 2, 3]))
+        #expect(try WordConverter.readEntry(small, path: "part", maxBytes: 2) == nil)
+        #expect(try WordConverter.readEntry(small, path: "part", maxBytes: 3) == Data([1, 2, 3]))
     }
 
     @Test func backslashPairsKeepInlineDelimitersActive() throws {

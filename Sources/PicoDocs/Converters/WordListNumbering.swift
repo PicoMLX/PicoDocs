@@ -66,20 +66,22 @@ final class WordListNumbering {
 
 
     init(archive: Archive) {
-        if let app = xml(archive, path: "docProps/app.xml") {
-            isLibreOffice = ((try? app.getElementsByTag("Application").text()) ?? "").hasPrefix("LibreOffice")
-        }
-        let numberingPath = WordConverter.relationshipTarget(archive, typeSuffix: "/numbering")
-            .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/numbering.xml"
-        let stylesPath = WordConverter.relationshipTarget(archive, typeSuffix: "/styles")
-            .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/styles.xml"
-        if let numbering = xml(archive, path: numberingPath) {
-            isResolvable = true
-            parseNumbering(numbering)
-        }
-        if let styles = xml(archive, path: stylesPath) {
-            parseStyles(styles)
-        }
+        do {
+            if let app = try xml(archive, path: "docProps/app.xml") {
+                isLibreOffice = ((try? app.getElementsByTag("Application").text()) ?? "").hasPrefix("LibreOffice")
+            }
+            let numberingPath = try WordConverter.relationshipTarget(archive, typeSuffix: "/numbering")
+                .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/numbering.xml"
+            let stylesPath = try WordConverter.relationshipTarget(archive, typeSuffix: "/styles")
+                .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/styles.xml"
+            if let numbering = try xml(archive, path: numberingPath) {
+                isResolvable = true
+                parseNumbering(numbering)
+            }
+            if let styles = try xml(archive, path: stylesPath) {
+                parseStyles(styles)
+            }
+        } catch { failure = error }
     }
 
     /// The Markdown prefix (indent + marker) for a paragraph, or nil when it isn't
@@ -446,11 +448,11 @@ final class WordListNumbering {
         return trimmed.isEmpty ? "0" : String(trimmed)
     }
 
-    private func xml(_ archive: Archive, path: String) -> Document? {
+    private func xml(_ archive: Archive, path: String) throws -> Document? {
         guard archive[path] != nil else { return nil }
         // Three optional parts at most: this caps their aggregate decoded input
         // at 24 MiB, independent of compression ratio or declared ZIP sizes.
-        guard let data = WordConverter.readEntry(archive, path: path, maxBytes: 8 * 1024 * 1024),
+        guard let data = try WordConverter.readEntry(archive, path: path, maxBytes: 8 * 1024 * 1024),
               let text = WordConverter.decodeText(data) else { failure = PicoDocsError.fileCorrupted; return nil }
         return try? SwiftSoup.parse(text, "", SwiftSoup.Parser.xmlParser())
     }

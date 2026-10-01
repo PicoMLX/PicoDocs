@@ -24,12 +24,12 @@ public struct WordConverter: DocumentConverter {
         guard let archive = Archive(data: data, accessMode: .read) else {
             throw PicoDocsError.fileCorrupted
         }
-        guard let documentData = Self.readEntry(archive, path: "word/document.xml"),
+        guard let documentData = try Self.readEntry(archive, path: "word/document.xml"),
               let documentXML = Self.decodeText(documentData) else {
             throw PicoDocsError.fileCorrupted
         }
 
-        var relationships = Self.parseRelationships(archive)
+        var relationships = try Self.parseRelationships(archive)
         let document = try SwiftSoup.parse(documentXML, "", SwiftSoup.Parser.xmlParser())
         guard let body = try document.getElementsByTag("w:body").first() else {
             throw PicoDocsError.emptyDocument
@@ -106,6 +106,7 @@ public struct WordConverter: DocumentConverter {
         }
         sections.append(contentsOf: imageSections)
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
+        try Task.checkCancellation()
         return ConverterResult(title: info.filename, sections: sections)
     }
 
@@ -613,8 +614,8 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Relationships (hyperlink targets)
 
-    static func parseRelationships(_ archive: Archive, path: String = "word/_rels/document.xml.rels") -> [String: String] {
-        guard let data = readEntry(archive, path: path),
+    static func parseRelationships(_ archive: Archive, path: String = "word/_rels/document.xml.rels") throws -> [String: String] {
+        guard let data = try readEntry(archive, path: path),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
             return [:]
@@ -646,8 +647,8 @@ public struct WordConverter: DocumentConverter {
             ("/footnotes", "word/footnotes.xml", "w:footnote", "fn"),
             ("/endnotes", "word/endnotes.xml", "w:endnote", "en"),
         ] {
-            let part = relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
-            let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part)).merging(bookmarks) { _, canonical in canonical }
+            let part = try relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
+            let relationships = try parseRelationships(archive, path: relationshipsPath(forPart: part)).merging(bookmarks) { _, canonical in canonical }
             for (key, value) in try parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships) {
                 notes[key] = value
             }
@@ -657,8 +658,8 @@ public struct WordConverter: DocumentConverter {
 
     /// The Target of the first `document.xml.rels` relationship whose Type ends
     /// with `typeSuffix` (e.g. "/footnotes"); relative to `word/`.
-    static func relationshipTarget(_ archive: Archive, typeSuffix: String) -> String? {
-        guard let data = readEntry(archive, path: "word/_rels/document.xml.rels"),
+    static func relationshipTarget(_ archive: Archive, typeSuffix: String) throws -> String? {
+        guard let data = try readEntry(archive, path: "word/_rels/document.xml.rels"),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
             return nil
@@ -684,13 +685,14 @@ public struct WordConverter: DocumentConverter {
     ]
 
     private static func parseNotePart(_ archive: Archive, path: String, tag: String, prefix: String, relationships: [String: String]) throws -> [String: String] {
-        guard let data = readEntry(archive, path: path),
+        guard let data = try readEntry(archive, path: path),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
             return [:]
         }
         // Each note part has independent counters from the body and other stories.
         let numbering = WordListNumbering(archive: archive)
+        if let failure = numbering.failure { throw failure }
         var notes: [String: String] = [:]
         for note in (try? doc.getElementsByTag(tag).array()) ?? [] {
             guard let id = try? note.attr("w:id"), !id.isEmpty else { continue }
@@ -731,12 +733,12 @@ public struct WordConverter: DocumentConverter {
             ("/footnotes", "word/footnotes.xml", "w:footnotes"),
             ("/endnotes", "word/endnotes.xml", "w:endnotes"),
         ] {
-            let part = relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
-            guard let data = readEntry(archive, path: part),
+            let part = try relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
+            guard let data = try readEntry(archive, path: part),
                   let xml = decodeText(data),
                   let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()),
                   let root = try? doc.getElementsByTag(rootTag).first() else { continue }
-            let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part))
+            let relationships = try parseRelationships(archive, path: relationshipsPath(forPart: part))
             // A note part's image targets resolve relative to the note part's own
             // folder (usually `word`, but a subfolder when the part lives in one).
             let partDirectory = (part as NSString).deletingLastPathComponent
@@ -810,7 +812,7 @@ public struct WordConverter: DocumentConverter {
             guard let entry = archive[mediaPath] else { continue }
             guard budget.remainingImages > 0, entry.uncompressedSize <= UInt64(budget.remainingBytes) else { continue }
 
-            guard let bytes = readEntry(archive, path: mediaPath, maxBytes: min(32 * 1024 * 1024, budget.remainingBytes)), !bytes.isEmpty else { continue }
+            guard let bytes = try readEntry(archive, path: mediaPath, maxBytes: min(32 * 1024 * 1024, budget.remainingBytes)), !bytes.isEmpty else { continue }
             budget.remainingBytes -= bytes.count
             budget.remainingImages -= 1
             let filename = (mediaPath as NSString).lastPathComponent
@@ -864,7 +866,8 @@ public struct WordConverter: DocumentConverter {
     // MARK: - Archive helpers
     // (entry reads go through the shared, size-hardened ZIPEntryReader.)
 
-    static func readEntry(_ archive: Archive, path: String, maxBytes: Int = 32 * 1024 * 1024) -> Data? {
+    static func readEntry(_ archive: Archive, path: String, maxBytes: Int = 32 * 1024 * 1024) throws -> Data? {
+        try Task.checkCancellation()
         let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
         guard let entry = archive[cleanPath] else { return nil }
         let archiveSize = UInt64(archive.data?.count ?? Int.max)
@@ -873,10 +876,13 @@ public struct WordConverter: DocumentConverter {
         var data = Data(capacity: Int(min(entry.uncompressedSize, 1024 * 1024)))
         do {
             let checksum = try archive.extract(entry) { chunk in
+                try Task.checkCancellation()
                 guard chunk.count <= maxBytes - data.count, !chunk.isEmpty || entry.uncompressedSize == 0 else { throw PicoDocsError.fileCorrupted }
                 data.append(chunk)
             }
             guard checksum == entry.checksum, UInt64(data.count) == entry.uncompressedSize else { return nil }
+        } catch let error as CancellationError {
+            throw error
         } catch {
             return nil
         }

@@ -70,6 +70,8 @@ public struct PagesConverter: DocumentConverter {
                 let stream = try Snappy.decompressIWA(component.bytes)
                 if component.name.hasSuffix("Document.iwa") { documentStream = stream }
                 streams.append((name: component.name, stream: stream))
+            } catch let error as CancellationError {
+                throw error
             } catch {
                 if component.name.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
             }
@@ -144,7 +146,7 @@ public struct PagesConverter: DocumentConverter {
             guard let entry = archive[path] else { return nil }
             let limit = min(maximumEntryBytes, remaining)
             guard limit >= 0, entry.uncompressedSize <= UInt64(limit) else { throw PicoDocsError.fileCorrupted }
-            let data = ZIPEntryReader.read(archive, path: path, maxBytes: limit)
+            let data = try ZIPEntryReader.read(archive, path: path, maxBytes: limit)
             try Task.checkCancellation()
             if let data { remaining -= data.count }
             return data
@@ -234,7 +236,7 @@ public struct PagesConverter: DocumentConverter {
 
     // MARK: - ZIP helper
 
-    static func readEntry(_ archive: Archive, path: String) -> Data? {
-        ZIPEntryReader.read(archive, path: path)
+    static func readEntry(_ archive: Archive, path: String) throws -> Data? {
+        try ZIPEntryReader.read(archive, path: path)
     }
 }

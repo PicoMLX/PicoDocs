@@ -34,7 +34,8 @@ final class PowerPointPackage {
             }
             count += 1; nameBytes += bytes
             guard entry.type == .file || entry.type == .directory else { fail(PicoDocsError.fileCorrupted); break }
-            if entry.type != .directory, !names.insert(entry.path).inserted { fail(PicoDocsError.fileCorrupted); break }
+            if entry.type == .directory, !entry.path.hasSuffix("/") { fail(PicoDocsError.fileCorrupted); break }
+            if !names.insert(entry.path).inserted { fail(PicoDocsError.fileCorrupted); break }
         }
     }
 
@@ -62,13 +63,14 @@ final class PowerPointPackage {
         if let failure { throw failure }
     }
 
-    func read(_ path: String) -> Data? {
+    func read(_ path: String, maximumBytes: Int = Int.max) -> Data? {
         do {
             try check()
             let clean = path.hasPrefix("/") ? String(path.dropFirst()) : path
             guard let entry = archive[clean] else { return nil }
             let size = UInt64(archive.data?.count ?? 0)
-            guard entry.uncompressedSize <= UInt64(entryLimit), entry.uncompressedSize <= UInt64(remaining),
+            let allowed = max(0, min(entryLimit, maximumBytes))
+            guard entry.uncompressedSize <= UInt64(allowed), entry.uncompressedSize <= UInt64(remaining),
                   entry.compressedSize <= size, entry.isCompressed || entry.uncompressedSize <= size else {
                 throw PicoDocsError.fileCorrupted
             }
@@ -76,7 +78,7 @@ final class PowerPointPackage {
             bytes.reserveCapacity(Int(min(entry.uncompressedSize, 1024 * 1024)))
             let checksum = try archive.extract(entry) { chunk in
                 try Task.checkCancellation()
-                guard chunk.count <= self.entryLimit - bytes.count, chunk.count <= self.remaining,
+                guard chunk.count <= allowed - bytes.count, chunk.count <= self.remaining,
                       !chunk.isEmpty || entry.uncompressedSize == 0 else { throw PicoDocsError.fileCorrupted }
                 self.remaining -= chunk.count
                 bytes.append(chunk)
