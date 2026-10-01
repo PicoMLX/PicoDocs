@@ -66,8 +66,8 @@ enum IWATable {
     /// order). This is the appended-table fallback; `inlineBlocks` instead places
     /// tables at their attachment points. Best-effort: a document with no tables
     /// yields `[]`.
-    static func markdownTables(from streams: [[UInt8]]) -> [String] {
-        let byTile = reconstructTables(buildObjects(streams))
+    static func markdownTables(from streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil) -> [String] {
+        let byTile = reconstructTables(buildObjects(streams, objectBudget: objectBudget))
         return byTile.keys.sorted().compactMap { byTile[$0] }
     }
 
@@ -79,15 +79,15 @@ enum IWATable {
     /// attributed to the first slide, in the given order, that reaches it. Lets
     /// Keynote place each table with its slide instead of appending all at the end.
     static func tablesBySlide(slideIDs: [UInt64], in streams: [[UInt8]],
-                              excludingSubgraphs blocked: Set<UInt64>) -> [UInt64: [String]] {
-        attributedTables(rootIDs: slideIDs, in: streams, excludingSubgraphs: blocked).byRoot
+                              excludingSubgraphs blocked: Set<UInt64>, objectBudget: IWAObjectBudget? = nil) -> [UInt64: [String]] {
+        attributedTables(rootIDs: slideIDs, in: streams, excludingSubgraphs: blocked, objectBudget: objectBudget).byRoot
     }
 
     /// Preserve unclaimed tile identities as well as attributed ones. Identical
     /// rendered tables can belong to different physical table objects.
     static func attributedTables(rootIDs slideIDs: [UInt64], in streams: [[UInt8]],
-                                 excludingSubgraphs blocked: Set<UInt64>, budget: IWAOutputBudget? = nil) -> (byRoot: [UInt64: [String]], unclaimed: [String]) {
-        let objects = buildObjects(streams)
+                                 excludingSubgraphs blocked: Set<UInt64>, budget: IWAOutputBudget? = nil, objectBudget: IWAObjectBudget? = nil) -> (byRoot: [UInt64: [String]], unclaimed: [String]) {
+        let objects = buildObjects(streams, objectBudget: objectBudget)
         let tableMarkdown = reconstructTables(objects, budget: budget)
         guard !Task.isCancelled, budget?.active != false, !tableMarkdown.isEmpty else { return ([:], []) }
         let tiles = Set(tableMarkdown.keys)
@@ -112,11 +112,12 @@ enum IWATable {
     /// (master/template objects) are not traversed, so a slide can't reach its
     /// template's tables. Depth-bounded so the walk stays within a slide's own
     /// content subgraph rather than fanning out through shared objects.
-    private static func reachableTiles(from root: UInt64, objects: [UInt64: IWAArchive.Object],
+    static func reachableTiles(from root: UInt64, objects: [UInt64: IWAArchive.Object],
                                        tiles: Set<UInt64>, blocked: Set<UInt64>) -> [UInt64] {
         var frontier = [root]
         var visited: Set<UInt64> = [root]
         var found: [UInt64] = []
+        var foundIDs: Set<UInt64> = []
         for _ in 0 ..< 12 {
             var next: [UInt64] = []
             for id in frontier {
@@ -124,7 +125,7 @@ enum IWATable {
                 guard let object = objects[id] else { continue }
                 for reference in object.references where !blocked.contains(reference) {
                     guard !Task.isCancelled else { return [] }
-                    if tiles.contains(reference), !found.contains(reference) { found.append(reference) }
+                    if tiles.contains(reference), foundIDs.insert(reference).inserted { found.append(reference) }
                     if visited.insert(reference).inserted { next.append(reference) }
                 }
             }
@@ -142,9 +143,10 @@ enum IWATable {
     /// appended tables — only when the ￼ markers can't be matched 1:1 to attachment
     /// runs, so a table is never dropped. Offsets are UTF-16 code units, the index
     /// space iWork's run/attachment character indices use.
-    static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]]) throws -> [Block]? {
+    static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil) throws -> [Block]? {
         try Task.checkCancellation()
-        let objects = buildObjects(streams)
+        let objects = buildObjects(streams, objectBudget: objectBudget)
+        try objectBudget?.check()
         let tableMarkdown = reconstructTables(objects)
         try Task.checkCancellation()
         let tiles = Set(tableMarkdown.keys)
@@ -153,7 +155,7 @@ enum IWATable {
         var placed = Set<UInt64>()
         // Body storages in document (stream) order; each carries its own text and
         // run tables (paragraph/character styles, smart fields) and attachments.
-        for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
+        for storage in IWAArchive.objects(in: documentStream, objectBudget: objectBudget) where storage.type == storageType {
             try Task.checkCancellation()
             guard let body = bodyStorage(storage, objects: objects, inlineTableTiles: tiles) else { continue }   // kind 0 only
             let attachments = attachmentRuns(in: storage)
@@ -197,10 +199,11 @@ enum IWATable {
     /// placement) so styles still produce Markdown while the tables are appended
     /// separately; attachment marks are dropped. Empty when there is no body text,
     /// so the caller can degrade to plain extraction.
-    static func bodyMarkdown(documentStream: [UInt8], in streams: [[UInt8]]) throws -> String {
-        let objects = buildObjects(streams)
+    static func bodyMarkdown(documentStream: [UInt8], in streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil) throws -> String {
+        let objects = buildObjects(streams, objectBudget: objectBudget)
+        try objectBudget?.check()
         var parts: [String] = []
-        for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
+        for storage in IWAArchive.objects(in: documentStream, objectBudget: objectBudget) where storage.type == storageType {
             guard let body = bodyStorage(storage, objects: objects) else { continue }
             var lists = ListState()
             let rendered = try renderParagraphs(body, 0 ..< body.units.count, objects: objects,
@@ -966,16 +969,18 @@ enum IWATable {
 
     // MARK: - Object graph
 
-    private static func buildObjects(_ streams: [[UInt8]]) -> [UInt64: IWAArchive.Object] {
+    private static func buildObjects(_ streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil) -> [UInt64: IWAArchive.Object] {
+        let budget = objectBudget ?? IWAObjectBudget()
         var objects: [UInt64: IWAArchive.Object] = [:]
         for stream in streams {
             guard !Task.isCancelled else { return [:] }
-            for object in IWAArchive.objects(in: stream) {
+            for object in IWAArchive.objects(in: stream, objectBudget: budget) {
                 guard !Task.isCancelled else { return [:] }
+                guard budget.reserve(256) else { return [:] }
                 objects[object.identifier] = object
             }
         }
-        return objects
+        return budget.active ? objects : [:]
     }
 
     /// Maps each content table's tile id to its rendered Markdown. A table model

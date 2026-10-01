@@ -77,6 +77,7 @@ public struct PagesConverter: DocumentConverter {
             }
         }
 
+        let objectBudget = IWAObjectBudget()
         let allStreams = streams.map(\.stream)
         var sections: [DocumentSection] = []
 
@@ -84,7 +85,7 @@ public struct PagesConverter: DocumentConverter {
         // reading order. Falls back to body text + tables appended after it when
         // the attachments can't be mapped 1:1 (so a table is never dropped).
         if let documentStream,
-           let blocks = try IWATable.inlineBlocks(documentStream: documentStream, in: allStreams) {
+           let blocks = try IWATable.inlineBlocks(documentStream: documentStream, in: allStreams, objectBudget: objectBudget) {
             for block in blocks {
                 switch block {
                 case .text(let raw):
@@ -103,12 +104,12 @@ public struct PagesConverter: DocumentConverter {
             if let documentStream {
                 // Render headings even on the fallback path; degrade to plain text
                 // extraction only if the style-aware renderer yields nothing.
-                let rendered = try IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams)
-                bodyText = rendered.isEmpty ? MarkdownLiteral.escapeBackslashes(Self.normalize(IWAArchive.text(in: documentStream))) : rendered
+                let rendered = try IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams, objectBudget: objectBudget)
+                bodyText = rendered.isEmpty ? MarkdownLiteral.escapeBackslashes(Self.normalize(IWAArchive.text(in: documentStream, objectBudget: objectBudget))) : rendered
             } else {
                 var firstText = ""
                 for entry in streams.sorted(by: { $0.name < $1.name }) {
-                    let extracted = IWAArchive.text(in: entry.stream)
+                    let extracted = IWAArchive.text(in: entry.stream, objectBudget: objectBudget)
                     if !extracted.isEmpty { firstText = MarkdownLiteral.escapeBackslashes(Self.normalize(extracted)); break }
                 }
                 bodyText = firstText
@@ -117,12 +118,13 @@ public struct PagesConverter: DocumentConverter {
             if !cleaned.isEmpty {
                 sections.append(DocumentSection(kind: .body, markdown: cleaned, sourcePath: "Index/Document.iwa"))
             }
-            for markdown in IWATable.markdownTables(from: allStreams) {
+            for markdown in IWATable.markdownTables(from: allStreams, objectBudget: objectBudget) {
                 sections.append(DocumentSection(kind: .table, markdown: markdown, sourcePath: "Index/Tables"))
             }
         }
 
         try Task.checkCancellation()
+        try objectBudget.check()
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
         let title = (info.filename?.isEmpty == false) ? info.filename : nil
         return ConverterResult(title: title, sections: sections)

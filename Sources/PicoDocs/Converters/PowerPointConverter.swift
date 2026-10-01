@@ -1577,7 +1577,10 @@ public struct PowerPointConverter: DocumentConverter {
                 decoded.append(bytes[index]); index += 1
             }
             let path = PowerPointConverter.resolvePartPath(String(decoding: decoded, as: UTF8.self), relativeTo: "")
-            return path + reference[end...]
+            // Fragments address a portion of the fetched resource; they must not
+            // allow an external occurrence to claim a generated carrier's path.
+            let resourceEnd = reference.firstIndex(of: "#") ?? reference.endIndex
+            return path + reference[end..<resourceEnd]
         }
 
         @discardableResult

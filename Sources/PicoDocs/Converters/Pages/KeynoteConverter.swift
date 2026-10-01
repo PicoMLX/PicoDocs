@@ -61,10 +61,12 @@ public struct KeynoteConverter: DocumentConverter {
         // Per-slide KN.SlideArchive id (to resolve deck order from the document's
         // slide tree) and body text (kind == 0; presenter notes are kind 4 and so
         // already excluded).
+        let objectBudget = IWAObjectBudget()
         var slides: [(name: String, id: UInt64, text: String)] = []
         for entry in streams where Self.isSlide(entry.name) {
             try Task.checkCancellation()
-            let objects = IWAArchive.objects(in: entry.stream)
+            let objects = IWAArchive.objects(in: entry.stream, objectBudget: objectBudget)
+            try objectBudget.check()
             let slideID = objects.first { $0.type == Self.slideArchiveType }?.identifier ?? 0
             slides.append((entry.name, slideID, Self.normalize(IWAArchive.text(from: objects))))
         }
@@ -72,7 +74,7 @@ public struct KeynoteConverter: DocumentConverter {
         // Order by the document's slide tree (authoritative); fall back to
         // slide-archive id, then filename, when it can't be resolved.
         let documentStream = streams.first { $0.name.hasSuffix("Document.iwa") }?.stream
-        let deck = Self.deckOrder(documentStream: documentStream, slideIDs: Set(slides.map(\.id)))
+        let deck = Self.deckOrder(documentStream: documentStream, slideIDs: Set(slides.map(\.id)), objectBudget: objectBudget)
         let rank = Dictionary(deck.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
         let ordered = slides.sorted { lhs, rhs in
             let lr = rank[lhs.id] ?? Int.max
@@ -91,13 +93,13 @@ public struct KeynoteConverter: DocumentConverter {
         // descending into theme subgraphs.
         var masterObjectIDs: Set<UInt64> = []
         for entry in streams where Self.isMaster(entry.name) {
-            for object in IWAArchive.objects(in: entry.stream) { masterObjectIDs.insert(object.identifier) }
+            for object in IWAArchive.objects(in: entry.stream, objectBudget: objectBudget) { masterObjectIDs.insert(object.identifier) }
         }
         // Tables grouped by the slide that owns them (reachable from the slide
         // object, not from master/template subgraphs), so each renders right after
         // its slide rather than appended at the end of the deck.
         let tablesForSlide = IWATable.tablesBySlide(
-            slideIDs: ordered.map(\.id), in: streams.map(\.stream), excludingSubgraphs: masterObjectIDs
+            slideIDs: ordered.map(\.id), in: streams.map(\.stream), excludingSubgraphs: masterObjectIDs, objectBudget: objectBudget
         )
 
         var sections: [DocumentSection] = []
@@ -134,7 +136,7 @@ public struct KeynoteConverter: DocumentConverter {
         if !emittedSlideText {
             var pieces: [String] = []
             for entry in streams.filter({ !Self.isMaster($0.name) }).sorted(by: { $0.name < $1.name }) {
-                let text = IWAArchive.text(in: entry.stream)
+                let text = IWAArchive.text(in: entry.stream, objectBudget: objectBudget)
                 if !text.isEmpty { pieces.append(text) }
             }
             let cleaned = Self.normalize(pieces.joined(separator: "\n\n"))
@@ -142,6 +144,7 @@ public struct KeynoteConverter: DocumentConverter {
         }
 
         try Task.checkCancellation()
+        try objectBudget.check()
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
         let title = (info.filename?.isEmpty == false) ? info.filename : nil
         return ConverterResult(title: title, sections: MarkdownLiteral.escapeSectionBackslashes(sections))
@@ -182,9 +185,9 @@ public struct KeynoteConverter: DocumentConverter {
     /// falls back to slide-id / filename order). Structural — it identifies the
     /// tree and nodes via the reference graph rather than hard-coding their
     /// message types; only the slide-archive type above is fixed.
-    private static func deckOrder(documentStream: [UInt8]?, slideIDs: Set<UInt64>) -> [UInt64] {
+    private static func deckOrder(documentStream: [UInt8]?, slideIDs: Set<UInt64>, objectBudget: IWAObjectBudget? = nil) -> [UInt64] {
         guard !slideIDs.isEmpty, let documentStream else { return [] }
-        let objects = IWAArchive.objects(in: documentStream)
+        let objects = IWAArchive.objects(in: documentStream, objectBudget: objectBudget)
         // A slide-tree node references exactly one slide; map node id -> slide id.
         var nodeToSlide: [UInt64: UInt64] = [:]
         for object in objects {

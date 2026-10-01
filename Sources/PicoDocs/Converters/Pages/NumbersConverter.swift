@@ -28,15 +28,18 @@ public struct NumbersConverter: DocumentConverter {
 
     private let outputBudgetBytes: Int
     private let outputBudgetCells: Int
+    private let objectBudgetBytes: Int
 
     public init() {
         outputBudgetBytes = 64 * 1024 * 1024
         outputBudgetCells = 1_000_000
+        objectBudgetBytes = 64 * 1024 * 1024
     }
 
-    init(outputBudgetBytes: Int, outputBudgetCells: Int = 1_000_000) {
+    init(outputBudgetBytes: Int, outputBudgetCells: Int = 1_000_000, objectBudgetBytes: Int = 64 * 1024 * 1024) {
         self.outputBudgetBytes = outputBudgetBytes
         self.outputBudgetCells = outputBudgetCells
+        self.objectBudgetBytes = objectBudgetBytes
     }
 
     public func accepts(_ info: StreamInfo) -> Bool {
@@ -75,10 +78,13 @@ public struct NumbersConverter: DocumentConverter {
         }
         guard let documentStream else { throw PicoDocsError.fileCorrupted }
 
+        let objectBudget = IWAObjectBudget(bytes: objectBudgetBytes)
         let budget = IWAOutputBudget(bytes: outputBudgetBytes, cells: outputBudgetCells)
-        let sheets = Self.sheets(in: IWAArchive.objects(in: documentStream), budget: budget)
+        let sheets = Self.sheets(in: IWAArchive.objects(in: documentStream, objectBudget: objectBudget), budget: budget)
+        try objectBudget.check()
         try budget.check()
-        let attribution = IWATable.attributedTables(rootIDs: sheets.map(\.id), in: streams, excludingSubgraphs: [], budget: budget)
+        let attribution = IWATable.attributedTables(rootIDs: sheets.map(\.id), in: streams, excludingSubgraphs: [], budget: budget, objectBudget: objectBudget)
+        try objectBudget.check()
         try budget.check()
 
         var sections: [DocumentSection] = []

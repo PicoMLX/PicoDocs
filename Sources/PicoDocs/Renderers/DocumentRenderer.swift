@@ -704,7 +704,7 @@ public enum DocumentRenderer {
             if inCodeFence {
                 // Preserve fenced code verbatim as a single field, so a pipe-
                 // containing code line isn't split into CSV cells.
-                rows.append(csvField(lines[i]))
+                rows.append(csvField(restoredCodeText(lines[i])))
                 i += 1
                 continue
             }
