@@ -91,7 +91,7 @@ final class PowerPointPackage {
 /// Validate XML and normalize known namespace aliases before the existing DOM walk.
 /// SAX parsing rejects malformed parts and bounds nesting before SwiftSoup sees them.
 final class PowerPointXML: NSObject, XMLParserDelegate {
-    /// Conversion-wide allowance for DOMs retained by the shared-part cache.
+    /// Conversion-wide allowance for shared and transient slide/notes DOM construction.
     final class Budget {
         var nodes: Int, attributes: Int, bytes: Int, attributeBytes: Int
         init(nodes: Int = 250_000, attributes: Int = 500_000, bytes: Int = 64 * 1024 * 1024, attributeBytes: Int = 8 * 1024 * 1024) {
