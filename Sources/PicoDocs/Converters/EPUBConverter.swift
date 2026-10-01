@@ -89,16 +89,7 @@ public struct EPUBConverter: DocumentConverter {
     // MARK: - Archive / OPF helpers
 
     static func readEntry(_ archive: Archive, path: String) -> Data? {
-        // ZIP entries have no leading slash; strip one so resolved paths still match.
-        let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        guard let entry = archive[cleanPath] else { return nil }
-        var data = Data(capacity: Int(entry.uncompressedSize))
-        do {
-            _ = try archive.extract(entry) { data.append($0) }
-        } catch {
-            return nil
-        }
-        return data
+        ZIPEntryReader.read(archive, path: path)
     }
 
     /// Decodes text trying UTF-8, then UTF-16 (BOM-aware), then ISO Latin-1 as a

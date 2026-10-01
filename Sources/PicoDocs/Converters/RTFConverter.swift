@@ -77,7 +77,7 @@ public struct RTFConverter: DocumentConverter {
         var pendingBytes: [UInt8] = []
 
         var runs: [Run] = []
-        var paragraphs: [String] = []
+        var paragraphs: [[Run]] = []
 
         func appendText(_ s: String) {
             guard !ignore, !s.isEmpty else { return }
@@ -99,10 +99,8 @@ public struct RTFConverter: DocumentConverter {
         }
 
         func flushParagraph() {
-            let rendered = runs.map { renderRun($0) }.joined()
+            if runs.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) { paragraphs.append(runs) }
             runs.removeAll(keepingCapacity: true)
-            let trimmed = rendered.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { paragraphs.append(trimmed) }
         }
 
         while i < n {
@@ -267,7 +265,47 @@ public struct RTFConverter: DocumentConverter {
         }
         flushBytes()
         flushParagraph()
-        return paragraphs.joined(separator: "\n\n")
+        // Trim the source runs before classifying block/code boundaries, so the
+        // projection sees the same indentation as the emitted paragraph.
+        paragraphs = paragraphs.map { paragraph in
+            var trimmed = paragraph
+            for index in trimmed.indices {
+                trimmed[index].text = String(trimmed[index].text.drop { $0.isWhitespace })
+                if !trimmed[index].text.isEmpty { break }
+            }
+            for index in trimmed.indices.reversed() {
+                trimmed[index].text = String(trimmed[index].text.reversed().drop { $0.isWhitespace }.reversed())
+                if !trimmed[index].text.isEmpty { break }
+            }
+            return trimmed.filter { !$0.text.isEmpty }
+        }
+        // Source offsets retain escape provenance. Classify block boundaries
+        // from composed style runs, whose prefixes can change Markdown syntax.
+        let source = paragraphs.map { $0.map(\.text).joined() }.joined(separator: "\n\n")
+        var boundaries: Set<Int> = [], position = 0
+        for paragraph in paragraphs {
+            for run in paragraph { boundaries.insert(position); position += run.text.utf16.count }
+            position += 2
+        }
+        let structure = paragraphs.map { $0.map(renderRun).joined() }.joined(separator: "\n\n")
+        let escapes = MarkdownLiteral.escapeProjection(source, boundaries: boundaries, structuralText: structure)
+        var offset = 0
+        return paragraphs.map { paragraph in
+            let rendered = paragraph.map { run in
+                var escapedRun = run
+                var units: [UInt16] = []
+                for unit in run.text.utf16 {
+                    if escapes.before.contains(offset) { units.append(0x5C) }
+                    units.append(unit)
+                    for _ in 0..<escapes.after[offset] { units.append(unit) }
+                    offset += 1
+                }
+                escapedRun.text = String(decoding: units, as: UTF16.self)
+                return renderRun(escapedRun)
+            }.joined()
+            offset += 2
+            return rendered
+        }.joined(separator: "\n\n")
     }
 
     /// Windows code pages that are double-byte (DBCS): one character may span two

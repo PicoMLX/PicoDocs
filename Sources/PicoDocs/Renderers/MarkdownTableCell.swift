@@ -12,6 +12,155 @@
 import Foundation
 
 enum MarkdownTableCell {
+    static func escapeCanonicalPipes(_ text: String) -> String {
+        MarkdownLiteral.escapeStructural(text, characters: "|")
+    }
+
+    static func decodeBreaks(_ text: String, breakText: String = "\n") -> String {
+        var brackets = 0, destinationDepth = 0
+        return mapCodeSpans(text, code: { codePipes($0, encoding: false) }, plain: { plain in
+            var output = "", index = plain.startIndex
+            while index < plain.endIndex {
+                let character = plain[index]
+                let next = plain.index(after: index)
+                if character == "\\" {
+                    output.append(character); index = next
+                    if index < plain.endIndex { output.append(plain[index]); index = plain.index(after: index) }
+                    continue
+                }
+                if destinationDepth > 0 {
+                    if character == "(" { destinationDepth += 1 }
+                    if character == ")" { destinationDepth -= 1 }
+                } else if character == "[" { brackets += 1 }
+                else if character == "]", brackets > 0 {
+                    brackets -= 1
+                    if next < plain.endIndex, plain[next] == "(" {
+                        destinationDepth = 1; output += "]("; index = plain.index(after: next); continue
+                    }
+                } else if plain[index...].hasPrefix("<br>") {
+                    output += breakText; index = plain.index(index, offsetBy: 4); continue
+                }
+                output.append(character); index = next
+            }
+            return output
+        })
+    }
+
+    static func inlineText(_ text: String, breakText: String = "\n", inline: (String) -> String) -> String {
+        let protected = protectBreakSentinels(text)
+        return restoreBreakSentinels(inline(decodeBreaks(protected, breakText: breakToken)), breakText: breakText)
+    }
+
+    static func protectBreakSentinels(_ text: String) -> String {
+        var output = ""
+        for scalar in text.unicodeScalars {
+            output.unicodeScalars.append(scalar)
+            if scalar == "\u{E042}" { output.unicodeScalars.append(scalar) }
+        }
+        return output
+    }
+
+    static func restoreBreakSentinels(_ text: String, breakText: String) -> String {
+        let scalars = text.unicodeScalars
+        var output = "", index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            index = scalars.index(after: index)
+            if scalar == "\u{E042}", index < scalars.endIndex {
+                let next = scalars[index]
+                if next == "\u{E042}" || next == "\u{E044}" {
+                    if next == "\u{E042}" { output.unicodeScalars.append(scalar) }
+                    else { output += breakText }
+                    index = scalars.index(after: index)
+                    continue
+                }
+            }
+            output.unicodeScalars.append(scalar)
+        }
+        return output
+    }
+
+    static let breakToken = "\u{E042}\u{E044}"
+
+    static func escapeLiteral(_ text: String, punctuation: String) -> String {
+        MarkdownLiteral.escapePunctuation(text, characters: punctuation)
+    }
+
+    /// Transform semantic code spans separately from canonical literal text.
+    static func mapCodeSpans(_ text: String, keepDelimiters: Bool = true, code: (String) -> String, plain: (String) -> String) -> String {
+        guard text.unicodeScalars.contains("`") else { return plain(text) }
+        let scalars = text.unicodeScalars
+        var index = scalars.startIndex, plainStart = index
+        var output = ""
+        // Only the last run of each distinct length is needed to rule out
+        // unmatched openers. Successful searches then consume disjoint spans,
+        // keeping both passes linear without retaining every character/run.
+        var lastRun: [Int: String.Index] = [:]
+        var scan = scalars.startIndex
+        while scan < scalars.endIndex {
+            guard scalars[scan] == "`" else { scan = scalars.index(after: scan); continue }
+            let start = scan
+            var length = 0
+            while scan < scalars.endIndex, scalars[scan] == "`" { length += 1; scan = scalars.index(after: scan) }
+            lastRun[length] = start
+        }
+        while index < scalars.endIndex {
+            if scalars[index] == "\\" {
+                index = scalars.index(after: index)
+                if index < scalars.endIndex { index = scalars.index(after: index) }
+                continue
+            }
+            guard scalars[index] == "`" else { index = scalars.index(after: index); continue }
+            let opener = index
+            var length = 0
+            while index < scalars.endIndex, scalars[index] == "`" { length += 1; index = scalars.index(after: index) }
+            let contentStart = index
+            guard let last = lastRun[length], last > opener else { continue }
+            var search = index, closing: (String.Index, String.Index)?
+            while search < scalars.endIndex {
+                guard scalars[search] == "`" else { search = scalars.index(after: search); continue }
+                let start = search
+                var count = 0
+                while search < scalars.endIndex, scalars[search] == "`" { count += 1; search = scalars.index(after: search) }
+                if count == length { closing = (start, search); break }
+            }
+            guard let (close, afterClose) = closing else { continue }
+            output += plain(String(text[plainStart..<opener]))
+            let delimiter = keepDelimiters ? String(text[opener..<contentStart]) : ""
+            output += delimiter + code(String(text[contentStart..<close])) + delimiter
+            index = afterClose; plainStart = index
+        }
+        return output + plain(String(text[plainStart...]))
+    }
+
+
+
+    /// Add table structure to already canonical inline Markdown without doubling
+    /// prose escapes or changing literal backslashes inside code.
+    static func escapeCanonicalDelimiters(_ text: String) -> String {
+        mapCodeSpans(text, code: { codePipes($0, encoding: true) }, plain: { MarkdownLiteral.escapeStructural($0, characters: "|") })
+    }
+
+    /// Only runs immediately before pipes need a table layer inside code.
+    /// Backslashes elsewhere are source text and must remain untouched.
+    static func codePipes(_ text: String, encoding: Bool) -> String {
+        var output = "", slashes = 0
+        for character in text.unicodeScalars {
+            if character == "\\" { slashes += 1; continue }
+            let count: Int
+            if character == "|" {
+                count = encoding ? slashes * 2 + 1 : (slashes.isMultiple(of: 2) ? slashes : (slashes - 1) / 2)
+            } else { count = slashes }
+            output += String(repeating: "\\", count: count)
+            output.unicodeScalars.append(character); slashes = 0
+        }
+        return output + String(repeating: "\\", count: slashes)
+    }
+
+    static func decodeCodePipes(_ text: String) -> String {
+        mapCodeSpans(text, code: { codePipes($0, encoding: false) }, plain: { $0 })
+    }
+
 
     /// Escapes the characters that are structural in a pipe-table cell: a literal
     /// backslash (`\` -> `\\`, done first) and the pipe delimiter (`|` -> `\|`).

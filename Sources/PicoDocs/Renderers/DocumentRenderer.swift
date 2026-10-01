@@ -45,32 +45,8 @@ public enum DocumentRenderer {
         let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
         let parsed = parseBlocks(bodyMarkdown)
         let numbers = footnoteNumbers(blocks: parsed, notes: notes)
-        var out: [String] = []
-        // Inline `[^id]` references become `[N]` inside `stripInline` (code spans
-        // protected; code blocks keep literal markers).
-        for block in parsed {
-            switch block {
-            case .heading(_, let text):
-                out.append(stripInline(text, footnoteNumbers: numbers))
-            case .paragraph(let text):
-                out.append(stripInline(text, footnoteNumbers: numbers))
-            case .code(let code):
-                out.append(code)
-            case .rule:
-                out.append("---")
-            case .blockquote(let lines):
-                out.append(lines.map { stripInline($0, footnoteNumbers: numbers) }.joined(separator: "\n"))
-            case .list(let ordered, let items):
-                let rendered = items.enumerated().map { index, item in
-                    let marker = ordered ? "\(index + 1). " : "- "
-                    return marker + stripInline(item, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: " ")
-                }
-                out.append(rendered.joined(separator: "\n"))
-            case .table(let rows):
-                out.append(rows.map { $0.map { stripInline($0, footnoteNumbers: numbers) }.joined(separator: "\t") }.joined(separator: "\n"))
-            }
-        }
-        var text = out.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        let out = plaintextBlocks(parsed, footnoteNumbers: numbers)
+        var text = out.joined(separator: "\n\n")
         // Append numbered definitions for referenced notes (parseBlocks would
         // otherwise leak them as plain text); references were numbered above.
         let referenced = referencedNotes(notes, numbers)
@@ -83,38 +59,77 @@ public enum DocumentRenderer {
         return text
     }
 
+    /// Each block as plaintext. Inline `[^id]` references become `[N]` inside
+    /// `stripInline` (code spans protected; code blocks keep literal markers).
+    private static func plaintextBlocks(_ parsed: [Block], footnoteNumbers numbers: [String: Int],
+                                        depth: Int = 0) -> [String] {
+        parsed.map { block in
+            switch block {
+            case .heading(_, let text):
+                return stripInline(text, footnoteNumbers: numbers)
+            case .paragraph(let text):
+                return stripInline(text, footnoteNumbers: numbers)
+            case .code(let code):
+                return code
+            case .rule:
+                return "---"
+            case .blockquote(let lines):
+                return lines.map { stripInline($0, footnoteNumbers: numbers) }.joined(separator: "\n")
+            case .list(_, _, let items):
+                return items.map { item in
+                    let marker = item.number.map { "\($0)\(item.delimiter)" } ?? "-"
+                    return plaintextListItem(marker + item.padding, listItemText(item), footnoteNumbers: numbers, depth: depth)
+                }.joined(separator: "\n")
+            case .table(let rows):
+                return rows.map { $0.map { MarkdownTableCell.inlineText($0) { stripInline($0, footnoteNumbers: numbers) } }.joined(separator: "\t") }.joined(separator: "\n")
+            }
+        }
+    }
+
+    private static func listItemText(_ item: MarkdownList.Item) -> String {
+        item.content.map { content in
+            switch content {
+            case .text(let text): return text
+            case .list(let list): return list.plaintext { $0 }
+            }
+        }.joined(separator: "\n")
+    }
+
+    /// A list item as plaintext: the marker and its leading text on one line, with
+    /// any nested content (e.g. a sub-list) indented under it.
+    private static func plaintextListItem(_ marker: String, _ item: String,
+                                          footnoteNumbers numbers: [String: Int], depth: Int) -> String {
+        let (lead, nested) = listItemContent(item, depth: depth)
+        var out = lead.isEmpty ? marker.trimmingCharacters(in: .whitespaces)
+            : marker + MarkdownList.inlineText(lead, breakText: "\n" + String(repeating: " ", count: WordListNumbering.displayWidth(marker))) { stripInline($0, footnoteNumbers: numbers) }
+        let indent = String(repeating: " ", count: WordListNumbering.displayWidth(marker))
+        for block in plaintextBlocks(nested, footnoteNumbers: numbers, depth: depth + 1) {
+            out += "\n" + block.components(separatedBy: "\n").map { indent + $0 }.joined(separator: "\n")
+        }
+        return out
+    }
+
+    /// Splits a list item's text into its leading paragraph and the blocks nested
+    /// under it (a sub-list keeps its indentation relative to the item). Past a
+    /// fixed depth the rest stays flat text, so hostile nesting can't recurse
+    /// without bound.
+    private static func listItemContent(_ item: String, depth: Int) -> (lead: String, nested: [Block]) {
+        guard depth < maxListNesting else { return (item, []) }
+        var blocks = parseBlocks(item)
+        guard case .paragraph(let lead)? = blocks.first else { return ("", blocks) }
+        blocks.removeFirst()
+        return (lead, blocks)
+    }
+
+    private static let maxListNesting = 16
+
     // MARK: - HTML
 
     private static func renderHTML(_ result: ConverterResult) -> String {
         let (bodyMarkdown, notes) = extractFootnotes(result.markdown())
         let parsed = parseBlocks(bodyMarkdown)
         let numbers = footnoteNumbers(blocks: parsed, notes: notes)
-        var blocks: [String] = []
-        // Inline `[^id]` references are turned into superscript links inside
-        // `inlineHTML` (so code spans are protected and code blocks, which never
-        // reach `inlineHTML`, keep literal markers).
-        for block in parsed {
-            switch block {
-            case .heading(let level, let text):
-                blocks.append("<h\(level)>\(inlineHTML(text, footnoteNumbers: numbers))</h\(level)>")
-            case .paragraph(let text):
-                let html = inlineHTML(text, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: "<br>\n")
-                blocks.append("<p>\(html)</p>")
-            case .code(let code):
-                blocks.append("<pre><code>\(escapeHTML(code))</code></pre>")
-            case .rule:
-                blocks.append("<hr>")
-            case .blockquote(let lines):
-                let inner = lines.map { inlineHTML($0, footnoteNumbers: numbers) }.joined(separator: "<br>\n")
-                blocks.append("<blockquote>\(inner)</blockquote>")
-            case .list(let ordered, let items):
-                let tag = ordered ? "ol" : "ul"
-                let lis = items.map { "<li>\(inlineHTML($0, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: " "))</li>" }
-                blocks.append("<\(tag)>\n\(lis.joined(separator: "\n"))\n</\(tag)>")
-            case .table(let rows):
-                blocks.append(renderHTMLTable(rows, footnoteNumbers: numbers))
-            }
-        }
+        let blocks = htmlBlocks(parsed, footnoteNumbers: numbers)
         var bodyHTML = blocks.joined(separator: "\n")
         let footnotes = footnotesHTML(notes: notes, numbers: numbers)
         if !footnotes.isEmpty { bodyHTML += "\n" + footnotes }
@@ -161,30 +176,73 @@ public enum DocumentRenderer {
         for section in imageSections {
             guard let filename = imageRefName(for: section), basenameCounts[filename] == 1,
                   let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
-            let mime = section.metadata["mimeType"] ?? "application/octet-stream"
+            // Parameters are metadata, not part of the payload delimiter syntax.
+            let mime = (section.metadata["mimeType"] ?? "application/octet-stream")
+                .split(separator: ";", maxSplits: 1).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? "application/octet-stream"
             result = result.replacingOccurrences(
-                of: "src=\"\(filename)\"",
-                with: "src=\"data:\(mime);base64,\(base64)\""
+                of: "src=\"\(escapeHTML(filename))\"",
+                with: "src=\"\(escapeHTML("data:\(mime);base64,\(base64)"))\""
             )
         }
         return result
     }
 
-    /// The basename a `.image` section is referenced by in the body Markdown:
-    /// its source path's last component, falling back to its title.
+    /// The serialized destination carried by an image producer, or its source
+    /// basename/title for producers that emit their filenames unchanged.
     private static func imageRefName(for section: DocumentSection) -> String? {
-        let filename = (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
+        let filename = section.metadata["markdownReference"] ?? (section.sourcePath as NSString?)?.lastPathComponent ?? section.title
         guard let filename, !filename.isEmpty else { return nil }
         return filename
+    }
+
+    /// Each block as HTML. Inline `[^id]` references are turned into superscript
+    /// links inside `inlineHTML` (so code spans are protected and code blocks,
+    /// which never reach `inlineHTML`, keep literal markers).
+    private static func htmlBlocks(_ parsed: [Block], footnoteNumbers numbers: [String: Int],
+                                   depth: Int = 0) -> [String] {
+        parsed.map { block in
+            switch block {
+            case .heading(let level, let text):
+                return "<h\(level)>\(inlineHTML(text, footnoteNumbers: numbers))</h\(level)>"
+            case .paragraph(let text):
+                let html = inlineHTML(text, footnoteNumbers: numbers).replacingOccurrences(of: "\n", with: "<br>\n")
+                return "<p>\(html)</p>"
+            case .code(let code):
+                return "<pre><code>\(escapeHTML(code))</code></pre>"
+            case .rule:
+                return "<hr>"
+            case .blockquote(let lines):
+                let inner = lines.map { inlineHTML($0, footnoteNumbers: numbers) }.joined(separator: "<br>\n")
+                return "<blockquote>\(inner)</blockquote>"
+            case .list(let ordered, let start, let items):
+                let tag = ordered ? "ol" : "ul"
+                var expected = start
+                let lis = items.map { item -> String in
+                    let value = item.number.map { $0 == expected ? "" : " value=\"\($0)\"" } ?? ""
+                    if let number = item.number { expected = number + 1 }
+                    let (lead, nested) = listItemContent(listItemText(item), depth: depth)
+                    var html = MarkdownList.inlineText(lead, breakText: "<br>") { inlineHTML($0, footnoteNumbers: numbers) }
+                    if !nested.isEmpty {
+                        html += "\n" + htmlBlocks(nested, footnoteNumbers: numbers, depth: depth + 1).joined(separator: "\n")
+                        if case .list? = nested.last {} else { html += "\n" }
+                    }
+                    return "<li\(value)>\(html)</li>"
+                }
+                let startAttribute = ordered && start != 1 ? " start=\"\(start)\"" : ""
+                return "<\(tag)\(startAttribute)>\n\(lis.joined(separator: "\n"))\n</\(tag)>"
+            case .table(let rows):
+                return renderHTMLTable(rows, footnoteNumbers: numbers)
+            }
+        }
     }
 
     private static func renderHTMLTable(_ rows: [[String]], footnoteNumbers: [String: Int] = [:]) -> String {
         guard let header = rows.first else { return "" }
         var out = "<table>\n<thead>\n<tr>"
-        out += header.map { "<th>\(inlineHTML($0, footnoteNumbers: footnoteNumbers))</th>" }.joined()
+        out += header.map { "<th>\(MarkdownTableCell.inlineText($0, breakText: "<br>") { inlineHTML($0, footnoteNumbers: footnoteNumbers) })</th>" }.joined()
         out += "</tr>\n</thead>\n<tbody>\n"
         for row in rows.dropFirst() {
-            out += "<tr>" + row.map { "<td>\(inlineHTML($0, footnoteNumbers: footnoteNumbers))</td>" }.joined() + "</tr>\n"
+            out += "<tr>" + row.map { "<td>\(MarkdownTableCell.inlineText($0, breakText: "<br>") { inlineHTML($0, footnoteNumbers: footnoteNumbers) })</td>" }.joined() + "</tr>\n"
         }
         out += "</tbody>\n</table>"
         return out
@@ -205,11 +263,25 @@ public enum DocumentRenderer {
         var notes: [(id: String, text: String)] = []
         var i = 0
         var inFence = false
+        var fenceList: (base: Int, content: Int)?
+        var lists: [(base: Int, content: Int)] = []
+        var followsBlank = false
         while i < lines.count {
+            let blank = lines[i].trimmingCharacters(in: .whitespaces).isEmpty
+            if inFence, let container = fenceList, !blank,
+               !literalListContains(lines[i], base: container.base, content: container.content, afterBlank: followsBlank) {
+                inFence = false; fenceList = nil
+            }
+            if !inFence, !blank {
+                while let last = lists.last, !literalListContains(lines[i], base: last.base, content: last.content, afterBlank: followsBlank) { lists.removeLast() }
+                if let item = literalListIndent(lines, index: i) { lists.append(item) }
+            }
+            followsBlank = blank
             // A `[^id]: text` line inside a fenced code block is literal code, not
             // a definition — track the fence so it stays in the body.
-            if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+            if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") || (!inFence && literalListFenceStart(lines[i])) {
                 inFence.toggle()
+                fenceList = inFence ? lists.last : nil
                 bodyLines.append(lines[i])
                 i += 1
                 continue
@@ -217,6 +289,17 @@ public enum DocumentRenderer {
             // Allow up to 3 leading spaces before a definition (Markdown block
             // indentation); 4+ spaces is an indented code block, left in the body.
             if !inFence, let (id, first) = parseFootnoteDefinition(dropLeadingSpaces(lines[i], max: 3)) {
+                // Preserve prose boundaries without splitting an enclosing list.
+                let inList = lists.last.map { indentWidth(lines[i]) >= $0.content } ?? false
+                if inList, let container = lists.last {
+                    // End inline code context inside the item without a blank line,
+                    // which would change continuation indentation or split the list.
+                    bodyLines.append(String(repeating: " ", count: container.content) + MarkdownLiteral.listRestartBoundary)
+                } else if !bodyLines.isEmpty {
+                    // A root definition ends the preceding list even when the
+                    // following block has enough indentation to look like a continuation.
+                    bodyLines.append(MarkdownLiteral.listRestartBoundary)
+                }
                 var textLines = [first]
                 i += 1
                 while i < lines.count {                       // indented continuation lines
@@ -240,17 +323,26 @@ public enum DocumentRenderer {
                 i += 1
             }
         }
-        let body = bodyLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = bodyLines.joined(separator: "\n").trimmingCharacters(in: .newlines)
         return (body, notes)
     }
 
     /// Parses a CommonMark footnote definition line `[^id]: text`, returning the
     /// id and first-line text (nil if the line isn't a definition).
     private static func parseFootnoteDefinition(_ line: String) -> (id: String, text: String)? {
-        guard line.hasPrefix("[^"), let close = line.firstIndex(of: "]") else { return nil }
+        guard line.hasPrefix("[^") else { return nil }
         let idStart = line.index(line.startIndex, offsetBy: 2)
+        var close = idStart
+        while close < line.endIndex {
+            if line[close] == "\\" {
+                close = line.index(after: close)
+                if close < line.endIndex { close = line.index(after: close) }
+            } else if line[close] == "]" { break }
+            else { close = line.index(after: close) }
+        }
+        guard close < line.endIndex else { return nil }
         guard idStart < close else { return nil }
-        let id = String(line[idStart..<close])
+        let id = decodedFootnoteID(String(line[idStart..<close]))
         let afterClose = line.index(after: close)
         guard !id.isEmpty, afterClose < line.endIndex, line[afterClose] == ":" else { return nil }
         var text = String(line[line.index(after: afterClose)...])
@@ -279,6 +371,7 @@ public enum DocumentRenderer {
     /// definitions get no number (and so aren't rendered), matching how Markdown
     /// footnote processors treat them.
     private static func footnoteNumbers(blocks: [Block], notes: [(id: String, text: String)]) -> [String: Int] {
+        guard !notes.isEmpty else { return [:] }
         let noteText = Dictionary(notes.map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })
         var numbers: [String: Int] = [:]
         var next = 1
@@ -294,25 +387,31 @@ public enum DocumentRenderer {
             // Mirror inlineHTML/stripInline: code spans and links become
             // placeholders, so a `[^id]` inside them isn't treated as a reference.
             let (afterCode, _) = extractCodeSpans(text)
-            let (afterLinks, _) = extractLinks(afterCode)
+            let protected = protectEscapes(afterCode)
+            let (afterLinks, _) = extractLinks(protected)
             var cursor = afterLinks.startIndex
             while let open = afterLinks.range(of: "[^", range: cursor..<afterLinks.endIndex) {
                 guard let close = afterLinks.range(of: "]", range: open.upperBound..<afterLinks.endIndex) else { break }
-                register(String(afterLinks[open.upperBound..<close.lowerBound]))
+                register(restoreEscapes(String(afterLinks[open.upperBound..<close.lowerBound]), html: false))
                 cursor = close.upperBound
             }
         }
 
-        for block in blocks {
-            switch block {
-            case .code, .rule: continue        // code blocks never render footnote refs
-            case .heading(_, let text): scan(text)
-            case .paragraph(let text): scan(text)
-            case .blockquote(let lines): lines.forEach(scan)
-            case .list(_, let items): items.forEach(scan)
-            case .table(let rows): rows.forEach { $0.forEach(scan) }
+        func scanBlocks(_ blocks: [Block], depth: Int = 0) {
+            for block in blocks {
+                switch block {
+                case .code, .rule: continue        // code blocks never render footnote refs
+                case .heading(_, let text): scan(text)
+                case .paragraph(let text): scan(text)
+                case .blockquote(let lines): lines.forEach(scan)
+                case .list(_, _, let items):
+                    if depth < maxListNesting { items.forEach { scanBlocks(parseBlocks(listItemText($0)), depth: depth + 1) } }
+                    else { items.forEach { scan(listItemText($0)) } }
+                case .table(let rows): rows.forEach { $0.forEach(scan) }
+                }
             }
         }
+        scanBlocks(blocks)
         // Number notes referenced only from other notes after all body references
         // (breadth-first), so visible body numbers stay in document order.
         var index = 0
@@ -378,14 +477,19 @@ public enum DocumentRenderer {
     /// becomes a single-field row, so prose isn't silently dropped.
     private static func renderCSV(_ result: ConverterResult) -> String {
         var parts: [String] = []
+        var markdown: [String] = []
+        func flush() {
+            let rows = csvRows(fromMarkdown: markdown.joined(separator: "\n\n"))
+            if !rows.isEmpty { parts.append(rows.joined(separator: "\n")) }
+            markdown.removeAll(keepingCapacity: true)
+        }
         for section in result.sections where section.kind != .image {
             if let rawCSV = section.metadata["csv"], !rawCSV.isEmpty {
+                flush()
                 parts.append(rawCSV)
-            } else {
-                let rows = csvRows(fromMarkdown: section.markdown)
-                if !rows.isEmpty { parts.append(rows.joined(separator: "\n")) }
-            }
+            } else { markdown.append(section.markdown) }
         }
+        flush()
         return parts.joined(separator: "\n")
     }
 
@@ -394,10 +498,26 @@ public enum DocumentRenderer {
         let lines = markdown.components(separatedBy: "\n")
         var i = 0
         var inCodeFence = false
+        var fenceList: (base: Int, content: Int)?
+        var lists: [(base: Int, content: Int)] = []
+        var followsBlank = false
+        var inNote = false
         while i < lines.count {
             let line = lines[i].trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("```") {
+            if inCodeFence, let container = fenceList, !line.isEmpty,
+               !literalListContains(lines[i], base: container.base, content: container.content, afterBlank: followsBlank) {
+                inCodeFence = false; fenceList = nil
+            }
+            if !inCodeFence, !line.isEmpty {
+                if inNote, !lines[i].hasPrefix("    "), !lines[i].hasPrefix("\t") { inNote = false }
+                if literalFootnoteDefinition(lines[i]) { inNote = true }
+                while let last = lists.last, !literalListContains(lines[i], base: last.base, content: last.content, afterBlank: followsBlank) { lists.removeLast() }
+                if let item = literalListIndent(lines, index: i) { lists.append(item) }
+            }
+            followsBlank = line.isEmpty
+            if line.hasPrefix("```") || (!inCodeFence && literalListFenceStart(lines[i])) {
                 inCodeFence.toggle()
+                fenceList = inCodeFence ? lists.last : nil
                 i += 1
                 continue
             }
@@ -408,22 +528,45 @@ public enum DocumentRenderer {
                 i += 1
                 continue
             }
-            if line.isEmpty { i += 1; continue }
+            if line.isEmpty || line == MarkdownLiteral.listRestartBoundary { i += 1; continue }
             if line.hasPrefix("|") {
                 // Within a run of table rows, drop only the conventional separator
                 // (second row), so all-dash data rows elsewhere are preserved.
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.unescape($0) }
+                    let cells = parseTableRow(lines[i])
                     if !(rowIndex == 1 && isTableSeparatorRow(cells)) {
-                        rows.append(cells.map { csvField($0) }.joined(separator: ","))
+                        rows.append(cells.map { csvField(MarkdownTableCell.inlineText($0) { stripInline($0) }) }.joined(separator: ","))
                     }
                     rowIndex += 1
                     i += 1
                 }
             } else {
-                rows.append(csvField(stripInline(line)))
+                var paragraph = [line]
                 i += 1
+                if !literalBlockBoundary(lines[i - 1]).ends {
+                    while i < lines.count {
+                        let candidate = lines[i].trimmingCharacters(in: .whitespaces)
+                        if inNote {
+                            if lines[i].hasPrefix("    ") || lines[i].hasPrefix("\t") {
+                                paragraph.append(candidate); i += 1; continue
+                            }
+                            if candidate.isEmpty {
+                                var next = i + 1
+                                while next < lines.count, lines[next].trimmingCharacters(in: .whitespaces).isEmpty { next += 1 }
+                                if next < lines.count, lines[next].hasPrefix("    ") || lines[next].hasPrefix("\t") {
+                                    paragraph += Array(repeating: "", count: next - i); i = next; continue
+                                }
+                            }
+                        }
+                        if candidate.isEmpty || candidate.hasPrefix("```") || literalBlockBoundary(lines[i]).starts || confirmedBareMarker(lines, index: i) != nil { break }
+                        if let list = lists.last, indentWidth(lines[i]) < list.base + 2 { break }
+                        if inNote, !lines[i].hasPrefix("    "), !lines[i].hasPrefix("\t") { break }
+                        paragraph.append(candidate)
+                        i += 1
+                    }
+                }
+                rows += stripInline(paragraph.joined(separator: "\n")).components(separatedBy: "\n").map(csvField)
             }
         }
         return rows
@@ -436,13 +579,16 @@ public enum DocumentRenderer {
         case paragraph(String)
         case code(String)
         case blockquote([String])
-        case list(ordered: Bool, items: [String])
+        case list(ordered: Bool, start: Int, items: [MarkdownList.Item])
         case table([[String]])
         case rule
     }
 
     private static func parseBlocks(_ markdown: String) -> [Block] {
-        let lines = markdown.components(separatedBy: "\n")
+        let lines = markdown.components(separatedBy: "\n").map { line in
+            let whitespace = line.prefix { $0 == " " || $0 == "\t" }
+            return String(repeating: " ", count: indentWidth(line)) + line.dropFirst(whitespace.count)
+        }
         var blocks: [Block] = []
         var i = 0
 
@@ -452,7 +598,7 @@ public enum DocumentRenderer {
             let line = lines[i]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
-            if isBlank(line) { i += 1; continue }
+            if isBlank(line) || trimmed == MarkdownLiteral.listRestartBoundary { i += 1; continue }
 
             if trimmed.hasPrefix("```") {
                 i += 1
@@ -477,7 +623,7 @@ public enum DocumentRenderer {
                 var rows: [[String]] = []
                 var rowIndex = 0
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i]).map { MarkdownTableCell.unescape($0) }
+                    let cells = parseTableRow(lines[i])
                     // The header/body separator is conventionally the second row;
                     // only drop an all-dash row there, so real data rows that
                     // happen to be all dashes elsewhere are kept.
@@ -501,36 +647,66 @@ public enum DocumentRenderer {
                 blocks.append(.blockquote(inner)); continue
             }
 
-            if listMarker(trimmed) != nil {
-                let ordered = listMarker(trimmed) == .ordered
-                var items: [String] = []
+            let leadingBare = confirmedBareMarker(lines, index: i)
+            let confirmedBare = leadingBare != nil
+            if listMarker(trimmed) != nil || confirmedBare {
+                let ordered = (listMarker(trimmed) ?? leadingBare) == .ordered
+                let start = ordered ? listStart(trimmed) : 1
+                // Items sit at the list's own indent; a line indented two or more
+                // columns past it continues the current item. It keeps its
+                // indentation relative to the item's content column, so a nested
+                // list stays nested (the renderers parse each item's text again).
+                let base = indentWidth(line)
+                var contentColumn = base
+                var items: [MarkdownList.Item] = []
                 while i < lines.count {
-                    let itemLine = lines[i].trimmingCharacters(in: .whitespaces)
-                    if let marker = listMarker(itemLine), (marker == .ordered) == ordered {
-                        items.append(stripListMarker(itemLine)); i += 1
-                    } else if !isBlank(lines[i]), lines[i].hasPrefix("  "), !items.isEmpty {
-                        items[items.count - 1] += "\n" + lines[i].trimmingCharacters(in: .whitespaces)
+                    let raw = lines[i]
+                    let itemLine = raw.trimmingCharacters(in: .whitespaces)
+                    let indent = indentWidth(raw)
+                    if indent < base + 2, let marker = listMarker(itemLine), (marker == .ordered) == ordered {
+                        guard let item = MarkdownList.item(from: raw), !ordered || item.delimiter == items.first?.delimiter || items.isEmpty else { break }
+                        items.append(item)
+                        contentColumn = MarkdownList.contentIndent(of: raw) ?? indent + markerWidth(itemLine); i += 1
+                    } else if indent < base + 2, let marker = bareListMarker(itemLine), (marker == .ordered) == ordered {
+                        guard let item = MarkdownList.item(from: raw), !ordered || item.delimiter == items.first?.delimiter || items.isEmpty else { break }
+                        items.append(item)                  // an empty item inside the list
+                        contentColumn = MarkdownList.contentIndent(of: raw) ?? indent + itemLine.count + 1; i += 1
+                    } else if isBlank(raw), !items.isEmpty {
+                        var next = i + 1
+                        while next < lines.count, isBlank(lines[next]) { next += 1 }
+                        guard next < lines.count else { break }
+                        // Blank lines separate loose items as well as nested
+                        // blocks. Native restarts carry an explicit boundary.
+                        let resumesList = resumesLooseList(lines[next], after: items[items.count - 1], base: base)
+                        guard resumesList || indentWidth(lines[next]) >= contentColumn else { break }
+                        if !resumesList { items[items.count - 1].appendText("") }
+                        i = next
+                    } else if !isBlank(raw), !items.isEmpty, literalListContains(raw, base: base, content: contentColumn) {
+                        items[items.count - 1].appendText(String(raw.dropFirst(min(indent, contentColumn))))
                         i += 1
                     } else {
                         break
                     }
                 }
-                blocks.append(.list(ordered: ordered, items: items)); continue
+                blocks.append(.list(ordered: ordered, start: start, items: items)); continue
             }
 
             // Paragraph: gather until a blank line or a structural line.
             var paragraph: [String] = []
             while i < lines.count {
                 let candidate = lines[i].trimmingCharacters(in: .whitespaces)
-                if isBlank(lines[i]) || candidate.hasPrefix("```") || candidate.hasPrefix("|")
-                    || candidate.hasPrefix(">") || candidate == "---" || candidate == "***"
-                    || headingMatch(candidate) != nil || listMarker(candidate) != nil {
+                if isBlank(lines[i]) || candidate == MarkdownLiteral.listRestartBoundary || candidate.hasPrefix("```") || candidate.hasPrefix("|")
+                    || candidate.hasPrefix(">") || candidate == "---" || candidate == "***" || candidate == "___"
+                    || headingMatch(candidate) != nil || listMarker(candidate) != nil || confirmedBareMarker(lines, index: i) != nil {
                     break
                 }
+                // Preserve canonical escapes until inline parsing has protected them.
                 paragraph.append(lines[i]); i += 1
             }
             if !paragraph.isEmpty {
                 blocks.append(.paragraph(paragraph.joined(separator: "\n")))
+            } else {
+                blocks.append(.paragraph(lines[i])); i += 1
             }
         }
         return blocks
@@ -549,17 +725,99 @@ public enum DocumentRenderer {
 
     private enum ListKind: Equatable { case ordered, unordered }
 
+    private static func isStructuralContinuation(_ line: String) -> Bool {
+        if line.hasPrefix("|") || headingMatch(line) != nil || line.hasPrefix(">") || line.hasPrefix("```") { return true }
+        if listMarker(line) != nil || bareListMarker(line) != nil { return true }
+        return ["---", "***", "___"].contains(line)
+    }
+
     private static func listMarker(_ line: String) -> ListKind? {
-        if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") { return .unordered }
-        // ordered: one-or-more digits, then ". "
-        var index = line.startIndex
-        var digits = 0
-        while index < line.endIndex, line[index].isNumber { digits += 1; index = line.index(after: index) }
-        if digits > 0, index < line.endIndex, line[index] == "." {
-            let after = line.index(after: index)
-            if after < line.endIndex, line[after] == " " { return .ordered }
+        guard let ordered = MarkdownList.isOrderedMarker(line), let item = MarkdownList.item(from: line),
+              !listItemText(item).isEmpty else { return nil }
+        return ordered ? .ordered : .unordered
+    }
+
+    /// Match the list parser's continuation grammar for both literal escaping and CSV.
+    static func literalListContains(_ line: String, base: Int, content: Int, afterBlank: Bool = false) -> Bool {
+        let indent = indentWidth(line)
+        return indent >= content || (!afterBlank && indent >= base + 2 && !isStructuralContinuation(line.trimmingCharacters(in: .whitespaces)))
+    }
+
+    private static func indentWidth(_ line: String) -> Int {
+        line.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
+    }
+
+    /// The width of a list line's marker and the space after it (`- ` → 2, `12. ` → 4).
+    private static func markerWidth(_ line: String) -> Int {
+        MarkdownList.contentIndent(of: line) ?? 0
+    }
+
+    /// A marker with no content (`-`, `2.`) — an empty list item. Only accepted
+    /// inside an open list, so a lone `-` or `2020.` line never starts one.
+    private static func bareListMarker(_ line: String) -> ListKind? {
+        if line == "-" || line == "*" || line == "+" { return .unordered }
+        let digits = line.prefix { $0.isASCII && $0.isNumber }
+        return (1...9).contains(digits.count) && [".", ")"].contains(String(line.dropFirst(digits.count))) ? .ordered : nil
+    }
+
+    /// The number an ordered list starts at (`5. x` → 5), 1 when it isn't a
+    /// CommonMark list number (one to nine ASCII digits).
+    private static func listStart(_ line: String) -> Int {
+        let digits = line.prefix { $0.isASCII && $0.isNumber }
+        return digits.count <= 9 ? Int(digits) ?? 1 : 1
+    }
+
+    private static func confirmedBareMarker(_ lines: [String], index: Int) -> ListKind? {
+        let line = lines[index], trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard let marker = bareListMarker(trimmed) else { return nil }
+        let next = index + 1, base = indentWidth(line), content = indentWidth(line) + trimmed.count + 1
+        let adjacent = next < lines.count && !lines[next].trimmingCharacters(in: .whitespaces).isEmpty
+            && (indentWidth(lines[next]) < base + 2 || indentWidth(lines[next]) >= content)
+            && (listMarker(lines[next].trimmingCharacters(in: .whitespaces)) ?? bareListMarker(lines[next].trimmingCharacters(in: .whitespaces))) == marker
+        var following = next
+        while following < lines.count, lines[following].trimmingCharacters(in: .whitespaces).isEmpty { following += 1 }
+        let looseSibling = following > next && following < lines.count
+            && MarkdownList.item(from: line).map { resumesLooseList(lines[following], after: $0, base: base) } == true
+        return adjacent || looseSibling || (following < lines.count && indentWidth(lines[following]) >= content) ? marker : nil
+    }
+
+    /// The same continuation rule confirms a leading empty item and resumes an
+    /// open list. Sequential ordered markers avoid turning `2020.\n\n1. item`
+    /// into a list; unordered siblings need no numbering evidence.
+    private static func resumesLooseList(_ line: String, after previous: MarkdownList.Item, base: Int) -> Bool {
+        guard indentWidth(line) < base + 2, let next = MarkdownList.item(from: line) else { return false }
+        if let number = previous.number {
+            return next.number == number + 1 && next.delimiter == previous.delimiter
         }
-        return nil
+        return next.number == nil
+    }
+
+    static func literalListIndent(_ lines: [String], index: Int) -> (base: Int, content: Int)? {
+        let line = lines[index], trimmed = line.trimmingCharacters(in: .whitespaces)
+        let filled = listMarker(trimmed) != nil
+        guard filled || confirmedBareMarker(lines, index: index) != nil else { return nil }
+        let base = indentWidth(line)
+        return (base, base + (filled ? markerWidth(trimmed) : trimmed.count + 1))
+    }
+
+    /// The block parser removes an item's marker before parsing its first block.
+    static func literalListFenceStart(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard listMarker(trimmed) != nil else { return false }
+        return trimmed.dropFirst(markerWidth(trimmed)).trimmingCharacters(in: .whitespaces).hasPrefix("```")
+    }
+
+    /// Shared boundaries for verbatim-source escaping and rendered inline blocks.
+    static func literalFootnoteDefinition(_ line: String) -> Bool {
+        parseFootnoteDefinition(dropLeadingSpaces(line, max: 3)) != nil
+    }
+
+    static func literalBlockBoundary(_ line: String) -> (starts: Bool, ends: Bool) {
+        let isFootnote = literalFootnoteDefinition(line)
+        let line = line.trimmingCharacters(in: .whitespaces)
+        let single = headingMatch(line) != nil || line.hasPrefix("|") || line.hasPrefix(">")
+            || ["---", "***", "___", MarkdownLiteral.listRestartBoundary].contains(line)
+        return (single || listMarker(line) != nil || isFootnote, single)
     }
 
     private static func stripListMarker(_ line: String) -> String {
@@ -620,25 +878,20 @@ public enum DocumentRenderer {
     private static let linkOpen = "\u{E002}"
     private static let linkClose = "\u{E003}"
 
-    private struct InlineLink { let label: String; let url: String; let isImage: Bool }
+    private struct InlineLink { let label: String; let url: String; let isImage: Bool; var imageSource: String? = nil }
 
     /// Replaces inline code spans with placeholders so the link/emphasis passes
     /// don't rewrite Markdown metacharacters inside code.
     private static func extractCodeSpans(_ text: String) -> (text: String, spans: [String]) {
         var spans: [String] = []
-        var result = ""
-        var index = text.startIndex
-        while index < text.endIndex {
-            if text[index] == "`",
-               let close = text[text.index(after: index)...].firstIndex(of: "`") {
-                spans.append(String(text[text.index(after: index)..<close]))
-                result += "\(codeOpen)\(spans.count - 1)\(codeClose)"
-                index = text.index(after: close)
-            } else {
-                result.append(text[index])
-                index = text.index(after: index)
+        let result = MarkdownTableCell.mapCodeSpans(text, keepDelimiters: false, code: { raw in
+            var content = raw.replacingOccurrences(of: "\r\n", with: " ").replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ")
+            if content.hasPrefix(" "), content.hasSuffix(" "), content.contains(where: { $0 != " " }) {
+                content = String(content.dropFirst().dropLast())
             }
-        }
+            spans.append(content)
+            return "\(codeOpen)\(spans.count - 1)\(codeClose)"
+        }, plain: { $0 })
         return (result, spans)
     }
 
@@ -647,13 +900,28 @@ public enum DocumentRenderer {
     /// generated attribute. Handles CommonMark angle-bracket destinations
     /// `(<url with spaces (and parens)>)` that WordConverter emits.
     private static func extractLinks(_ text: String) -> (text: String, links: [InlineLink]) {
+        var links: [InlineLink] = []
+        let destination = #"\((?:<([^>]+)>|([^)]+))\)"#
+        let linkedImagePattern = #"\[!\[([^\]]*)\]"# + destination + #"\]"# + destination
+        let source = text as NSString
+        var afterImages = "", offset = 0
+        if let linkedImage = try? NSRegularExpression(pattern: linkedImagePattern) {
+            for match in linkedImage.matches(in: text, range: NSRange(location: 0, length: source.length)) {
+                afterImages += source.substring(with: NSRange(location: offset, length: match.range.location - offset))
+                let image = nsSubstring(source, match.range(at: match.range(at: 2).location != NSNotFound ? 2 : 3))
+                let target = nsSubstring(source, match.range(at: match.range(at: 4).location != NSNotFound ? 4 : 5))
+                afterImages += "\(linkOpen)\(links.count)\(linkClose)"
+                links.append(InlineLink(label: nsSubstring(source, match.range(at: 1)), url: target, isImage: false, imageSource: image))
+                offset = NSMaxRange(match.range)
+            }
+        }
+        afterImages += source.substring(from: offset)
         let pattern = "(!)?\\[([^\\]]*)\\]\\((?:<([^>]+)>|([^)]+))\\)"
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return (text, []) }
-        let ns = text as NSString
-        var links: [InlineLink] = []
+        let ns = afterImages as NSString
         var result = ""
         var last = 0
-        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+        for match in regex.matches(in: afterImages, range: NSRange(location: 0, length: ns.length)) {
             result += ns.substring(with: NSRange(location: last, length: match.range.location - last))
             let isImage = match.range(at: 1).location != NSNotFound
             let label = nsSubstring(ns, match.range(at: 2))
@@ -675,30 +943,61 @@ public enum DocumentRenderer {
     /// the remaining text is HTML-escaped and emphasized, then they're restored.
     private static func inlineHTML(_ text: String, footnoteNumbers: [String: Int] = [:]) -> String {
         let (afterCode, spans) = extractCodeSpans(text)
-        let (afterLinks, links) = extractLinks(afterCode)
+        let protected = protectEscapes(afterCode)
+        let (afterLinks, links) = extractLinks(protected)
         var result = applyEmphasisHTML(escapeHTML(afterLinks))
         // Footnote references: `[^id]` -> a superscript link. Done here, where code
         // spans are already placeholders, so markers inside code are not touched
         // (code blocks never reach inlineHTML). The id is HTML-escaped for attribute
         // safety and references carry no `id`, so repeated references don't produce
         // duplicate element ids. The escaped id also matches the escaped body text.
-        for (id, number) in footnoteNumbers {
-            let escapedId = escapeHTML(id)
-            result = result.replacingOccurrences(
-                of: "[^\(escapedId)]",
-                with: "<sup class=\"footnote-ref\"><a href=\"#fn-\(escapedId)\">\(number)</a></sup>"
-            )
-        }
+        result = renderFootnoteReferences(result, numbers: footnoteNumbers, html: true)
         for (index, link) in links.enumerated() {
-            let tag = link.isImage
-                ? "<img src=\"\(escapeHTML(link.url))\" alt=\"\(escapeHTML(link.label))\">"
-                : "<a href=\"\(escapeHTML(link.url))\">\(applyEmphasisHTML(escapeHTML(link.label)))</a>"
+            let tag: String
+            if let image = link.imageSource, isSafeURL(image, isImage: true) {
+                let picture = "<img src=\"\(escapeHTML(image))\" alt=\"\(escapeHTML(link.label))\">"
+                tag = isSafeURL(link.url, isImage: false) ? "<a href=\"\(escapeHTML(link.url))\">\(picture)</a>" : picture
+            } else if !isSafeURL(link.url, isImage: link.isImage) {
+                // A script-capable URL (`javascript:` …) would make the exported
+                // page executable when displayed; keep only the visible text.
+                tag = link.isImage ? escapeHTML(link.label) : applyEmphasisHTML(escapeHTML(link.label))
+            } else if link.isImage {
+                tag = "<img src=\"\(escapeHTML(link.url))\" alt=\"\(escapeHTML(link.label))\">"
+            } else {
+                tag = "<a href=\"\(escapeHTML(link.url))\">\(applyEmphasisHTML(escapeHTML(link.label)))</a>"
+            }
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: tag)
         }
+        result = restoreWhitespaceReferences(result, html: true)
+        result = restoreEscapes(result, html: true)
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: "<code>\(escapeHTML(span))</code>")
         }
         return result
+    }
+
+    /// URL schemes the HTML export emits as live links. Link and image URLs come
+    /// from untrusted documents (web pages, DOCX hyperlinks, LLM output), and the
+    /// HTML export is meant to be displayed, so anything that can run script —
+    /// `javascript:`, `vbscript:`, `data:text/html`, … — must not become an `href`
+    /// or `src`.
+    private static let safeLinkSchemes: Set<String> = ["http", "https", "mailto", "tel", "ftp"]
+
+    /// Whether `url` is safe to emit as an `href` (or, for images, a `src`):
+    /// relative references and fragments (no scheme) and allowlisted schemes are;
+    /// images may also use `data:image/…`. Browsers ignore ASCII whitespace and
+    /// control characters inside a scheme (`java\tscript:`), so those are dropped
+    /// before the scheme is read.
+    static func isSafeURL(_ url: String, isImage: Bool) -> Bool {
+        let compact = String(String.UnicodeScalarView(url.unicodeScalars.filter { $0.value > 0x20 && $0.value != 0x7F }))
+        guard let colon = compact.firstIndex(of: ":") else { return true }   // relative
+        let scheme = compact[..<colon]
+        // A `:` after `/`, `?` or `#` belongs to a path, query or fragment, so the
+        // reference is relative (`docs/a:b`, `#x:y`).
+        if scheme.contains(where: { $0 == "/" || $0 == "?" || $0 == "#" }) { return true }
+        let lowered = scheme.lowercased()
+        if safeLinkSchemes.contains(lowered) { return true }
+        return isImage && lowered == "data" && compact.lowercased().hasPrefix("data:image/")
     }
 
     private static func applyEmphasisHTML(_ text: String) -> String {
@@ -713,16 +1012,17 @@ public enum DocumentRenderer {
     /// code spans keep their literal contents).
     private static func stripInline(_ text: String, footnoteNumbers: [String: Int] = [:]) -> String {
         let (afterCode, spans) = extractCodeSpans(text)
-        let (afterLinks, links) = extractLinks(afterCode)
+        let protected = protectEscapes(afterCode)
+        let (afterLinks, links) = extractLinks(protected)
         var result = applyEmphasisStrip(afterLinks)
         // Footnote references become `[N]` here (code spans already extracted, so
         // markers inside code are preserved; code blocks never reach stripInline).
-        for (id, number) in footnoteNumbers {
-            result = result.replacingOccurrences(of: "[^\(id)]", with: "[\(number)]")
-        }
+        result = renderFootnoteReferences(result, numbers: footnoteNumbers, html: false)
         for (index, link) in links.enumerated() {
             result = result.replacingOccurrences(of: "\(linkOpen)\(index)\(linkClose)", with: applyEmphasisStrip(link.label))
         }
+        result = restoreWhitespaceReferences(result, html: false)
+        result = restoreEscapes(result, html: false)
         for (index, span) in spans.enumerated() {
             result = result.replacingOccurrences(of: "\(codeOpen)\(index)\(codeClose)", with: span)
         }
@@ -735,6 +1035,81 @@ public enum DocumentRenderer {
         result = result.replacingOccurrences(of: "\\*\\*(.+?)\\*\\*", with: "$1", options: .regularExpression)
         result = result.replacingOccurrences(of: "\\*(.+?)\\*", with: "$1", options: .regularExpression)
         return result
+    }
+
+    private static let whitespaceReference = try! NSRegularExpression(pattern: #"&#([0-9]{1,7});"#)
+    private static let htmlWhitespaceReference = try! NSRegularExpression(pattern: #"&amp;#([0-9]{1,7});"#)
+    private static func restoreWhitespaceReferences(_ text: String, html: Bool) -> String {
+        let source = text as NSString
+        var output = "", last = 0
+        (html ? htmlWhitespaceReference : whitespaceReference).enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, _ in
+            guard let match, let value = UInt32(source.substring(with: match.range(at: 1))),
+                  let scalar = UnicodeScalar(value), CharacterSet.whitespaces.contains(scalar) else { return }
+            output += source.substring(with: NSRange(location: last, length: match.range.location - last))
+            output += html ? "&#\(value);" : String(scalar)
+            last = match.range.location + match.range.length
+        }
+        output += source.substring(from: last)
+        return output
+    }
+
+    private static func decodedFootnoteID(_ id: String) -> String {
+        let protected = protectEscapes(id)
+        return restoreEscapes(protected, html: false)
+    }
+
+    private static func renderFootnoteReferences(_ text: String, numbers: [String: Int], html: Bool) -> String {
+        let ns = text as NSString
+        let regex = try! NSRegularExpression(pattern: "\\[\\^([^\\]]+)\\]")
+        let lookup = Dictionary(numbers.map { (html ? escapeHTML($0.key) : $0.key, $0.value) }, uniquingKeysWith: { first, _ in first })
+        var output = "", offset = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            output += ns.substring(with: NSRange(location: offset, length: match.range.location - offset))
+            let protectedID = ns.substring(with: match.range(at: 1))
+            let id = restoreEscapes(protectedID, html: html)
+            if let number = lookup[id] {
+                output += html ? "<sup class=\"footnote-ref\"><a href=\"#fn-\(protectedID)\">\(number)</a></sup>" : "[\(number)]"
+            } else { output += ns.substring(with: match.range) }
+            offset = NSMaxRange(match.range)
+        }
+        return output + ns.substring(from: offset)
+    }
+
+    private static func protectEscapes(_ text: String) -> String {
+        let scalars = text.unicodeScalars
+        var output = "", index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index], next = scalars.index(after: index)
+            if scalar == "\u{E006}" {
+                output += "\u{E006}\u{E006}"; index = next
+            } else if scalar == "\\", next < scalars.endIndex,
+                      #"\`*_{}[]<>()#+-.!|&"#.unicodeScalars.contains(scalars[next]) {
+                output.unicodeScalars.append("\u{E006}")
+                output.unicodeScalars.append(UnicodeScalar(0xE100 + scalars[next].value)!)
+                index = scalars.index(after: next)
+            } else { output.unicodeScalars.append(scalar); index = next }
+        }
+        return output
+    }
+
+    private static func restoreEscapes(_ text: String, html: Bool) -> String {
+        let scalars = text.unicodeScalars
+        var output = "", index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index], next = scalars.index(after: index)
+            if scalar == "\u{E006}", next < scalars.endIndex {
+                if scalars[next] == "\u{E006}" {
+                    output.unicodeScalars.append(scalar); index = scalars.index(after: next); continue
+                }
+                if (0xE100...0xE17F).contains(scalars[next].value) {
+                    let decoded = String(UnicodeScalar(scalars[next].value - 0xE100)!)
+                    output += html ? escapeHTML(decoded) : decoded
+                    index = scalars.index(after: next); continue
+                }
+            }
+            output.unicodeScalars.append(scalar); index = next
+        }
+        return output
     }
 
     // MARK: - Escaping
