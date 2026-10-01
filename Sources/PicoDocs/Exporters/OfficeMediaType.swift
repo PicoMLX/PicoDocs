@@ -32,7 +32,8 @@ enum OfficeMediaType {
     /// `mimeType(forExtension:)`, used when writing media whose carrier only knows
     /// its MIME type (e.g. a `DocumentSection` image with `metadata["mimeType"]`).
     static func fileExtension(forMIME mime: String) -> String {
-        switch mime.lowercased() {
+        let type = mime.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+        switch type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "image/png": return "png"
         case "image/jpeg", "image/jpg": return "jpeg"
         case "image/gif": return "gif"

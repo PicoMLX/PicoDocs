@@ -33,7 +33,8 @@ enum MarkdownBlock: Equatable {
 /// renderer's CSV path and the exporters reuse them.
 enum MarkdownBlockParser {
     static func parse(_ markdown: String, structureLists: Bool = true, depth: Int = 0) -> [MarkdownBlock] {
-        let lines = normalizedLineEndings(markdown).components(separatedBy: "\n").map { line in
+        let rawLines = normalizedLineEndings(markdown).components(separatedBy: "\n")
+        let lines = rawLines.map { line in
             let whitespace = line.prefix { $0 == " " || $0 == "\t" }
             return String(repeating: " ", count: indentWidth(line)) + line.dropFirst(whitespace.count)
         }
@@ -52,7 +53,7 @@ enum MarkdownBlockParser {
                 i += 1
                 var code: [String] = []
                 while i < lines.count, !closesFence(lines[i], opening: opening) {
-                    code.append(lines[i]); i += 1
+                    code.append(rawLines[i]); i += 1
                 }
                 if i < lines.count { i += 1 }   // closing fence
                 blocks.append(.code(code.joined(separator: "\n")))
@@ -130,7 +131,7 @@ enum MarkdownBlockParser {
                         if !resumesList { items[items.count - 1].appendText("") }
                         i = next
                     } else if !isBlank(raw), !items.isEmpty, literalListContains(raw, base: base, content: contentColumn) {
-                        items[items.count - 1].appendText(String(raw.dropFirst(min(indent, contentColumn))))
+                        items[items.count - 1].appendText(dropStructuralIndent(rawLines[i], columns: min(indent, contentColumn)))
                         i += 1
                     } else {
                         break
@@ -159,6 +160,19 @@ enum MarkdownBlockParser {
             }
         }
         return blocks
+    }
+
+    /// Remove only the container's indentation columns. Tabs after that column
+    /// belong to literal content (including nested fenced code), not structure.
+    private static func dropStructuralIndent(_ line: String, columns: Int) -> String {
+        var index = line.startIndex, consumed = 0
+        while index < line.endIndex, consumed < columns {
+            let character = line[index]
+            guard character == " " || character == "\t" else { break }
+            consumed += character == "\t" ? 4 - consumed % 4 : 1
+            index = line.index(after: index)
+        }
+        return String(repeating: " ", count: max(0, consumed - columns)) + line[index...]
     }
 
     static func headingMatch(_ line: String) -> (level: Int, text: String)? {

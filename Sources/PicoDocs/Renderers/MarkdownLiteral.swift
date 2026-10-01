@@ -216,6 +216,7 @@ enum MarkdownLiteral {
         if content.hasPrefix("```") {
             return lead + content.replacingOccurrences(of: "`", with: "\\`")
         }
+        if content.hasPrefix("~~~") { return lead + "\\" + content }
         if let first = content.first, "#>|".contains(first) { return lead + "\\" + content }
         let compact = content.filter { !$0.isWhitespace }
         if compact.count >= 3, let first = compact.first, "-*_".contains(first), compact.allSatisfy({ $0 == first }) {

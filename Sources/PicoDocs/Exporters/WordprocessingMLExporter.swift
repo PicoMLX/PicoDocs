@@ -115,12 +115,13 @@ public struct WordprocessingMLExporter: DocumentExporter {
     /// stay distinct instead of one overwriting the other.
     private final class ImageIndex {
         let byPath: [String: [IndexedImage]]
+        let byAlias: [String: [IndexedImage]]
         let byBasename: [String: [IndexedImage]]
         private enum Resolution { case found(IndexedImage), missing }
         private var resolvedPaths: [String: Resolution] = [:]
         private var resolvedBasenames: [String: Resolution] = [:]
-        init(byPath: [String: [IndexedImage]], byBasename: [String: [IndexedImage]]) {
-            self.byPath = byPath; self.byBasename = byBasename
+        init(byPath: [String: [IndexedImage]], byAlias: [String: [IndexedImage]], byBasename: [String: [IndexedImage]]) {
+            self.byPath = byPath; self.byAlias = byAlias; self.byBasename = byBasename
         }
 
         func lookup(_ source: String) throws -> IndexedImage? {
@@ -139,7 +140,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 if case .found(let value) = resolution { return value }
                 return nil
             }
-            if let exact = byPath[source] {
+            if let exact = byPath[source] ?? byAlias[source] {
                 // Exact registration is authoritative, including external URIs.
                 if let cached = resolvedPaths[source] { return image(cached) }
                 let result = try unique(exact).image
@@ -167,6 +168,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
     private static func imageIndex(_ sections: [DocumentSection]) -> ImageIndex {
         var byPath: [String: [IndexedImage]] = [:]
+        var byAlias: [String: [IndexedImage]] = [:]
         var byBasename: [String: [IndexedImage]] = [:]
         var usedFilenames: Set<String> = []
         var nextFilenameSuffix: [String: Int] = [:]
@@ -205,14 +207,15 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
             let image = IndexedImage(base64: base64, mediaFilename: mediaFilename, metadata: section.metadata, budget: budget)
             let originalIdentity = [section.sourcePath, section.title].compactMap({ $0 }).first(where: { !$0.isEmpty })
-            for identity in Set([originalIdentity, section.metadata["markdownReference"]].compactMap({ $0 }).filter({ !$0.isEmpty })) {
-                byPath[identity, default: []].append(image)
+            if let identity = originalIdentity { byPath[identity, default: []].append(image) }
+            if let alias = section.metadata["markdownReference"], !alias.isEmpty, alias != originalIdentity {
+                byAlias[alias, default: []].append(image)
             }
             if let name, !name.isEmpty {
                 byBasename[name, default: []].append(image)
             }
         }
-        return ImageIndex(byPath: byPath, byBasename: byBasename)
+        return ImageIndex(byPath: byPath, byAlias: byAlias, byBasename: byBasename)
     }
 
     /// Reserve a conservative serialized size before escaping drawing strings.

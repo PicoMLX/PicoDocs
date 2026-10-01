@@ -317,7 +317,7 @@ public struct PPTXExporter: DocumentExporter {
     }
 
     /// Hyperlinks belong to runs and reference this slide's relationship part.
-    private static func runs(_ nodes: [MarkdownInline], bold: Bool = false, italic: Bool = false, link: (id: String, jump: Bool)? = nil, fragmentSlides: [String: Int], relationships: inout SlideRelationships) throws -> String {
+    private static func runs(_ nodes: [MarkdownInline], bold: Bool = false, italic: Bool = false, link: (id: String, jump: Bool, fragment: String?)? = nil, fragmentSlides: [String: Int], relationships: inout SlideRelationships) throws -> String {
         var output = ""
         for node in nodes {
             switch node {
@@ -344,14 +344,17 @@ public struct PPTXExporter: DocumentExporter {
                     id = try relationships.add(target: OOXMLPackageWriter.relationshipURI(destination), jump: false)
                     jump = false
                 }
-                output += try runs(label, bold: bold, italic: italic, link: (id, jump), fragmentSlides: fragmentSlides, relationships: &relationships)
+                output += try runs(label, bold: bold, italic: italic, link: (id, jump, jump ? destination : nil), fragmentSlides: fragmentSlides, relationships: &relationships)
             default:
                 let text = [node].plainText
                 var attributes = bold ? " b=\"1\"" : ""
                 if italic { attributes += " i=\"1\"" }
                 let font: String
                 if case .code = node { font = "<a:latin typeface=\"Courier New\"/>" } else { font = "" }
-                let hyperlink = link.map { "<a:hlinkClick r:id=\"\($0.id)\"\($0.jump ? " action=\"ppaction://hlinksldjump\"" : "")/>" } ?? ""
+                let hyperlink = link.map { link in
+                    let provenance = link.fragment.map { "<a:extLst><a:ext uri=\"https://picomlx.github.io/picodocs/markdown/slideFragment\"><pd:slideFragment xmlns:pd=\"https://picomlx.github.io/picodocs/markdown\" val=\"\(OOXMLPackageWriter.escapeAttribute($0))\"/></a:ext></a:extLst>" } ?? ""
+                    return "<a:hlinkClick r:id=\"\(link.id)\"\(link.jump ? " action=\"ppaction://hlinksldjump\"" : "")>\(provenance)</a:hlinkClick>"
+                } ?? ""
                 let properties = attributes.isEmpty && hyperlink.isEmpty && font.isEmpty ? "" : "<a:rPr\(attributes)>\(font)\(hyperlink)</a:rPr>"
                 output += text.components(separatedBy: "\n").map {
                     "<a:r>\(properties)<a:t\($0.first?.isWhitespace == true || $0.last?.isWhitespace == true ? " xml:space=\"preserve\"" : "")>\(OOXMLPackageWriter.escape($0))</a:t></a:r>"

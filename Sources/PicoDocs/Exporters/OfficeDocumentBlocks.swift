@@ -38,6 +38,14 @@ enum OfficeDocumentBlocks {
                 }
                 continue
             }
+            if section.kind == .slide, let notes = section.metadata["notes"], !notes.isEmpty {
+                // PPTX constructs a comparison suffix before removing canonical
+                // Notes content. Admit that copy even when Markdown is tiny.
+                let fixed = 2 * "### Notes\n\n".utf8.count + 2
+                try charge(fixed)
+                guard notes.utf8.count <= remaining / 2 else { throw ExporterError.serializationFailed("Office slide notes exceed the supported byte budget") }
+                try charge(notes.utf8.count * 2)
+            }
             let projectedTitle = section.kind == .sheet ? (section.sheetName ?? section.metadata["sheetName"] ?? section.title) : section.title
             for title in Set([section.title, projectedTitle].compactMap({ $0 })) {
                 guard title.utf8.count <= remaining / 7 else { throw ExporterError.serializationFailed("Office section metadata exceeds the supported byte budget") }

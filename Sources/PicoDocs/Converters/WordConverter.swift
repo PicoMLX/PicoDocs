@@ -129,7 +129,7 @@ public struct WordConverter: DocumentConverter {
                 defer { if child(of: element, named: "w:ppr").flatMap({ child(of: $0, named: "w:sectpr") }) != nil { numbering?.sectionBreak() } }
                 let properties = element.children().first { $0.tagName().lowercased() == "w:ppr" }
                 let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")
-                if headingLevel(forStyle: style) != nil {
+                if (numbering?.headingLevel(style: style, paragraphProperties: properties) ?? headingLevel(forStyle: style)) != nil {
                     _ = renderParagraph(element, relationships: relationships, numbering: numbering, headingObserver: observe)
                 } else if style != "PicoCodeBlock" { advance(element) }
                 try collectBoxes(element)
@@ -461,7 +461,7 @@ public struct WordConverter: DocumentConverter {
                 return String(leading) + "\\" + body
             }
             let digits = body.prefix { $0.isASCII && $0.isNumber }
-            if !digits.isEmpty, body.dropFirst(digits.count).hasPrefix(".") {
+            if !digits.isEmpty, let delimiter = body.dropFirst(digits.count).first, delimiter == "." || delimiter == ")" {
                 return String(leading) + digits + "\\" + body.dropFirst(digits.count)
             }
             return line

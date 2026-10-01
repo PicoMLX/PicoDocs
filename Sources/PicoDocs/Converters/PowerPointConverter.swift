@@ -474,7 +474,19 @@ public struct PowerPointConverter: DocumentConverter {
     private static func hyperlink(_ click: Element?, context: SlideContext) -> String? {
         guard let id = try? click?.attr("r:id"), !id.isEmpty else { return nil }
         guard let relation = context.relationships[id] else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
-        guard relation.external else { return nil }
+        if !relation.external {
+            // Preserve the canonical fragment attached to a generated native
+            // slide jump, without treating other internal relationships as URLs.
+            guard relation.isType("/slide"), (try? click?.attr("action")) == "ppaction://hlinksldjump",
+                  let click, let extensions = selectedChild(of: click, named: "a:extlst"),
+                  let item = selectedChildren(in: extensions).first(where: { (try? $0.attr("uri")) == "https://picomlx.github.io/picodocs/markdown/slideFragment" }),
+                  let marker = selectedChild(of: item, named: "pd:slidefragment"),
+                  let fragment = try? marker.attr("val"), fragment.hasPrefix("#"), fragment.count > 1,
+                  isValidTarget(fragment, isImage: false) else { return nil }
+            let target = Self.resolvePartPath(relation.target, relativeTo: directory(of: context.partPath))
+            guard context.archive.entry(target) != nil else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
+            return fragment
+        }
         guard relation.isType("/hyperlink") else {
             context.archive.fail(PicoDocsError.fileCorrupted)
             return nil

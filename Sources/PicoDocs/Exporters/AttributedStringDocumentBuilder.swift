@@ -187,7 +187,8 @@ enum AttributedStringDocumentBuilder {
             case .emphasis(let children):
                 render(children, into: output, size: size, bold: bold, italic: true, link: link, escapeLiterals: escapeLiterals, hardBreakIndent: hardBreakIndent)
             case .link(let label, let destination):
-                render(label, into: output, size: size, bold: bold, italic: italic, link: destination, escapeLiterals: escapeLiterals, hardBreakIndent: hardBreakIndent)
+                let accepted = DocumentRenderer.isSafeURL(destination, isImage: false) && URL(string: destination) != nil
+                render(label, into: output, size: size, bold: bold, italic: italic, link: accepted ? destination : nil, escapeLiterals: escapeLiterals, hardBreakIndent: hardBreakIndent)
             case .image:
                 output.append(NSAttributedString(string: escaped(node.plainText), attributes: attributes(size: size, bold: bold, italic: italic, monospace: false, link: link)))
             case .footnoteReference(let id):
