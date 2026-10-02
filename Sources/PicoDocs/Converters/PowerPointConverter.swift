@@ -540,6 +540,15 @@ public struct PowerPointConverter: DocumentConverter {
         text.flatMap { Int($0.trimmingCharacters(in: CharacterSet(charactersIn: " \t\r\n"))) }
     }
 
+    /// Unsigned-int lexical variants share an identity. Only an absent index
+    /// defaults to zero; an invalid explicit value must not match that default.
+    static func placeholderIndex(_ placeholder: Element) -> String? {
+        guard placeholder.hasAttr("idx") else { return "0" }
+        guard let raw = try? placeholder.attr("idx"), let index = Int64(collapsedXMLURI(raw)),
+              index >= 0, index <= UInt32.max else { return nil }
+        return String(index)
+    }
+
     private static func isHidden(_ shape: Element, cache: StyleChildCache? = nil) -> Bool {
         let nonvisualNames: Set<String> = ["p:nvsppr", "p:nvpicpr", "p:nvgraphicframepr", "p:nvgrpsppr", "p:nvcxnsppr"]
         let properties = cache.map { cache in nonvisualNames.compactMap { cache.child(of: shape, named: $0) }.first }
@@ -730,7 +739,7 @@ public struct PowerPointConverter: DocumentConverter {
         if lookup("a:bunone") != nil { return .plain }
         if let number = lookup("a:buautonum") {
             let raw = ((try? number.attr("startAt")) ?? "").trimmingCharacters(in: CharacterSet(charactersIn: " \t\r\n"))
-            let scheme = (try? number.attr("type")) ?? ""
+            let scheme = collapsedXMLURI((try? number.attr("type")) ?? "")
             return .number(startAt: raw.isEmpty ? 1 : (integerValue(raw) ?? 0), scheme: scheme.isEmpty ? "arabicPeriod" : scheme)
         }
         if lookup("a:buchar") != nil || lookup("a:bublip") != nil {
@@ -751,7 +760,7 @@ public struct PowerPointConverter: DocumentConverter {
         var sources: [Element?] = [listStyle(shape, cache: context.styles)]
         if let placeholder = placeholder(of: shape, cache: context.styles) {
             let type = effectivePlaceholderType(placeholder)
-            let index = (try? placeholder.attr("idx")).flatMap { $0.isEmpty ? nil : $0 } ?? "0"
+            let index = placeholderIndex(placeholder) ?? "invalid"
             let bodyLike = ["obj", "body", "subTitle"].contains(type)
             if context.layout == nil, context.master == nil {
                 // No inheritance chain to read: content placeholders are bulleted.
@@ -781,7 +790,7 @@ public struct PowerPointConverter: DocumentConverter {
         var styles: [Element?] = [listStyle(shape, cache: context.styles)]
         if let placeholder = placeholder(of: shape, cache: context.styles) {
             let type = effectivePlaceholderType(placeholder)
-            let index = (try? placeholder.attr("idx")).flatMap { $0.isEmpty ? nil : $0 } ?? "0"
+            let index = placeholderIndex(placeholder) ?? "invalid"
             let bodyLike = ["obj", "body", "subTitle"].contains(type)
             if let layout = context.layout { styles.append(matchingPlaceholder(in: layout, type: type, index: index, cache: context.placeholders).flatMap { listStyle($0, cache: context.styles) }) }
             if let master = context.master {
@@ -885,7 +894,7 @@ public struct PowerPointConverter: DocumentConverter {
                         switch element.tagName().lowercased() {
                         case "p:sp":
                             guard let ph = PowerPointConverter.placeholder(of: element) else { continue }
-                            let id = (try? ph.attr("idx")).flatMap { $0.isEmpty ? nil : $0 } ?? "0"
+                            guard let id = PowerPointConverter.placeholderIndex(ph) else { continue }
                             let kind = PowerPointConverter.effectivePlaceholderType(ph)
                             let equivalent = ["title", "ctrTitle"].contains(kind) ? "title" : (["body", "obj"].contains(kind) ? "body" : kind)
                             let typedID = PlaceholderID(type: equivalent, id: id)
@@ -1421,7 +1430,7 @@ public struct PowerPointConverter: DocumentConverter {
         var owners: [(Element, String)] = [(shape, context.partPath)]
         if let ph = placeholder(of: shape, cache: context.styles) {
             let type = effectivePlaceholderType(ph)
-            let index = (try? ph.attr("idx")).flatMap { $0.isEmpty ? nil : $0 } ?? "0"
+            let index = placeholderIndex(ph) ?? "invalid"
             if let layout = context.layout, let path = context.layoutPath, path != context.partPath,
                let match = matchingPlaceholder(in: layout, type: type, index: index, cache: context.placeholders) {
                 owners.append((match, path))
@@ -1605,7 +1614,9 @@ public struct PowerPointConverter: DocumentConverter {
                 let key: String
                 switch entry.tagName().lowercased() {
                 case "override":
-                    guard let name = try? entry.attr("PartName"), name.hasPrefix("/"), name.count > 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+                    guard let rawName = try? entry.attr("PartName") else { archive.fail(PicoDocsError.fileCorrupted); return nil }
+                    let name = collapsedXMLURI(rawName)
+                    guard name.hasPrefix("/"), name.count > 1 else { archive.fail(PicoDocsError.fileCorrupted); return nil }
                     key = PowerPointPackage.canonicalPartPath(name)
                 case "default":
                     guard let ext = try? entry.attr("Extension"), !ext.isEmpty else { archive.fail(PicoDocsError.fileCorrupted); return nil }
