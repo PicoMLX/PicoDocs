@@ -7,9 +7,10 @@ import Foundation
 final class IWAObjectBudget {
     private(set) var remainingBytes: Int
     private var remainingObjects: Int
+    private var remainingVisits: Int
     private(set) var exceeded = false
-    init(bytes: Int = 64 * 1024 * 1024, objects: Int = 250_000) {
-        remainingBytes = max(0, bytes); remainingObjects = max(0, objects)
+    init(bytes: Int = 64 * 1024 * 1024, objects: Int = 250_000, visits: Int = 1_000_000) {
+        remainingBytes = max(0, bytes); remainingObjects = max(0, objects); remainingVisits = max(0, visits)
     }
     var active: Bool { !Task.isCancelled && !exceeded }
     func reserve(_ count: Int, copies: Int = 1) -> Bool {
@@ -24,6 +25,13 @@ final class IWAObjectBudget {
         remainingObjects -= 1
         return reserve(256)
     }
+    func reserveVisit() -> Bool {
+        guard active else { return false }
+        guard remainingVisits > 0 else { exceeded = true; return false }
+        remainingVisits -= 1
+        return reserve(32)
+    }
+    func fail() { exceeded = true }
     func check() throws {
         try Task.checkCancellation()
         if exceeded { throw PicoDocsError.fileCorrupted }
