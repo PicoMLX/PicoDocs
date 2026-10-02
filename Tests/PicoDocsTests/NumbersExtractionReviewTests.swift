@@ -26,7 +26,7 @@ struct NumbersExtractionReviewTests {
         #expect(throws: PicoDocsError.fileCorrupted) { _ = try PagesConverter.iwaComponents(in: archive, maximumArchiveEntries: 3) }
         #expect(throws: PicoDocsError.fileCorrupted) { _ = try PagesConverter.iwaComponents(in: archive, maximumComponents: 1) }
         var exact = IWAComponentBudget(entries: 1, components: 1, bytes: 260)
-        try exact.scan("name"); try exact.retainComponent()
+        try exact.scan("name"); try exact.retainComponent("name")
         #expect(throws: PicoDocsError.fileCorrupted) { try exact.scan("") }
         var over = IWAComponentBudget(entries: 1, bytes: 259)
         #expect(throws: PicoDocsError.fileCorrupted) { try over.scan("name") }

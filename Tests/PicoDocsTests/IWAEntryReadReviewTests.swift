@@ -4,15 +4,38 @@ import ZIPFoundation
 @testable import PicoDocs
 
 struct IWAEntryReadReviewTests {
+    @Test(arguments: [false, true])
+    func canonicalDuplicateComponentsAreRejected(_ nested: Bool) throws {
+        let path = nested ? "Document.iwa" : "Index/Document.iwa"
+        let entries = [(path, [UInt8(1)]), (path, [UInt8(2)])]
+        let data = nested ? PagesConverterTests.makeZip([("Index.zip", Array(PagesConverterTests.makeZip(entries)))]) : PagesConverterTests.makeZip(entries)
+        let archive = try #require(Archive(data: data, accessMode: .read))
+        #expect(throws: PicoDocsError.fileCorrupted) { _ = try PagesConverter.iwaComponents(in: archive) }
+    }
+    @Test(arguments: [false, true])
+    func duplicateKeynoteSlidesAreRejected(_ nested: Bool) async throws {
+        let path = nested ? "Slide1.iwa" : "Index/Slide1.iwa"
+        let first = PagesConverterTests.snappyFrame(PagesConverterTests.makeIWAStream(runs: ["First"]))
+        let second = PagesConverterTests.snappyFrame(PagesConverterTests.makeIWAStream(runs: ["Second"]))
+        let entries = [(path, first), (path, second)]
+        let data = nested ? PagesConverterTests.makeZip([("Index.zip", Array(PagesConverterTests.makeZip(entries)))]) : PagesConverterTests.makeZip(entries)
+        await #expect(throws: PicoDocsError.fileCorrupted) {
+            _ = try await KeynoteConverter().convert(data, info: StreamInfo(detectedFormat: .keynote))
+        }
+    }
+
     @Test func componentReadsUseTheIteratedPhysicalEntry() throws {
         let data = PagesConverterTests.makeZip([("Index/A.iwa", [1]), ("Index/A.iwa", [2])])
         let archive = try #require(Archive(data: data, accessMode: .read))
-        let components = try PagesConverter.iwaComponents(in: archive)
-        #expect(components.map(\.bytes) == [[1], [2]])
+        #expect(throws: PicoDocsError.fileCorrupted) { _ = try PagesConverter.iwaComponents(in: archive) }
+        var values: [Data] = []
         for entry in archive {
+            let bytes = try ZIPEntryReader.read(archive, entry: entry, maxBytes: 1)
+            values.append(try #require(bytes))
             #expect(try ZIPEntryReader.read(archive, entry: entry, maxBytes: 1)?.count == 1)
             #expect(try ZIPEntryReader.read(archive, entry: entry, maxBytes: 0) == nil)
         }
+        #expect(values == [Data([1]), Data([2])])
     }
     @Test func manyTinyComponentsKeepByteAndCountAdmission() throws {
         let entries = (0..<256).map { index in (name: "Index/" + String(index) + ".iwa", data: [UInt8(truncatingIfNeeded: index)]) }
