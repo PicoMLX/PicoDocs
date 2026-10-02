@@ -581,7 +581,7 @@ public enum DocumentRenderer {
                 // per-occurrence `id`, so there's no unique anchor to return to
                 // (which keeps element ids unique under repeated references).
                 let inner = try inlineHTML(note.text.replacingOccurrences(of: "\n", with: " "), footnoteNumbers: numbers, budget: budget)
-                return "<li id=\"fn-\(escapeHTML(note.id))\">\(inner)</li>"
+                return "<li id=\"fn-\(escapeHTML(restoredCodeText(note.id)))\">\(inner)</li>"
             }
             .joined(separator: "\n")
         return items.isEmpty ? "" : "<section class=\"footnotes\">\n<hr>\n<ol>\n\(items)\n</ol>\n</section>"
@@ -1367,7 +1367,7 @@ public enum DocumentRenderer {
             let bytes: Int
             if scalar == "\u{E006}" { bytes = 6; index = next }
             else if scalar == "\\", next < scalars.endIndex,
-                    #"\`*_{}[]<>()#+-.!|&"#.unicodeScalars.contains(scalars[next]) {
+                    #"\`*_{}[]<>()#+-.!|&~"#.unicodeScalars.contains(scalars[next]) {
                 bytes = 6; index = scalars.index(after: next)
             } else {
                 let value = scalar.value
@@ -1388,7 +1388,7 @@ public enum DocumentRenderer {
             if scalar == "\u{E006}" {
                 output += "\u{E006}\u{E006}"; index = next
             } else if scalar == "\\", next < scalars.endIndex,
-                      #"\`*_{}[]<>()#+-.!|&"#.unicodeScalars.contains(scalars[next]) {
+                      #"\`*_{}[]<>()#+-.!|&~"#.unicodeScalars.contains(scalars[next]) {
                 output.unicodeScalars.append("\u{E006}")
                 output.unicodeScalars.append(UnicodeScalar(0xE100 + scalars[next].value)!)
                 index = scalars.index(after: next)

@@ -118,7 +118,7 @@ enum MarkdownLiteral {
         var output = "", slashes = 0
         for character in text.unicodeScalars {
             if character == "\\" { slashes += 1; continue }
-            let keepsEscape = slashes % 2 == 1 && #"`*_{}[]<>()#+-.!|"#.unicodeScalars.contains(character)
+            let keepsEscape = slashes % 2 == 1 && #"`*_{}[]<>()#+-.!|~"#.unicodeScalars.contains(character)
             output += String(repeating: "\\", count: slashes * 2 + (keepsEscape ? 1 : 0))
             output.unicodeScalars.append(character); slashes = 0
         }
