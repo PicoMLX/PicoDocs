@@ -47,26 +47,29 @@ enum IWAArchive {
     /// envelope-truncation detection (failing on any malformation) is deferred to
     /// the real-file-validation follow-up, to avoid mis-rejecting valid documents
     /// whose envelope quirks aren't yet covered by tests.
-    static func objects(in stream: [UInt8]) -> [Object] {
+    static func objects(in stream: [UInt8], objectBudget: IWAObjectBudget? = nil) -> [Object] {
+        let budget = objectBudget ?? IWAObjectBudget()
         var objects: [Object] = []
-        var cursor = StreamCursor(stream)
+        var cursor = StreamCursor(stream, budget: budget)
         while let archiveLen = cursor.readVarint() {
             guard archiveLen > 0, archiveLen <= UInt64(Int.max),
                   let archiveBytes = cursor.take(Int(archiveLen)) else { break }
-            let infos = messageInfos(in: archiveBytes)
+            let infos = messageInfos(in: archiveBytes, budget: budget)
             guard !infos.isEmpty else { break }
             // Payloads follow the ArchiveInfo, concatenated in MessageInfo order.
             // Stop at the first failure (truncated/garbled stream, or a length past
             // `Int.max`) and return what parsed cleanly — never re-read past a
             // partially-consumed object, which would mis-parse or loop.
             for info in infos {
+                guard !Task.isCancelled else { return [] }
+                guard budget.reserve(128) else { return [] }
                 guard info.length <= UInt64(Int.max),
-                      let payload = cursor.take(Int(info.length)) else { return objects }
+                      let payload = cursor.take(Int(info.length)) else { return budget.active ? objects : [] }
                 objects.append(Object(identifier: info.identifier, type: info.type,
                                       payload: payload, references: info.references))
             }
         }
-        return objects
+        return budget.active ? objects : []
     }
 
     /// Concatenated plain *body* text from the stream's TSWP text storages, in
@@ -74,8 +77,8 @@ enum IWAArchive {
     /// footer, footnote, and text-box storages (non-zero `kind`) are skipped so
     /// their text isn't passed off as the document body. Each storage's `repeated
     /// string text` runs are joined; a blank line separates distinct body storages.
-    static func text(in stream: [UInt8]) -> String {
-        text(from: objects(in: stream))
+    static func text(in stream: [UInt8], objectBudget: IWAObjectBudget? = nil) -> String {
+        text(from: objects(in: stream, objectBudget: objectBudget))
     }
 
     /// Body text from already-parsed objects — lets a caller that already has the
@@ -83,6 +86,7 @@ enum IWAArchive {
     static func text(from objects: [Object]) -> String {
         var storages: [String] = []
         for object in objects where object.type == textStorageType {
+            guard !Task.isCancelled else { return "" }
             guard let body = bodyText(in: object.payload), !body.isEmpty else { continue }
             storages.append(body)
         }
@@ -105,20 +109,22 @@ enum IWAArchive {
     /// scanned — never assuming field 1 precedes field 2 (an archive that emitted
     /// `message_infos` first would otherwise get identifier 0, breaking the
     /// object-graph lookups, e.g. Keynote's slide-tree ordering).
-    private static func messageInfos(in archiveBytes: [UInt8]) -> [InfoEntry] {
+    private static func messageInfos(in archiveBytes: [UInt8], budget: IWAObjectBudget) -> [InfoEntry] {
         var identifier: UInt64 = 0
         var infos: [(type: UInt64, length: UInt64, references: [UInt64])] = []
-        var reader = ProtobufReader(archiveBytes)
+        var reader = ProtobufReader(archiveBytes, objectBudget: budget)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (1, .varint(let id)):
                 identifier = id
             case (2, .length(let messageInfoBytes)):
-                if let info = parseMessageInfo(messageInfoBytes) { infos.append(info) }
+                guard budget.reserveInfo() else { return [] }
+                if let info = parseMessageInfo(messageInfoBytes, budget: budget) { infos.append(info) }
             default:
                 continue
             }
         }
+        guard budget.reserve(infos.count, copies: 64) else { return [] }
         return infos.map {
             InfoEntry(identifier: identifier, type: $0.type, length: $0.length, references: $0.references)
         }
@@ -126,29 +132,37 @@ enum IWAArchive {
 
     /// MessageInfo: type (field 1), payload length (field 3), and object_references
     /// (field 5 — packed or repeated uint64).
-    private static func parseMessageInfo(_ bytes: [UInt8]) -> (type: UInt64, length: UInt64, references: [UInt64])? {
+    private static func parseMessageInfo(_ bytes: [UInt8], budget: IWAObjectBudget) -> (type: UInt64, length: UInt64, references: [UInt64])? {
         var type: UInt64?
         var length: UInt64?
         var references: [UInt64] = []
-        var reader = ProtobufReader(bytes)
+        var reader = ProtobufReader(bytes, objectBudget: budget)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (1, .varint(let t)): type = t
             case (3, .varint(let l)): length = l
-            case (5, .varint(let r)): references.append(r)                       // unpacked
-            case (5, .length(let packed)): references.append(contentsOf: unpackVarints(packed))
+            case (5, .varint(let r)):
+                guard budget.reserve(16) else { return nil }
+                references.append(r)
+            case (5, .length(let packed)):
+                let unpacked = unpackVarints(packed, budget: budget)
+                guard budget.reserve(unpacked.count, copies: 16) else { return nil }
+                references.append(contentsOf: unpacked)
             default: continue
             }
         }
-        guard let type, let length else { return nil }
+        guard budget.active, let type, let length else { return nil }
         return (type, length, references)
     }
 
     /// Unpacks a protobuf packed-repeated varint field.
-    private static func unpackVarints(_ bytes: [UInt8]) -> [UInt64] {
+    private static func unpackVarints(_ bytes: [UInt8], budget: IWAObjectBudget) -> [UInt64] {
         var values: [UInt64] = []
         var cursor = StreamCursor(bytes)
-        while let value = cursor.readVarint() { values.append(value) }
+        while let value = cursor.readVarint() {
+            guard budget.reserve(16) else { return [] }
+            values.append(value)
+        }
         return values
     }
 
@@ -179,11 +193,12 @@ enum IWAArchive {
 private struct StreamCursor {
     private let bytes: [UInt8]
     private var pos: Int = 0
+    private let budget: IWAObjectBudget?
 
-    init(_ bytes: [UInt8]) { self.bytes = bytes }
+    init(_ bytes: [UInt8], budget: IWAObjectBudget? = nil) { self.bytes = bytes; self.budget = budget }
 
     mutating func readVarint() -> UInt64? {
-        guard pos < bytes.count else { return nil }
+        guard !Task.isCancelled, budget?.active != false, pos < bytes.count else { return nil }
         var result: UInt64 = 0
         var shift: UInt64 = 0
         while pos < bytes.count {
@@ -206,7 +221,8 @@ private struct StreamCursor {
     mutating func take(_ count: Int) -> [UInt8]? {
         // `count <= bytes.count - pos` rather than `pos + count <= count` so a
         // hostile length near Int.max can't overflow the addition.
-        guard count >= 0, count <= bytes.count - pos else { return nil }
+        guard !Task.isCancelled, count >= 0, count <= bytes.count - pos else { return nil }
+        guard budget?.reserve(count) != false else { return nil }
         let slice = Array(bytes[pos ..< pos + count])
         pos += count
         return slice

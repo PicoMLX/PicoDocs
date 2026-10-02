@@ -22,12 +22,14 @@ enum Snappy {
 
     enum SnappyError: Error {
         case malformed
+        case outputLimitExceeded
     }
 
     /// Decompresses an iWork `.iwa` payload: concatenated `[0x00, len24-LE, block]`
     /// frames, each `block` a raw Snappy-compressed block. Returns the assembled
     /// protobuf object stream.
-    static func decompressIWA(_ data: [UInt8]) throws -> [UInt8] {
+    static func decompressIWA(_ data: [UInt8], maximumOutputBytes: Int = Int.max, onOutput: ((Int) throws -> Void)? = nil) throws -> [UInt8] {
+        try Task.checkCancellation()
         var output: [UInt8] = []
         var i = 0
         let n = data.count
@@ -42,17 +44,21 @@ enum Snappy {
             // frame type as corruption rather than silently skipping it (which
             // could drop body text); callers decide whether that's fatal.
             guard type == 0x00 else { throw SnappyError.malformed }
-            output.append(contentsOf: try decompressBlock(Array(data[i ..< i + length])))
+            try Task.checkCancellation()
+            output.append(contentsOf: try decompressBlock(Array(data[i ..< i + length]), maximumOutputBytes: maximumOutputBytes - output.count, onOutput: onOutput))
             i += length
         }
+        try Task.checkCancellation()
         return output
     }
 
     /// Decompresses a single raw Snappy block (preamble varint = uncompressed
     /// length, then a stream of literal and copy elements).
-    static func decompressBlock(_ input: [UInt8]) throws -> [UInt8] {
+    static func decompressBlock(_ input: [UInt8], maximumOutputBytes: Int = Int.max, onOutput: ((Int) throws -> Void)? = nil) throws -> [UInt8] {
+        try Task.checkCancellation()
         var pos = 0
         let expectedLength = try readPreambleLength(input, &pos)
+        guard expectedLength <= maximumOutputBytes else { throw SnappyError.outputLimitExceeded }
         var output: [UInt8] = []
         // `expectedLength` is an attacker-controlled hint: cap the pre-allocation
         // so a malformed block can't force a huge reserve (OOM). Real output stays
@@ -60,7 +66,12 @@ enum Snappy {
         output.reserveCapacity(min(expectedLength, 16 * 1024 * 1024))
 
         let n = input.count
+        var tags = 0
         while pos < n {
+            // Copy tags emit at most 64 bytes, so 256 tags bound uninterrupted
+            // copy work to 16 KiB. Large literals use their own chunk checks.
+            if tags & 255 == 0 { try Task.checkCancellation() }
+            tags += 1
             let tag = input[pos]
             pos += 1
             switch tag & 0x03 {
@@ -77,34 +88,41 @@ enum Snappy {
                 length += 1
                 guard length <= n - pos else { throw SnappyError.malformed }
                 guard output.count + length <= expectedLength else { throw SnappyError.malformed }
-                output.append(contentsOf: input[pos ..< pos + length])
-                pos += length
+                let end = pos + length
+                while pos < end {
+                    try Task.checkCancellation()
+                    let chunkEnd = pos + min(64 * 1024, end - pos)
+                    try onOutput?(chunkEnd - pos)
+                    output.append(contentsOf: input[pos ..< chunkEnd])
+                    pos = chunkEnd
+                }
             case 0x01:
                 // Copy, 1-byte offset: length 4...11, 11-bit offset.
                 let length = 4 + Int((tag >> 2) & 0x07)
                 guard pos + 1 <= n else { throw SnappyError.malformed }
                 let offset = (Int(tag >> 5) << 8) | Int(input[pos])
                 pos += 1
-                try appendCopy(&output, offset: offset, length: length, limit: expectedLength)
+                try appendCopy(&output, offset: offset, length: length, limit: expectedLength, onOutput: onOutput)
             case 0x02:
                 // Copy, 2-byte offset.
                 let length = 1 + Int(tag >> 2)
                 guard pos + 2 <= n else { throw SnappyError.malformed }
                 let offset = Int(input[pos]) | (Int(input[pos + 1]) << 8)
                 pos += 2
-                try appendCopy(&output, offset: offset, length: length, limit: expectedLength)
+                try appendCopy(&output, offset: offset, length: length, limit: expectedLength, onOutput: onOutput)
             default:
                 // Copy, 4-byte offset.
                 let length = 1 + Int(tag >> 2)
                 guard pos + 4 <= n else { throw SnappyError.malformed }
                 let offset = Int(readLittleEndian(input, pos, 4))
                 pos += 4
-                try appendCopy(&output, offset: offset, length: length, limit: expectedLength)
+                try appendCopy(&output, offset: offset, length: length, limit: expectedLength, onOutput: onOutput)
             }
         }
         // A well-formed Snappy block decodes to exactly its preamble length; a
         // mismatch means the block was truncated/corrupt — reject it rather than
         // emit partial text as a successful decode.
+        try Task.checkCancellation()
         guard output.count == expectedLength else { throw SnappyError.malformed }
         return output
     }
@@ -146,11 +164,12 @@ enum Snappy {
 
     /// Appends a back-reference copy byte-by-byte, so overlapping runs (offset <
     /// length) expand correctly — the Snappy way to encode repeats.
-    private static func appendCopy(_ output: inout [UInt8], offset: Int, length: Int, limit: Int) throws {
+    private static func appendCopy(_ output: inout [UInt8], offset: Int, length: Int, limit: Int, onOutput: ((Int) throws -> Void)?) throws {
         guard offset > 0, offset <= output.count else { throw SnappyError.malformed }
         // A valid block never expands past its preamble length; reject corrupt
         // tags that would balloon output before the final size check.
         guard output.count + length <= limit else { throw SnappyError.malformed }
+        try onOutput?(length)
         var src = output.count - offset
         for _ in 0 ..< length {
             output.append(output[src])

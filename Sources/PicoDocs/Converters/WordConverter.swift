@@ -24,18 +24,19 @@ public struct WordConverter: DocumentConverter {
         guard let archive = Archive(data: data, accessMode: .read) else {
             throw PicoDocsError.fileCorrupted
         }
-        guard let documentData = Self.readEntry(archive, path: "word/document.xml"),
+        guard let documentData = try Self.readEntry(archive, path: "word/document.xml"),
               let documentXML = Self.decodeText(documentData) else {
             throw PicoDocsError.fileCorrupted
         }
 
-        let relationships = Self.parseRelationships(archive)
+        let relationships = try Self.parseRelationships(archive)
         let document = try SwiftSoup.parse(documentXML, "", SwiftSoup.Parser.xmlParser())
         guard let body = try document.getElementsByTag("w:body").first() else {
             throw PicoDocsError.emptyDocument
         }
 
         let numbering = WordListNumbering(archive: archive)
+        if let failure = numbering.failure { throw failure }
         let blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering)
         var markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -61,8 +62,8 @@ public struct WordConverter: DocumentConverter {
         // Extract embedded images (body + notes) as separate .image sections
         // (bytes preserved for downstream OCR/captioning, and for HTML data-URL
         // embedding); the Markdown references them inline.
-        var imageSections = Self.extractImages(from: body, relationships: relationships, archive: archive)
-        imageSections += Self.extractNoteImages(archive)
+        var imageSections = try Self.extractImages(from: body, relationships: relationships, archive: archive)
+        imageSections += try Self.extractNoteImages(archive)
         // De-duplicate an image referenced from both the body and a note (by
         // archive path). NOTE: image identity downstream (the inline `src` and the
         // renderer's data-URL embedding) is keyed by basename, so two *different*
@@ -85,6 +86,7 @@ public struct WordConverter: DocumentConverter {
         }
         sections.append(contentsOf: imageSections)
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
+        try Task.checkCancellation()
         return ConverterResult(title: info.filename, sections: sections)
     }
 
@@ -459,8 +461,8 @@ public struct WordConverter: DocumentConverter {
 
     // MARK: - Relationships (hyperlink targets)
 
-    static func parseRelationships(_ archive: Archive, path: String = "word/_rels/document.xml.rels") -> [String: String] {
-        guard let data = readEntry(archive, path: path),
+    static func parseRelationships(_ archive: Archive, path: String = "word/_rels/document.xml.rels") throws -> [String: String] {
+        guard let data = try readEntry(archive, path: path),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
             return [:]
@@ -488,8 +490,8 @@ public struct WordConverter: DocumentConverter {
             ("/footnotes", "word/footnotes.xml", "w:footnote", "fn"),
             ("/endnotes", "word/endnotes.xml", "w:endnote", "en"),
         ] {
-            let part = relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
-            let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part))
+            let part = try relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
+            let relationships = try parseRelationships(archive, path: relationshipsPath(forPart: part))
             for (key, value) in try parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships) {
                 notes[key] = value
             }
@@ -499,8 +501,8 @@ public struct WordConverter: DocumentConverter {
 
     /// The Target of the first `document.xml.rels` relationship whose Type ends
     /// with `typeSuffix` (e.g. "/footnotes"); relative to `word/`.
-    static func relationshipTarget(_ archive: Archive, typeSuffix: String) -> String? {
-        guard let data = readEntry(archive, path: "word/_rels/document.xml.rels"),
+    static func relationshipTarget(_ archive: Archive, typeSuffix: String) throws -> String? {
+        guard let data = try readEntry(archive, path: "word/_rels/document.xml.rels"),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
             return nil
@@ -526,13 +528,14 @@ public struct WordConverter: DocumentConverter {
     ]
 
     private static func parseNotePart(_ archive: Archive, path: String, tag: String, prefix: String, relationships: [String: String]) throws -> [String: String] {
-        guard let data = readEntry(archive, path: path),
+        guard let data = try readEntry(archive, path: path),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
             return [:]
         }
         // Each note part has independent counters from the body and other stories.
         let numbering = WordListNumbering(archive: archive)
+        if let failure = numbering.failure { throw failure }
         var notes: [String: String] = [:]
         for note in (try? doc.getElementsByTag(tag).array()) ?? [] {
             guard let id = try? note.attr("w:id"), !id.isEmpty else { continue }
@@ -567,22 +570,22 @@ public struct WordConverter: DocumentConverter {
     /// Extracts embedded images from the footnote/endnote parts as `.image`
     /// sections, using each part's own relationships — so an image inside a note
     /// is preserved/embeddable like a body image (notes reference it inline).
-    static func extractNoteImages(_ archive: Archive) -> [DocumentSection] {
+    static func extractNoteImages(_ archive: Archive) throws -> [DocumentSection] {
         var sections: [DocumentSection] = []
         for (typeSuffix, fallback, rootTag) in [
             ("/footnotes", "word/footnotes.xml", "w:footnotes"),
             ("/endnotes", "word/endnotes.xml", "w:endnotes"),
         ] {
-            let part = relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
-            guard let data = readEntry(archive, path: part),
+            let part = try relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
+            guard let data = try readEntry(archive, path: part),
                   let xml = decodeText(data),
                   let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()),
                   let root = try? doc.getElementsByTag(rootTag).first() else { continue }
-            let relationships = parseRelationships(archive, path: relationshipsPath(forPart: part))
+            let relationships = try parseRelationships(archive, path: relationshipsPath(forPart: part))
             // A note part's image targets resolve relative to the note part's own
             // folder (usually `word`, but a subfolder when the part lives in one).
             let partDirectory = (part as NSString).deletingLastPathComponent
-            sections.append(contentsOf: extractImages(from: root, relationships: relationships, archive: archive, partDirectory: partDirectory))
+            sections.append(contentsOf: try extractImages(from: root, relationships: relationships, archive: archive, partDirectory: partDirectory))
         }
         return sections
     }
@@ -625,7 +628,7 @@ public struct WordConverter: DocumentConverter {
 
     /// Extracts each embedded image once as an `.image` section carrying the raw
     /// bytes (base64) and MIME type, so consumers can render or caption them.
-    static func extractImages(from body: Element, relationships: [String: String], archive: Archive, partDirectory: String = "word") -> [DocumentSection] {
+    static func extractImages(from body: Element, relationships: [String: String], archive: Archive, partDirectory: String = "word") throws -> [DocumentSection] {
         let blips = (try? body.getElementsByTag("a:blip").array()) ?? []
         let vmlImages = (try? body.getElementsByTag("v:imagedata").array()) ?? []
 
@@ -640,7 +643,7 @@ public struct WordConverter: DocumentConverter {
             guard !seen.contains(mediaPath) else { continue }
             seen.insert(mediaPath)
 
-            guard let bytes = readEntry(archive, path: mediaPath), !bytes.isEmpty else { continue }
+            guard let bytes = try readEntry(archive, path: mediaPath), !bytes.isEmpty else { continue }
             let filename = (target as NSString).lastPathComponent
             sections.append(DocumentSection(
                 title: filename,
@@ -701,8 +704,8 @@ public struct WordConverter: DocumentConverter {
     // MARK: - Archive helpers
     // (entry reads go through the shared, size-hardened ZIPEntryReader.)
 
-    static func readEntry(_ archive: Archive, path: String) -> Data? {
-        ZIPEntryReader.read(archive, path: path)
+    static func readEntry(_ archive: Archive, path: String) throws -> Data? {
+        try ZIPEntryReader.read(archive, path: path)
     }
 
     static func decodeText(_ data: Data) -> String? {

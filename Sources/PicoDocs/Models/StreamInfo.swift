@@ -19,6 +19,7 @@ public enum DetectedFormat: String, Sendable, Equatable, Codable, CaseIterable {
     case epub
     case pages
     case keynote
+    case numbers
     case html
     case rtf
     case plainText
