@@ -68,17 +68,18 @@ public struct NumbersConverter: DocumentConverter {
         var documentStream: [UInt8]?
         for component in components {
             try Task.checkCancellation()
+            let isDocument = component.name.split(separator: "/").last == "Document.iwa"
             do {
                 let stream = try Snappy.decompressIWA(component.bytes, maximumOutputBytes: min(32 * 1024 * 1024, remainingDecodedBytes)) { count in
                     guard count <= remainingDecodedBytes else { throw Snappy.SnappyError.outputLimitExceeded }
                     remainingDecodedBytes -= count
                 }
-                if component.name.hasSuffix("Document.iwa") { documentStream = stream }
+                if isDocument { documentStream = stream }
                 streams.append(stream)
             } catch Snappy.SnappyError.outputLimitExceeded { throw PicoDocsError.fileCorrupted
             } catch is CancellationError { throw CancellationError()
             } catch {
-                if component.name.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
+                if isDocument { throw PicoDocsError.fileCorrupted }
             }
         }
         guard let documentStream else { throw PicoDocsError.fileCorrupted }
