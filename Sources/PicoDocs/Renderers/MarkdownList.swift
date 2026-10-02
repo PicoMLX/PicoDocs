@@ -17,7 +17,7 @@ struct MarkdownList {
         let protected = MarkdownTableCell.mapCodeSpans(MarkdownTableCell.protectBreakSentinels(text), code: { $0 }, plain: {
             $0.replacingOccurrences(of: " {2,}\n", with: hardBreak, options: .regularExpression)
         })
-        return MarkdownTableCell.restoreBreakSentinels(try inline(protected).replacingOccurrences(of: "\n", with: " "), breakText: breakText)
+        return MarkdownTableCell.restoreBreakSentinels(try inline(protected).replacingOccurrences(of: "\n", with: " "), breakText: breakText, html: breakText == "<br>")
     }
 
     struct Item {
