@@ -214,8 +214,11 @@ public struct KeynoteConverter: DocumentConverter {
     /// failing that — from a nested `Index.zip` (the common Keynote layout).
     private func iwaComponents(in archive: Archive) throws -> [Component] {
         var components: [Component] = []
-        for entry in archive where entry.type == .file
-            && entry.path.hasPrefix("Index/") && entry.path.hasSuffix(".iwa") {
+        var componentBudget = IWAComponentBudget()
+        for entry in archive {
+            try componentBudget.scan(entry.path)
+            guard entry.type == .file, entry.path.hasPrefix("Index/"), entry.path.hasSuffix(".iwa") else { continue }
+            try componentBudget.retainComponent()
             guard let data = try Self.readEntry(archive, path: entry.path) else {
                 // A present-but-unreadable slide is corruption (primary content);
                 // auxiliary components are skipped leniently.
@@ -234,7 +237,10 @@ public struct KeynoteConverter: DocumentConverter {
                   let inner = Archive(data: indexZip, accessMode: .read) else {
                 throw PicoDocsError.fileCorrupted
             }
-            for entry in inner where entry.type == .file && entry.path.hasSuffix(".iwa") {
+            for entry in inner {
+                try componentBudget.scan(entry.path)
+                guard entry.type == .file, entry.path.hasSuffix(".iwa") else { continue }
+                try componentBudget.retainComponent()
                 guard let data = try Self.readEntry(inner, path: entry.path) else {
                     if Self.isSlide(entry.path) { throw PicoDocsError.fileCorrupted }
                     continue

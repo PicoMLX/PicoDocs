@@ -1561,7 +1561,7 @@ enum IWATable {
     static func cleanCell(_ text: String) -> String {
         var escaped = ""
         var previousCR = false
-        let punctuation = #"\`*_{}[]<>|&"#.unicodeScalars
+        let punctuation = #"\`*_{}[]<>|&~"#.unicodeScalars
         for (index, scalar) in text.unicodeScalars.enumerated() {
             if index.isMultiple(of: 1024), Task.isCancelled { return "" }
             if scalar == "\n", previousCR { previousCR = false; continue }
