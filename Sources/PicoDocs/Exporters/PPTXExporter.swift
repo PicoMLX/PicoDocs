@@ -29,6 +29,7 @@ public struct PPTXExporter: DocumentExporter {
         guard !PicoDocsEngine.isEmptyForExport(sanitized) else { throw PicoDocsError.emptyDocument }
         let result = PicoDocsEngine.withSynthesizedImageReferences(sanitized)
 
+        try Task.checkCancellation()
         let slides = try Self.slides(from: result)
         if !result.sections.contains(where: { $0.kind == .slide || $0.slideNumber != nil }),
            !slides.contains(where: { !$0.title.isEmpty || !$0.body.isEmpty }) {
@@ -65,6 +66,7 @@ public struct PPTXExporter: DocumentExporter {
         try addXML("ppt/slideLayouts/_rels/slideLayout1.xml.rels", PPTXTemplates.slideLayoutRels)
         try addXML("ppt/theme/theme1.xml", PPTXTemplates.theme)
         for (i, slide) in effectiveSlides.enumerated() {
+            try Task.checkCancellation()
             var relationships = SlideRelationships(packageBudget: packageBudget)
             try addXML("ppt/slides/slide\(i + 1).xml", try Self.slideXML(slide, fragmentSlides: fragmentSlides, relationships: &relationships))
             var extraRels = relationships.xml
@@ -198,9 +200,11 @@ public struct PPTXExporter: DocumentExporter {
         init(text: String, ordered: Bool? = nil, number: Int = 1, level: Int = 0, inlines: [MarkdownInline]? = nil) {
             self.text = text; self.ordered = ordered; self.number = number; self.level = level; self.inlines = inlines
         }
-        init(markdown: String, ordered: Bool? = nil, number: Int = 1, level: Int = 0, normalizeLineBreaks: Bool = false) {
+        init(markdown: String, ordered: Bool? = nil, number: Int = 1, level: Int = 0, normalizeLineBreaks: Bool = false) throws {
+            try Task.checkCancellation()
             let parsed = MarkdownInlineParser.parse(markdown)
-            let nodes = normalizeLineBreaks ? normalizedBreaks(parsed) : parsed
+            try Task.checkCancellation()
+            let nodes = normalizeLineBreaks ? try normalizedBreaks(parsed) : parsed
             self.init(text: nodes.plainText, ordered: ordered, number: number, level: level, inlines: nodes)
         }
     }
@@ -213,6 +217,7 @@ public struct PPTXExporter: DocumentExporter {
             var numbered: [Int: [DocumentSection]] = [:]
             var unnumberedSlides: [[DocumentSection]] = []
             for section in explicit {
+                try Task.checkCancellation()
                 if let number = section.slideNumber, number > 0 {
                     guard number <= 10_000 else { throw ExporterError.serializationFailed("Slide provenance exceeds the supported deck size") }
                     numbered[number, default: []].append(section)
@@ -227,6 +232,7 @@ public struct PPTXExporter: DocumentExporter {
                 var numberedIndex = 0
                 var nextGap = 1
                 for section in explicit {
+                    try Task.checkCancellation()
                     if let number = section.slideNumber, number > 0 {
                         guard emitted.insert(number).inserted else { continue }
                         // Keep unnumbered section slots, but fill numbered slots
@@ -250,10 +256,12 @@ public struct PPTXExporter: DocumentExporter {
                 else { groups.insert(unnumbered, at: 0) }
             }
             guard groups.count <= 10_000 else { throw ExporterError.serializationFailed("Slide count exceeds the supported deck size") }
-            return groups.map { sections in
+            return try groups.map { sections in
+                try Task.checkCancellation()
                 let title = sections.first(where: { $0.kind == .slide })?.title ?? ""
                 var titleInlines: [MarkdownInline]?
-                let body = sections.flatMap { section in
+                let body = try sections.flatMap { section in
+                          try Task.checkCancellation()
                           var visible = section
                           if section.kind == .slide, let originalNotes = section.metadata["notes"] {
                               // Match the same XML-safe text already used for
@@ -270,13 +278,13 @@ public struct PPTXExporter: DocumentExporter {
                               if titleInlines == nil { titleInlines = MarkdownInlineParser.parse(text) }
                               blocks.removeFirst()
                           }
-                          return bodyLines(blocks)
+                          return try bodyLines(blocks)
                       }
                 let noteSections = sections.filter { $0.kind == .slide }.compactMap { section -> DocumentSection? in
                     guard let notes = section.metadata["notes"] else { return nil }
                     return DocumentSection(markdown: OOXMLPackageWriter.xmlSafeText(notes), metadata: ["preservedWhitespace": section.metadata["preservedWhitespace"] ?? "0"])
                 }
-                let notes = noteSections.isEmpty ? nil : bodyLines(OfficeDocumentBlocks.parse(ConverterResult(sections: noteSections), includeSlideTitles: false))
+                let notes = noteSections.isEmpty ? nil : try bodyLines(OfficeDocumentBlocks.parse(ConverterResult(sections: noteSections), includeSlideTitles: false))
                 return Slide(title: title, body: body, titleInlines: titleInlines, notes: notes)
             }
         }
@@ -295,6 +303,7 @@ public struct PPTXExporter: DocumentExporter {
         }
 
         for block in OfficeDocumentBlocks.parse(result) {
+            try Task.checkCancellation()
             if case .heading(let level, let text) = block, level <= 2 {
                 try flush()
                 // The title placeholder shows visible text, not Markdown syntax
@@ -305,41 +314,44 @@ public struct PPTXExporter: DocumentExporter {
                 started = true
             } else {
                 started = true
-                body += bodyLines([block])
+                body += try bodyLines([block])
             }
         }
         try flush()
         return slides
     }
 
-    private static func bodyLines(_ blocks: [MarkdownBlock]) -> [Paragraph] {
+    static func bodyLines(_ blocks: [MarkdownBlock]) throws -> [Paragraph] {
         var lines: [Paragraph] = []
         for block in blocks {
+            try Task.checkCancellation()
             switch block {
             case .heading(let level, let text):
-                var paragraph = Paragraph(markdown: text)
+                var paragraph = try Paragraph(markdown: text)
                 paragraph.headingLevel = level
                 lines.append(paragraph)
             case .paragraph(let text):
-                lines.append(Paragraph(markdown: text, normalizeLineBreaks: true))
+                lines.append(try Paragraph(markdown: text, normalizeLineBreaks: true))
             case .list(let list):
                 for item in list.paragraphs() {
-                    var paragraph = Paragraph(markdown: item.text, ordered: item.continuation ? nil : item.ordered, number: item.number ?? 1, level: item.level, normalizeLineBreaks: true)
+                    var paragraph = try Paragraph(markdown: item.text, ordered: item.continuation ? nil : item.ordered, number: item.number ?? 1, level: item.level, normalizeLineBreaks: true)
                     paragraph.listContinuation = item.continuation
                     lines.append(paragraph)
                 }
             case .code(let code):
-                for line in code.components(separatedBy: "\n") { lines.append(Paragraph(text: line, inlines: [.code(line)])) }
+                for line in code.components(separatedBy: "\n") { try Task.checkCancellation(); lines.append(Paragraph(text: line, inlines: [.code(line)])) }
             case .blockquote(let quoteLines):
-                for line in quoteLines { lines.append(Paragraph(markdown: line)) }
+                for line in quoteLines { lines.append(try Paragraph(markdown: line)) }
             case .table(let rows):
                 for row in rows {
+                    try Task.checkCancellation()
                     var nodes: [MarkdownInline] = []
                     for (index, cell) in row.enumerated() {
+                        try Task.checkCancellation()
                         if index > 0 { nodes.append(.text("\t")) }
                         nodes += MarkdownInlineParser.parse(cell, tableCell: true)
                     }
-                    lines.append(Paragraph(text: nodes.plainText, inlines: normalizedBreaks(nodes)))
+                    lines.append(Paragraph(text: nodes.plainText, inlines: try normalizedBreaks(nodes)))
                 }
             case .rule:
                 lines.append(Paragraph(text: "---"))
@@ -348,19 +360,20 @@ public struct PPTXExporter: DocumentExporter {
         return lines
     }
 
-    private static func normalizedBreaks(_ nodes: [MarkdownInline]) -> [MarkdownInline] {
+    private static func normalizedBreaks(_ nodes: [MarkdownInline]) throws -> [MarkdownInline] {
         var result: [MarkdownInline] = []
         var textBuffer = ""
         func flushText() {
             if !textBuffer.isEmpty { result.append(.text(textBuffer)); textBuffer = "" }
         }
         for node in nodes {
+            try Task.checkCancellation()
             let normalized: MarkdownInline
             switch node {
             case .lineBreak(let hard): normalized = .text(hard ? "\n" : " ")
-            case .strong(let children): normalized = .strong(normalizedBreaks(children))
-            case .emphasis(let children): normalized = .emphasis(normalizedBreaks(children))
-            case .link(let label, let destination): normalized = .link(label: normalizedBreaks(label), destination: destination)
+            case .strong(let children): normalized = .strong(try normalizedBreaks(children))
+            case .emphasis(let children): normalized = .emphasis(try normalizedBreaks(children))
+            case .link(let label, let destination): normalized = .link(label: try normalizedBreaks(label), destination: destination)
             default: normalized = node
             }
             if case .text(let text) = normalized { textBuffer.append(contentsOf: text) }
@@ -379,13 +392,15 @@ public struct PPTXExporter: DocumentExporter {
         return paragraph.listContinuation ? "<a:extLst><a:ext uri=\"https://picomlx.github.io/picodocs/markdown/listContinuation\"><pd:listContinuation xmlns:pd=\"https://picomlx.github.io/picodocs/markdown\"/></a:ext></a:extLst>" : ""
     }
 
-    private static func slideXML(_ slide: Slide, fragmentSlides: [String: Int], relationships: inout SlideRelationships) throws -> String {
+    static func slideXML(_ slide: Slide, fragmentSlides: [String: Int], relationships: inout SlideRelationships) throws -> String {
+        try Task.checkCancellation()
         let titleRuns = "<a:p>\(try runs(slide.titleInlines ?? [.text(slide.title)], fragmentSlides: fragmentSlides, relationships: &relationships))</a:p>"
         let bodyParagraphs: String
         if slide.body.isEmpty {
             bodyParagraphs = "<a:p/>"
         } else {
             bodyParagraphs = try slide.body.map { paragraph in
+                try Task.checkCancellation()
                 let properties: String
                 var nodes = paragraph.inlines ?? [.text(paragraph.text)]
                 switch paragraph.ordered {
@@ -429,6 +444,7 @@ public struct PPTXExporter: DocumentExporter {
     private static func runs(_ nodes: [MarkdownInline], bold: Bool = false, italic: Bool = false, link: (id: String, jump: Bool, fragment: String?)? = nil, fragmentSlides: [String: Int], relationships: inout SlideRelationships) throws -> String {
         var output = ""
         for node in nodes {
+            try Task.checkCancellation()
             switch node {
             case .strong(let children):
                 output += try runs(children, bold: true, italic: italic, link: link, fragmentSlides: fragmentSlides, relationships: &relationships)
@@ -465,8 +481,9 @@ public struct PPTXExporter: DocumentExporter {
                     return "<a:hlinkClick r:id=\"\(link.id)\"\(link.jump ? " action=\"ppaction://hlinksldjump\"" : "")>\(provenance)</a:hlinkClick>"
                 } ?? ""
                 let properties = attributes.isEmpty && hyperlink.isEmpty && font.isEmpty ? "" : "<a:rPr\(attributes)>\(font)\(hyperlink)</a:rPr>"
-                output += text.components(separatedBy: "\n").map {
-                    "<a:r>\(properties)<a:t\($0.first?.isWhitespace == true || $0.last?.isWhitespace == true ? " xml:space=\"preserve\"" : "")>\(OOXMLPackageWriter.escape($0))</a:t></a:r>"
+                output += try text.components(separatedBy: "\n").map { line in
+                    try Task.checkCancellation()
+                    return "<a:r>\(properties)<a:t\(line.first?.isWhitespace == true || line.last?.isWhitespace == true ? " xml:space=\"preserve\"" : "")>\(OOXMLPackageWriter.escape(line))</a:t></a:r>"
                 }.joined(separator: "<a:br/>")
             }
         }

@@ -30,6 +30,7 @@ indirect enum MarkdownInline: Equatable {
 }
 
 enum MarkdownInlineParser {
+    final class ParseMetrics { var copiedLabelBytes = 0 }
     /// Integer offsets without a Character-sized allocation for every character.
     /// Sequential and nearby reads reuse a cursor; arbitrary jumps start from a
     /// sparse checkpoint, at most 255 graphemes away. Both parser passes share
@@ -74,7 +75,7 @@ enum MarkdownInlineParser {
     /// images, and footnote references are pulled out by a single scan (so their
     /// contents aren't reinterpreted), and the remaining plain-text runs are parsed
     /// for `*`/`**`/`***` emphasis.
-    static func parse(_ text: String, depth: Int = 0, tableCell: Bool = false) -> [MarkdownInline] {
+    static func parse(_ text: String, depth: Int = 0, tableCell: Bool = false, metrics: ParseMetrics? = nil) -> [MarkdownInline] {
         guard depth < 64 else { return [.text(text)] }
         // Plain paragraphs need no character/index tables or delimiter state.
         let syntax: Set<Unicode.Scalar> = ["\\", "`", "[", "*", "_", "\n", "<", "\u{E020}"]
@@ -151,13 +152,31 @@ enum MarkdownInlineParser {
             lastTick[tick.length] = tick.start
         }
         // Balance labels once, ignoring escaped brackets and complete code spans.
-        var labelCloses: [Int: Int] = [:], labels: [Int] = []
+        var labelCloses: [Int: Int] = [:]
+        var labels: [(open: Int, firstLinkEnd: Int?)] = []
+        var deactivatedLinks: Set<Int> = []
         scan = 0
         while scan < chars.count {
             if chars[scan] == "\\", scan + 1 < chars.count, punctuation.contains(chars[scan + 1]) { scan += 2; continue }
             if chars[scan] == "`", let (close, length) = nextTicks[scan] { scan = close + length; continue }
-            if chars[scan] == "[" { labels.append(scan) }
-            else if chars[scan] == "]", let open = labels.popLast() { labelCloses[open] = scan }
+            if chars[scan] == "[" { labels.append((scan, nil)) }
+            else if chars[scan] == "]", let label = labels.popLast() {
+                labelCloses[label.open] = scan
+                let candidate = linkDestination(chars, labelEnd: scan, parenCloses: parenCloses, nextAngle: nextAngle)
+                let image = label.open > 0 && chars[label.open - 1] == "!" && !isEscapedDelimiter(at: label.open - 1)
+                let footnote = candidate == nil && label.open + 2 < scan && chars[label.open + 1] == "^"
+                let containsLink = label.firstLinkEnd.map { $0 <= scan } ?? false
+                if candidate != nil, !image, containsLink { deactivatedLinks.insert(label.open) }
+                // Valid images and footnotes are opaque to an enclosing link.
+                let emittedEnd: Int?
+                if let candidate, !image, !containsLink { emittedEnd = candidate.next }
+                else if image && candidate != nil || footnote { emittedEnd = nil }
+                else { emittedEnd = label.firstLinkEnd }
+                if !labels.isEmpty, let emittedEnd {
+                    let parent = labels.count - 1
+                    labels[parent].firstLinkEnd = min(labels[parent].firstLinkEnd ?? emittedEnd, emittedEnd)
+                }
+            }
             scan += 1
         }
         var structured: [MarkdownInline] = []
@@ -204,7 +223,7 @@ enum MarkdownInlineParser {
 
             // Image: ![alt](dest)
             if c == "!", i + 1 < chars.count, chars[i + 1] == "[",
-               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: labelCloses[i + 1], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth, tableCell: tableCell) {
+               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: labelCloses[i + 1], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth, tableCell: tableCell, metrics: metrics) {
                 append(parsed.node)
                 i = parsed.next
                 continue
@@ -212,7 +231,7 @@ enum MarkdownInlineParser {
 
             if c == "[" {
                 // Link: [label](dest)
-                if let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: labelCloses[i], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth, tableCell: tableCell) {
+                if !deactivatedLinks.contains(i), let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: labelCloses[i], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth, tableCell: tableCell, metrics: metrics) {
                     append(parsed.node)
                     i = parsed.next
                     continue
@@ -284,13 +303,42 @@ enum MarkdownInlineParser {
     /// link, the `!` for an image). Supports CommonMark angle-bracket destinations
     /// `(<url with spaces>)` that `WordConverter` emits. Returns the node and the
     /// index just past the closing `)`, or nil if the syntax doesn't match.
-    private static func parseLinkOrImage(_ chars: IndexedText, from: Int, isImage: Bool, labelEnd: Int?, parenCloses: [Int: Int], nextAngle: [Int: Int], depth: Int, tableCell: Bool) -> (node: MarkdownInline, next: Int)? {
+    private static func parseLinkOrImage(_ chars: IndexedText, from: Int, isImage: Bool, labelEnd: Int?, parenCloses: [Int: Int], nextAngle: [Int: Int], depth: Int, tableCell: Bool, metrics: ParseMetrics?) -> (node: MarkdownInline, next: Int)? {
         let bracket = isImage ? from + 1 : from
         guard bracket < chars.count, chars[bracket] == "[" else { return nil }
         // Find the label's closing `]`, skipping backslash-escaped delimiters:
         // `WordConverter` escapes `[`/`]` inside labels and alt text, so a visible
         // `]` arrives as `\]` and must not terminate the label early.
         guard let labelEnd else { return nil }
+        guard let destination = linkDestination(chars, labelEnd: labelEnd, parenCloses: parenCloses, nextAngle: nextAngle) else { return nil }
+        let dest = destination.text
+        let labelText = String(chars[(bracket + 1)..<labelEnd])
+        metrics?.copiedLabelBytes += labelText.utf8.count
+        let label = parse(labelText, depth: depth + 1, tableCell: tableCell, metrics: metrics)
+        func containsLink(_ nodes: [MarkdownInline]) -> Bool {
+            nodes.contains { node in
+                switch node {
+                case .link: return true
+                case .strong(let children), .emphasis(let children): return containsLink(children)
+                default: return false
+                }
+            }
+        }
+        // An inner link deactivates the outer opener; the main scan will then
+        // recognize that inner link and retain the outer punctuation literally.
+        guard isImage || !containsLink(label) else { return nil }
+        let visibleLabel = label.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? [MarkdownInline.text(dest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Link" : dest)]
+            : label
+        let node: MarkdownInline = isImage
+            ? .image(alt: label.plainText, source: dest)
+            : .link(label: visibleLabel, destination: dest)
+        return (node, destination.next)   // past the ")"
+    }
+
+    // Destination validation precedes label allocation. The bracket pass uses
+    // the same grammar to deactivate outer links containing a live inner link.
+    private static func linkDestination(_ chars: IndexedText, labelEnd: Int, parenCloses: [Int: Int], nextAngle: [Int: Int]) -> (text: String, next: Int)? {
         let parenOpen = labelEnd + 1
         guard parenOpen < chars.count, chars[parenOpen] == "(" else { return nil }
 
@@ -329,27 +377,7 @@ enum MarkdownInlineParser {
             while cursor < chars.count, chars[cursor].isWhitespace { cursor += 1 }
         }
         guard cursor < chars.count, chars[cursor] == ")" else { return nil }
-        let labelText = String(chars[(bracket + 1)..<labelEnd])
-        let label = parse(labelText, depth: depth + 1, tableCell: tableCell)
-        func containsLink(_ nodes: [MarkdownInline]) -> Bool {
-            nodes.contains { node in
-                switch node {
-                case .link: return true
-                case .strong(let children), .emphasis(let children): return containsLink(children)
-                default: return false
-                }
-            }
-        }
-        // An inner link deactivates the outer opener; the main scan will then
-        // recognize that inner link and retain the outer punctuation literally.
-        guard isImage || !containsLink(label) else { return nil }
-        let visibleLabel = label.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? [MarkdownInline.text(dest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Link" : dest)]
-            : label
-        let node: MarkdownInline = isImage
-            ? .image(alt: label.plainText, source: dest)
-            : .link(label: visibleLabel, destination: dest)
-        return (node, cursor + 1)   // past the ")"
+        return (dest, cursor + 1)
     }
 
     /// Removes backslash escapes (`\x` -> `x`), recovering the literal label/destination

@@ -649,24 +649,47 @@ public enum DocumentRenderer {
         var parts: [String] = []
         var markdown: [String] = []
         var remaining = 64 * 1024 * 1024
-        func flush() {
+        var outputRemaining = 64 * 1024 * 1024
+        func appendPart(_ text: String) throws {
+            let separator = parts.isEmpty ? 0 : 1
+            guard separator <= outputRemaining, text.utf8.count <= outputRemaining - separator else { throw PicoDocsError.fileCorrupted }
+            outputRemaining -= text.utf8.count + separator
+            parts.append(text)
+        }
+        func flush() throws {
             let rows = csvRows(fromMarkdown: markdown.joined(separator: "\n\n"))
-            if !rows.isEmpty { parts.append(rows.joined(separator: "\n")) }
+            if !rows.isEmpty { try appendPart(rows.joined(separator: "\n")) }
             markdown.removeAll(keepingCapacity: true)
         }
         let namedSheets = result.sections.filter { $0.kind == .sheet }.count
         for section in result.sections where section.kind != .image {
             if let rawCSV = section.metadata["csv"], !rawCSV.isEmpty ||
                ([SectionKind.sheet, .table].contains(section.kind) && section.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
-                flush()
+                try flush()
                 if namedSheets > 1, section.kind == .sheet, let name = section.sheetName ?? section.metadata["sheetName"] ?? section.title {
-                    parts.append(csvField(name))
+                    let separator = parts.isEmpty ? 0 : 1
+                    guard separator <= outputRemaining else { throw PicoDocsError.fileCorrupted }
+                    try appendPart(boundedCSVField(name, maximumBytes: outputRemaining - separator))
                 }
-                if !rawCSV.isEmpty { parts.append(rawCSV) }
+                if !rawCSV.isEmpty { try appendPart(rawCSV) }
             } else { markdown.append(try preparedMarkdown(section, remaining: &remaining)) }
         }
-        flush()
+        try flush()
         return parts.joined(separator: "\n")
+    }
+
+    static func boundedCSVField(_ text: String, maximumBytes: Int) throws -> String {
+        var bytes = text.utf8.count
+        guard bytes <= maximumBytes else { throw PicoDocsError.fileCorrupted }
+        var quotes = 0, needsQuotes = false
+        for scalar in text.unicodeScalars {
+            if scalar == "\"" { quotes += 1 }
+            if scalar == "\"" || scalar == "," || scalar == "\n" || scalar == "\r" { needsQuotes = true }
+        }
+        let extra = needsQuotes ? quotes + 2 : 0
+        guard extra <= maximumBytes - bytes else { throw PicoDocsError.fileCorrupted }
+        bytes += extra
+        return csvField(text)
     }
 
     private static func csvRows(fromMarkdown markdown: String) -> [String] {

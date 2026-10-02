@@ -46,12 +46,19 @@ public struct RTFConverter: DocumentConverter {
     // MARK: - Parser
 
     private struct Run { var text: String; var bold: Bool; var italic: Bool; var link: String?; var code: Bool; var field: Field? }
-    private final class Field {
+    final class Field {
         static let maximumInstructionBytes = 65_536
         private(set) var instruction = ""
         private var instructionBytes = 0
         private var oversized = false
         var target: String?
+        func admitBufferedInstructionByte(_ bufferedBytes: Int) -> Bool {
+            guard !oversized else { return false }
+            guard bufferedBytes < Self.maximumInstructionBytes - instructionBytes else {
+                oversized = true; instruction = ""; target = nil; return false
+            }
+            return true
+        }
         func appendInstruction(_ text: String) {
             guard !oversized else { return }
             let bytes = text.utf8.count
@@ -167,10 +174,10 @@ public struct RTFConverter: DocumentConverter {
             // Apple's writer serializes attributed hard breaks as U+2028.
             // Keep table breaks canonical and prose/list breaks as Markdown.
             rendered = rendered.replacingOccurrences(of: "\u{2028}", with: rendered.hasPrefix("|") ? "<br>" : "  \n")
-            let trimmed = rendered.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmed = rendered.trimmingCharacters(in: CharacterSet(charactersIn: " \t\r\n"))
             if !trimmed.isEmpty {
                 // Leading indentation carries nested list content columns.
-                let trailing = rendered.reversed().prefix { $0.isWhitespace }.count
+                let trailing = rendered.reversed().prefix { " \t\r\n".contains($0) }.count
                 let paragraph = String(rendered.dropLast(trailing))
                 if let opening = MarkdownBlockParser.fence(raw.trimmingCharacters(in: .whitespaces)) {
                     markdownFence = opening
@@ -345,7 +352,10 @@ public struct RTFConverter: DocumentConverter {
                             // undecodable) and let flushBytes decode whole characters.
                             // Single-byte code pages decode each byte on its own.
                             if isDBCS {
-                                if !ignore || instruction { pendingBytes.append(byte) }
+                                if instruction, let field {
+                                    if field.admitBufferedInstructionByte(pendingBytes.count) { pendingBytes.append(byte) }
+                                    else { pendingBytes.removeAll(keepingCapacity: true) }
+                                } else if !ignore { pendingBytes.append(byte) }
                             } else {
                                 appendText(Self.decodeByte(byte, encoding: ansiEncoding))
                             }
