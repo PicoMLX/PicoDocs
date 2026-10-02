@@ -26,7 +26,7 @@
 //
 //  Confirmed against real `.pages` and `.key` fixtures (text + date cells).
 //
-//  Scope: text, date, number, and formula-result cells; duration cells aren't
+//  Scope: text, date/time, Boolean, number, and formula-result/error cells; duration cells aren't
 //  decoded yet and render empty. For Pages, tables are placed inline at their
 //  attachment point (see PagesConverter); for Keynote, with the slide that owns
 //  them (see KeynoteConverter).
@@ -51,6 +51,8 @@ enum IWATable {
     private static let richTextCell: UInt8 = 0x09
     private static let inlineTextCell: UInt8 = 0x03
     private static let dateCell: UInt8 = 0x05
+    private static let booleanCell: UInt8 = 0x06
+    private static let errorCell: UInt8 = 0x08
     private static let numberCell: UInt8 = 0x02
     private static let formulaCell: UInt8 = 0x0a
 
@@ -1379,7 +1381,7 @@ enum IWATable {
     /// The rendered text of a cell record (`05 <type> …`): rich or inline text via
     /// the string maps (key is a little-endian uint32 at +12), or a date (double,
     /// seconds since 2001-01-01, at +12), or a number / formula result (decimal128
-    /// at +12). Duration cells aren't decoded yet. Returns "" (a present-but-empty
+    /// at +12), a Boolean double, or an explicit error state. Duration cells aren't decoded yet. Returns "" (a present-but-empty
     /// cell) on any unhandled type or out-of-bounds read.
     private static func cellText(in buffer: [UInt8], at offset: Int,
                                  rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?) -> String {
@@ -1398,6 +1400,14 @@ enum IWATable {
         case dateCell:
             guard let seconds = readDouble(buffer, at: offset + 12) else { return "" }
             return isoDate(seconds)
+        case booleanCell:
+            guard let value = readDouble(buffer, at: offset + 12), value.isFinite else { return "" }
+            return value > 0 ? "true" : "false"
+        case errorCell:
+            // The bytes after the header are flagged style/formula/error-table
+            // IDs, not an inline error enum. Some native files have no error
+            // table detail; retain the error state without inventing its kind.
+            return "#ERROR!"
         case numberCell, formulaCell:
             return decimalString(in: buffer, at: offset + 12)
         default:
@@ -1489,7 +1499,7 @@ enum IWATable {
         return Double(bitPattern: bits)
     }
 
-    /// Formats seconds-since-2001 (iWork's reference date) as `yyyy-MM-dd`.
+    /// Formats iWork's reference date as a date, retaining a non-midnight time.
     /// Computed arithmetically — no `DateFormatter`, which is allocation-free and
     /// avoids a shared static formatter (not `Sendable` under Swift 6). Implausible
     /// magnitudes return "".
@@ -1512,7 +1522,23 @@ enum IWATable {
             while string.count < width { string = "0" + string }
             return string
         }
-        return "\(pad(year, 4))-\(pad(month, 2))-\(pad(day, 2))"
+        let date = "\(pad(year, 4))-\(pad(month, 2))-\(pad(day, 2))"
+        let daySeconds = secondsSinceReference - floor(secondsSinceReference / 86_400) * 86_400
+        guard daySeconds != 0 else { return date }
+        let whole = Int(daySeconds)
+        var time = "\(pad(whole / 3600, 2)):\(pad((whole / 60) % 60, 2)):\(pad(whole % 60, 2))"
+        let fraction = daySeconds - Double(whole)
+        if fraction != 0 {
+            // Binary doubles carry at most nanosecond precision near the epoch.
+            // Truncate the fraction independently so rounding cannot make :60.
+            let nanoseconds = Int(fraction * 1_000_000_000)
+            if nanoseconds > 0 {
+                var digits = pad(nanoseconds, 9)
+                while digits.hasSuffix("0") { digits.removeLast() }
+                time += "." + digits
+            }
+        }
+        return date + "T" + time
     }
 
     // MARK: - Markdown rendering
