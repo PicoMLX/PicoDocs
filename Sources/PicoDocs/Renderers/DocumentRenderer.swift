@@ -1226,11 +1226,14 @@ public enum DocumentRenderer {
     /// Admit the complete restored output before constructing it. Each stage
     /// scans the source twice regardless of the number of distinct spans.
     static func boundedInlineTokenReplacements(_ text: String, open: String, close: String, replacements: [String], maximumBytes: Int) throws -> String {
-        let pattern = "(?<!" + open + ")" + open + "([0-9]+)" + close + "(?!" + close + ")"
+        // Consume doubled literal opens first. A generated token beside one
+        // remains a single open, even at a three-sentinel boundary.
+        let pattern = open + open + "|" + open + "([0-9]+)" + close
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
         let source = text as NSString
         var bytes = text.utf8.count, exceeded = bytes > maximumBytes
         func replacement(for match: NSTextCheckingResult) -> (text: String, needleBytes: Int)? {
+            guard match.range(at: 1).location != NSNotFound else { return nil }
             let digits = source.substring(with: match.range(at: 1))
             guard let index = Int(digits), index >= 0, index < replacements.count, String(index) == digits else { return nil }
             return (replacements[index], open.utf8.count + digits.utf8.count + close.utf8.count)
@@ -1285,7 +1288,7 @@ public enum DocumentRenderer {
     }
 
     private static let whitespaceReference = try! NSRegularExpression(pattern: #"&#([0-9]{1,7});"#)
-    private static let internalWhitespaceReference = try! NSRegularExpression(pattern: "(?<!\u{E008})\u{E008}([0-9]{1,7})\u{E009}(?!\u{E009})")
+    private static let internalWhitespaceReference = try! NSRegularExpression(pattern: "\u{E008}\u{E008}|\u{E008}([0-9]{1,7})\u{E009}")
     static func boundedHTMLWhitespaceReferences(_ text: String, maximumBytes: Int = 64 * 1024 * 1024) throws -> String {
         var projected = 0, exceeded = false
         restoreWhitespaceFragments(text, html: true) { fragment in
@@ -1312,7 +1315,7 @@ public enum DocumentRenderer {
         var last = 0, inTag = false, inSpan = false
         func closeSpan() { if inSpan { emit("</span>"); inSpan = false } }
         internalWhitespaceReference.enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, _ in
-            guard let match, let value = UInt32(source.substring(with: match.range(at: 1))),
+            guard let match, match.range(at: 1).location != NSNotFound, let value = UInt32(source.substring(with: match.range(at: 1))),
                   let scalar = UnicodeScalar(value), CharacterSet.whitespaces.contains(scalar) else { return }
             let preceding = source.substring(with: NSRange(location: last, length: match.range.location - last))
             if !preceding.isEmpty { closeSpan() }
