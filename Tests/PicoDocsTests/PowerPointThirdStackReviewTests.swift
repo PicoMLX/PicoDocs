@@ -96,7 +96,9 @@ struct PowerPointThirdStackReviewTests {
             #expect(result.markdown().contains("Master watermark") == show)
             #expect(!result.markdown().contains("Placeholder prompt"))
             let hidden = try Self.replacing(data, part: "ppt/slides/s.xml") { $0.replacingOccurrences(of: "<p:sld ", with: "<p:sld showMasterSp='0' ") }
-            #expect(try await PowerPointConverter().convert(hidden, info: StreamInfo(detectedFormat: .pptx)).markdown() == "## Slide")
+            let hiddenResult = try await PowerPointConverter().convert(hidden, info: StreamInfo(detectedFormat: .pptx))
+            #expect(hiddenResult.markdown().contains("Layout watermark"))
+            #expect(!hiddenResult.markdown().contains("Master watermark"))
         }
     }
 
