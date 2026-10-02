@@ -35,6 +35,9 @@ public struct WordConverter: DocumentConverter {
             throw PicoDocsError.emptyDocument
         }
 
+        let mediaBudget = MediaBudget()
+        relationships = try Self.usableSVGRelationships(in: body, relationships: relationships, archive: archive, budget: mediaBudget)
+
         // Map heading bookmarks to their canonical fragments before rendering,
         // so forward internal links survive the DOCX round trip.
         let previewNumbering = WordListNumbering(archive: archive)
@@ -69,7 +72,7 @@ public struct WordConverter: DocumentConverter {
         //
         // NOTE: these are CommonMark footnote markers in the canonical Markdown;
         // DocumentRenderer also renders them for the HTML and plaintext exports.
-        let notes = try Self.parseNotes(archive, bookmarks: relationships.filter { $0.key.hasPrefix("#") })
+        let notes = try Self.parseNotes(archive, bookmarks: relationships.filter { $0.key.hasPrefix("#") }, budget: mediaBudget)
         let definitions = Self.referencedNoteIDs(in: body).compactMap { id in
             notes[id].map { text in
                 // Indent continuation lines (from a manual w:br inside the note) so
@@ -85,7 +88,6 @@ public struct WordConverter: DocumentConverter {
         // Extract embedded images (body + notes) as separate .image sections
         // (bytes preserved for downstream OCR/captioning, and for HTML data-URL
         // embedding); the Markdown references them inline.
-        let mediaBudget = MediaBudget()
         var imageSections = try Self.extractImages(from: body, relationships: relationships, archive: archive, budget: mediaBudget)
         imageSections += try Self.extractNoteImages(archive, budget: mediaBudget)
         // De-duplicate an image referenced from both the body and a note (by
@@ -697,7 +699,7 @@ public struct WordConverter: DocumentConverter {
     /// Parses footnote and endnote text (stored in separate parts) into a map
     /// keyed by reference id (`fn<id>` / `en<id>`), skipping the auto separator
     /// and continuation notes.
-    static func parseNotes(_ archive: Archive, bookmarks: [String: String] = [:]) throws -> [String: String] {
+    static func parseNotes(_ archive: Archive, bookmarks: [String: String] = [:], budget: MediaBudget = MediaBudget()) throws -> [String: String] {
         var notes: [String: String] = [:]
         // Resolve each note part from its document relationship Target (falling
         // back to the standard name), then render it against that part's own
@@ -708,7 +710,7 @@ public struct WordConverter: DocumentConverter {
         ] {
             let part = try relationshipTarget(archive, typeSuffix: typeSuffix).map { resolvePartPath($0, relativeTo: "word") } ?? fallback
             let relationships = try parseRelationships(archive, path: relationshipsPath(forPart: part)).merging(bookmarks) { _, canonical in canonical }
-            for (key, value) in try parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships) {
+            for (key, value) in try parseNotePart(archive, path: part, tag: tag, prefix: prefix, relationships: relationships, budget: budget) {
                 notes[key] = value
             }
         }
@@ -743,12 +745,13 @@ public struct WordConverter: DocumentConverter {
         "separator", "continuationSeparator", "continuationNotice",
     ]
 
-    private static func parseNotePart(_ archive: Archive, path: String, tag: String, prefix: String, relationships: [String: String]) throws -> [String: String] {
+    private static func parseNotePart(_ archive: Archive, path: String, tag: String, prefix: String, relationships: [String: String], budget: MediaBudget) throws -> [String: String] {
         guard let data = try readEntry(archive, path: path),
               let xml = decodeText(data),
               let doc = try? SwiftSoup.parse(xml, "", SwiftSoup.Parser.xmlParser()) else {
             return [:]
         }
+        let relationships = try usableSVGRelationships(in: doc, relationships: relationships, archive: archive, partDirectory: (path as NSString).deletingLastPathComponent, budget: budget)
         // Each note part has independent counters from the body and other stories.
         let numbering = WordListNumbering(archive: archive)
         if let failure = numbering.failure { throw failure }
@@ -825,25 +828,65 @@ public struct WordConverter: DocumentConverter {
     /// The relationship Target (e.g. "media/image1.png") an image references via
     /// `a:blip/@r:embed` (DrawingML) or `v:imagedata/@r:id` (legacy VML).
     private static func imageTarget(in drawing: Element, relationships: [String: String]) -> String? {
-        var relId = (try? drawing.getElementsByTag("a:blip").first()).map(imageRelationshipID) ?? ""
-        if relId.isEmpty { relId = (try? drawing.getElementsByTag("v:imagedata").first()?.attr("r:id")) ?? "" }
-        guard !relId.isEmpty, let target = relationships[relId], !target.isEmpty else { return nil }
-        return target
+        if let blip = try? drawing.getElementsByTag("a:blip").first() {
+            for id in imageRelationshipIDs(blip) {
+                if let target = relationships[id], !target.isEmpty { return target }
+            }
+        }
+        if let id = try? drawing.getElementsByTag("v:imagedata").first()?.attr("r:id"),
+           let target = relationships[id], !target.isEmpty { return target }
+        return nil
     }
 
-    /// Prefer the Office SVG extension to its optional raster fallback, using
-    /// the same relationship identity for Markdown and retained image bytes.
-    private static func imageRelationshipID(_ blip: Element) -> String {
+    /// Preferred SVG identity followed by the drawing's existing raster fallback.
+    private static func imageRelationshipIDs(_ blip: Element) -> [String] {
+        var ids: [String] = []
         if let extensions = try? blip.getElementsByTag("a:ext").array() {
             for ext in extensions where (try? ext.attr("uri")) == "{96DAC541-7B7A-43D3-8B79-37D633B846F1}" {
                 for svg in (try? ext.getAllElements().array()) ?? [] where svg.tagName().split(separator: ":").last == "svgBlip" {
                     guard namespaceURI(of: svg) == "http://schemas.microsoft.com/office/drawing/2016/SVG/main",
                           let id = try? svg.attr("r:embed"), !id.isEmpty else { continue }
-                    return id
+                    if !ids.contains(id) { ids.append(id) }
                 }
             }
         }
-        return (try? blip.attr("r:embed")) ?? ""
+        if let id = try? blip.attr("r:embed"), !id.isEmpty, !ids.contains(id) { ids.append(id) }
+        return ids
+    }
+
+    /// Decide once for both Markdown and carriers. A broken preferred SVG must
+    /// not hide a real raster fallback already supplied by the document.
+    static func usableSVGRelationships(in root: Element, relationships: [String: String], archive: Archive, partDirectory: String = "word", budget: MediaBudget) throws -> [String: String] {
+        var usable = relationships
+        for blip in (try? root.getElementsByTag("a:blip").array()) ?? [] {
+            try Task.checkCancellation()
+            let ids = imageRelationshipIDs(blip)
+            guard let rasterID = try? blip.attr("r:embed"), !rasterID.isEmpty,
+                  relationships[rasterID] != nil else { continue }
+            for id in ids where id != rasterID {
+                guard let target = relationships[id], !target.isEmpty else { continue }
+                let path = target.hasPrefix("/") ? String(target.dropFirst()) : resolvePartPath(target, relativeTo: partDirectory)
+                let valid: Bool
+                if let cached = budget.svgValidity[path] { valid = cached }
+                else {
+                    // Probe work is independently bounded, including failed CRC
+                    // reads, and each part is probed only once across all stories.
+                    guard budget.remainingProbes > 0 else { usable.removeValue(forKey: id); continue }
+                    budget.remainingProbes -= 1
+                    let bytes = try readEntry(archive, path: path, maxBytes: min(32 * 1024 * 1024, budget.remainingProbeBytes), onBytes: { count in
+                        guard count <= budget.remainingProbeBytes else {
+                            budget.remainingProbeBytes = 0
+                            throw PicoDocsError.fileCorrupted
+                        }
+                        budget.remainingProbeBytes -= count
+                    })
+                    valid = bytes?.isEmpty == false
+                    budget.svgValidity[path] = valid
+                }
+                if !valid { usable.removeValue(forKey: id) }
+            }
+        }
+        return usable
     }
 
     private static func namespaceURI(of element: Element) -> String? {
@@ -873,20 +916,25 @@ public struct WordConverter: DocumentConverter {
         var remainingBytes: Int
         var remainingImages: Int
         var seen: Set<String> = []
+        var svgValidity: [String: Bool] = [:]
+        var remainingProbeBytes: Int
+        var remainingProbes: Int
         init(maxBytes: Int = 64 * 1024 * 1024, maxImages: Int = 1024) {
             remainingBytes = max(0, maxBytes); remainingImages = max(0, maxImages)
+            remainingProbeBytes = max(0, maxBytes); remainingProbes = max(0, maxImages)
         }
     }
 
     /// Extracts each embedded image once as an `.image` section carrying the raw
     /// bytes (base64) and MIME type, so consumers can render or caption them.
     static func extractImages(from body: Element, relationships: [String: String], archive: Archive, partDirectory: String = "word", budget: MediaBudget = MediaBudget()) throws -> [DocumentSection] {
+        let relationships = try usableSVGRelationships(in: body, relationships: relationships, archive: archive, partDirectory: partDirectory, budget: budget)
         let blips = (try? body.getElementsByTag("a:blip").array()) ?? []
         let vmlImages = (try? body.getElementsByTag("v:imagedata").array()) ?? []
 
         var sections: [DocumentSection] = []
         for element in blips + vmlImages {
-            var relId = imageRelationshipID(element)
+            var relId = imageRelationshipIDs(element).first { relationships[$0]?.isEmpty == false } ?? ""
             if relId.isEmpty { relId = (try? element.attr("r:id")) ?? "" }
             guard !relId.isEmpty, let target = relationships[relId], !target.isEmpty else { continue }
 
@@ -951,7 +999,7 @@ public struct WordConverter: DocumentConverter {
     // MARK: - Archive helpers
     // (entry reads go through the shared, size-hardened ZIPEntryReader.)
 
-    static func readEntry(_ archive: Archive, path: String, maxBytes: Int = 32 * 1024 * 1024) throws -> Data? {
+    static func readEntry(_ archive: Archive, path: String, maxBytes: Int = 32 * 1024 * 1024, onBytes: ((Int) throws -> Void)? = nil) throws -> Data? {
         try Task.checkCancellation()
         let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
         guard let entry = archive[cleanPath] else { return nil }
@@ -962,6 +1010,7 @@ public struct WordConverter: DocumentConverter {
         do {
             let checksum = try archive.extract(entry) { chunk in
                 try Task.checkCancellation()
+                try onBytes?(chunk.count)
                 guard chunk.count <= maxBytes - data.count, !chunk.isEmpty || entry.uncompressedSize == 0 else { throw PicoDocsError.fileCorrupted }
                 data.append(chunk)
             }

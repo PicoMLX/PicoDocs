@@ -27,6 +27,7 @@ struct OOXMLPackageWriter {
     private var archive: Archive
 
     init() throws {
+        try Task.checkCancellation()
         guard let archive = Archive(data: Data(), accessMode: .create) else {
             throw ExporterError.serializationFailed("Could not create in-memory OOXML archive")
         }
@@ -35,6 +36,7 @@ struct OOXMLPackageWriter {
 
     /// Adds a UTF-8 XML part at `path` (e.g. "word/document.xml").
     mutating func addXML(_ path: String, _ xml: String) throws {
+        try Task.checkCancellation()
         let limit = path == "word/numbering.xml" ? 8 * 1024 * 1024 : 32 * 1024 * 1024
         if path.hasPrefix("word/"), xml.utf8.count > limit {
             throw ExporterError.serializationFailed("OOXML part \(path) exceeds the reader-compatible \(limit)-byte limit")
@@ -44,6 +46,7 @@ struct OOXMLPackageWriter {
 
     /// Adds raw bytes at `path` (e.g. an image under "word/media/").
     mutating func addData(_ path: String, _ data: Data) throws {
+        try Task.checkCancellation()
         do {
             try archive.addEntry(
                 with: path,
@@ -51,6 +54,7 @@ struct OOXMLPackageWriter {
                 uncompressedSize: Int64(data.count),
                 compressionMethod: .deflate,
                 provider: { position, size in
+                    try Task.checkCancellation()
                     // `Int(position)` tolerates either Int/Int64 provider positions.
                     let start = Int(position)
                     let length = Swift.min(size, data.count - start)
@@ -60,6 +64,9 @@ struct OOXMLPackageWriter {
                     return data.subdata(in: lower..<upper)
                 }
             )
+            try Task.checkCancellation()
+        } catch let error as CancellationError {
+            throw error
         } catch {
             throw ExporterError.serializationFailed("Failed to add part \(path): \(error.localizedDescription)")
         }
@@ -67,16 +74,41 @@ struct OOXMLPackageWriter {
 
     /// Finalizes the package into its bytes.
     func data() throws -> Data {
+        try Task.checkCancellation()
         guard let data = archive.data else {
             throw ExporterError.serializationFailed("Could not finalize OOXML archive")
         }
         return data
     }
 
-    mutating func addCoreProperties(_ result: ConverterResult) throws {
+    mutating func addCoreProperties(_ result: ConverterResult, maximumBytes: Int = 32 * 1024 * 1024) throws {
+        try addXML("docProps/core.xml", Self.corePropertiesXML(result, maximumBytes: maximumBytes))
+    }
+
+    /// Admit the complete serialized UTF-8 part before escaping or retaining it.
+    static func corePropertiesXML(_ result: ConverterResult, maximumBytes: Int) throws -> String {
+        try Task.checkCancellation()
+        let prefix = xmlDeclaration + "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">"
+        let suffix = "</cp:coreProperties>"
+        var remaining = maximumBytes
+        func admit(_ bytes: Int) throws {
+            guard bytes <= remaining else { throw ExporterError.serializationFailed("Core properties exceed the reader-compatible metadata limit") }
+            remaining -= bytes
+        }
+        try admit(prefix.utf8.count + suffix.utf8.count)
+        for (tag, value) in [("title", result.title), ("creator", result.author)] {
+            guard let value else { continue }
+            try admit(("<dc:" + tag + "></dc:" + tag + ">").utf8.count)
+            for (index, scalar) in value.unicodeScalars.enumerated() {
+                if index.isMultiple(of: 4096) { try Task.checkCancellation() }
+                guard isValidXMLScalar(scalar) else { continue }
+                try admit(scalar == "&" ? 5 : (scalar == "<" || scalar == ">" ? 4 : scalar.utf8.count))
+            }
+        }
         let title = result.title.map { "<dc:title>\(Self.escape($0))</dc:title>" } ?? ""
         let author = result.author.map { "<dc:creator>\(Self.escape($0))</dc:creator>" } ?? ""
-        try addXML("docProps/core.xml", Self.xmlDeclaration + "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\(title)\(author)</cp:coreProperties>")
+        try Task.checkCancellation()
+        return prefix + title + author + suffix
     }
 
     static func withCoreContentType(_ xml: String) -> String {

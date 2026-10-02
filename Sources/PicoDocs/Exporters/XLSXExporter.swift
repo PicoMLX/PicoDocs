@@ -60,12 +60,7 @@ public struct XLSXExporter: DocumentExporter {
             }
             sheets.append((name, rows))
         }
-        if sheets.isEmpty {
-            // The engine guards fully-empty input; this only triggers for content
-            // that flattens to nothing. Emit a single empty sheet rather than an
-            // invalid (sheet-less) workbook.
-            sheets = [("Sheet1", [[""]])]
-        }
+        guard !sheets.isEmpty else { throw PicoDocsError.emptyDocument }
 
         var pkg = try OOXMLPackageWriter()
         try pkg.addCoreProperties(result)

@@ -23,16 +23,23 @@ public struct WordprocessingMLExporter: DocumentExporter {
     public func accepts(_ format: ExportableFileType) -> Bool { format == .docx }
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
+        try Task.checkCancellation()
         guard format == .docx else { throw ExporterError.notAccepted }
         try OfficeDocumentBlocks.validateInput(result)
         let sanitized = OOXMLPackageWriter.sanitizedDocument(result)
         guard !PicoDocsEngine.isEmptyForExport(sanitized) else { throw PicoDocsError.emptyDocument }
         let result = PicoDocsEngine.withSynthesizedImageReferences(sanitized)
 
+        try Task.checkCancellation()
         let blocks = OfficeDocumentBlocks.parse(result)
+        try Task.checkCancellation()
         guard !blocks.isEmpty else { throw PicoDocsError.emptyDocument }
-        let builder = Builder(images: Self.imageIndex(result.sections), blocks: blocks)
+        let images = try Self.imageIndex(result.sections)
+        try Task.checkCancellation()
+        let builder = Builder(images: images, blocks: blocks)
+        if let failure = builder.failure { throw failure }
         for block in blocks {
+            try Task.checkCancellation()
             builder.append(block)
             if let failure = builder.failure { throw failure }
         }
@@ -50,6 +57,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             try pkg.addXML("word/numbering.xml", Self.numberingXML(usedBullet: builder.usedBullet, orderedNumIds: builder.orderedNumIds, continuationNumID: builder.continuationNumID))
         }
         for media in builder.media {
+            try Task.checkCancellation()
             try pkg.addData("word/media/\(media.filename)", media.data)
         }
         return try pkg.data()
@@ -133,7 +141,9 @@ public struct WordprocessingMLExporter: DocumentExporter {
         func lookup(_ source: String) throws -> IndexedImage? {
             func unique(_ candidates: [IndexedImage]) throws -> (image: IndexedImage?, ambiguous: Bool) {
                 var match: IndexedImage?
-                for candidate in candidates where try candidate.decodedData() != nil {
+                for candidate in candidates {
+                    try Task.checkCancellation()
+                    guard try candidate.decodedData() != nil else { continue }
                     if let match {
                         match.releaseUnusedDecode(); candidate.releaseUnusedDecode()
                         return (nil, true)
@@ -172,7 +182,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         (path.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent
     }
 
-    private static func imageIndex(_ sections: [DocumentSection]) -> ImageIndex {
+    private static func imageIndex(_ sections: [DocumentSection]) throws -> ImageIndex {
         var byPath: [String: [IndexedImage]] = [:]
         var byAlias: [String: [IndexedImage]] = [:]
         var byBasename: [String: [IndexedImage]] = [:]
@@ -181,6 +191,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         let budget = OfficeMediaDecodeBudget()
 
         for section in sections where section.kind == .image {
+            try Task.checkCancellation()
             guard let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
 
             // The carrier's display name (basename of the source path, else title).
@@ -279,11 +290,13 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
         init(images: ImageIndex, blocks: [MarkdownBlock]) {
             self.images = images
+            guard checkCancellation() else { return }
             let titles = blocks.compactMap { block -> String? in
-                guard case .heading(_, let text) = block else { return nil }
+                guard checkCancellation(), case .heading(_, let text) = block else { return nil }
                 return MarkdownInlineParser.parse(text).plainText
             }
             for slug in MarkdownHeadingAnchors.slugs(titles) {
+                guard checkCancellation() else { return }
                 // Generated names are short and valid even for Unicode headings.
                 let name = "heading_\(headingBookmarks.count + 1)"
                 headingBookmarks.append(name)
@@ -291,8 +304,15 @@ public struct WordprocessingMLExporter: DocumentExporter {
             }
         }
 
+        /// Nonthrowing builder callbacks retain cancellation for the throwing writer.
+        private func checkCancellation() -> Bool {
+            guard failure == nil else { return false }
+            do { try Task.checkCancellation(); return true }
+            catch { failure = error; return false }
+        }
+
         private func addRelationship(_ relation: Relationship) {
-            guard failure == nil else { return }
+            guard checkCancellation() else { return }
             do { try relationships.add(id: relation.id, type: relation.type, target: relation.target, external: relation.external) }
             catch { failure = error }
         }
@@ -300,6 +320,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         private func nextRelID() -> String { relCounter += 1; return "rId\(relCounter)" }
 
         func append(_ block: MarkdownBlock) {
+            guard checkCancellation() else { return }
             switch block {
             case .heading(let level, let text):
                 let pPr = "<w:pPr><w:pStyle w:val=\"Heading\(min(max(level, 1), 6))\"/></w:pPr>"
@@ -316,6 +337,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 let lines = code.components(separatedBy: "\n")
                 var content = ""
                 for (i, line) in lines.enumerated() {
+                    guard checkCancellation() else { return }
                     if i > 0 { content += "<w:r><w:br/></w:r>" }
                     content += textRun(line, bold: false, italic: false, monospace: true)
                 }
@@ -339,6 +361,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         }
 
         private func appendList(_ list: MarkdownList, level: Int = 0) {
+            guard checkCancellation() else { return }
             guard level <= 8 else {
                 failure = ExporterError.serializationFailed("DOCX supports at most nine native list levels")
                 return
@@ -363,14 +386,14 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 numId = id
             } else { usedBullet = true }
             for item in list.items {
-                guard failure == nil else { return }
+                guard checkCancellation() else { return }
                 if let number = item.number, number != expected {
                     guard let id = allocate(number) else { return }
                     numId = id
                 }
                 if let number = item.number { expected = min(number, Int.max - 1) + 1 }
                 for (index, content) in item.content.enumerated() {
-                    guard failure == nil else { return }
+                    guard checkCancellation() else { return }
                     switch content {
                     case .text(let text):
                         if index > 0, continuationNumID == nil {
@@ -403,13 +426,16 @@ public struct WordprocessingMLExporter: DocumentExporter {
         // MARK: Inline
 
         private func inlineRuns(_ markdown: String) -> String {
-            renderRuns(MarkdownInlineParser.parse(markdown), bold: false, italic: false)
+            guard checkCancellation() else { return "" }
+            let nodes = MarkdownInlineParser.parse(markdown)
+            guard checkCancellation() else { return "" }
+            return renderRuns(nodes, bold: false, italic: false)
         }
 
         private func renderRuns(_ nodes: [MarkdownInline], bold: Bool, italic: Bool) -> String {
             var out = ""
             for node in nodes {
-                guard failure == nil else { return out }
+                guard checkCancellation() else { return out }
                 switch node {
                 case .text(let s):
                     out += textRun(s, bold: bold, italic: italic, monospace: false)
@@ -446,7 +472,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                             target: destination,
                             external: true
                         ))
-                        guard failure == nil else { return out }
+                        guard checkCancellation() else { return out }
                         externalLinkRelationships[destination] = id
                     }
                     out += "<w:hyperlink r:id=\"\(id)\">\(renderRuns(label, bold: bold, italic: italic))</w:hyperlink>"
@@ -474,12 +500,13 @@ public struct WordprocessingMLExporter: DocumentExporter {
         ///   `WordConverter.imageAltText` reads first, so meaningful alt text survives
         ///   the round-trip instead of collapsing to the filename.
         private func imageRun(alt: String, source: String) -> String? {
-            guard failure == nil else { return nil }
+            guard checkCancellation() else { return nil }
             do { return try checkedImageRun(alt: alt, source: source) }
             catch { failure = error; return nil }
         }
 
         private func checkedImageRun(alt: String, source: String) throws -> String? {
+            try Task.checkCancellation()
             guard let image = try images.lookup(source), let data = try image.decodedData() else { return nil }
             let filename = image.mediaFilename
             let ext = (filename as NSString).pathExtension.lowercased()
@@ -532,7 +559,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         // MARK: Table
 
         private func table(_ rows: [[String]]) -> String {
-            guard !rows.isEmpty else { return "" }
+            guard checkCancellation(), !rows.isEmpty else { return "" }
             let columns = rows.map(\.count).max() ?? 0
             guard columns > 0 else { return "" }
             // Reserve the padded rectangle before grid/cell strings are built.
@@ -558,8 +585,10 @@ public struct WordprocessingMLExporter: DocumentExporter {
             let grid = String(repeating: "<w:gridCol w:w=\"2000\"/>", count: columns)
             var out = "<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/>\(borders)</w:tblPr><w:tblGrid>\(grid)</w:tblGrid>"
             for row in rows {
+                guard checkCancellation() else { return "" }
                 out += "<w:tr>"
                 for col in 0..<columns {
+                    if col.isMultiple(of: 64), !checkCancellation() { return "" }
                     let cell = col < row.count ? row[col] : ""
                     out += "<w:tc><w:tcPr><w:tcW w:w=\"0\" w:type=\"auto\"/></w:tcPr>\(cellParagraph(cell))</w:tc>"
                 }
@@ -572,7 +601,10 @@ public struct WordprocessingMLExporter: DocumentExporter {
         /// A table cell paragraph. `<br>` separators become hard line breaks; each
         /// segment is parsed for inline emphasis/links so `**x**` etc. round-trip.
         private func cellParagraph(_ cell: String) -> String {
-            let content = renderRuns(MarkdownInlineParser.parse(cell, tableCell: true), bold: false, italic: false)
+            guard checkCancellation() else { return "" }
+            let nodes = MarkdownInlineParser.parse(cell, tableCell: true)
+            guard checkCancellation() else { return "" }
+            let content = renderRuns(nodes, bold: false, italic: false)
             return "<w:p>\(content)</w:p>"
         }
 
@@ -583,7 +615,8 @@ public struct WordprocessingMLExporter: DocumentExporter {
         }
 
         private func textRun(_ text: String, bold: Bool, italic: Bool, monospace: Bool) -> String {
-            "<w:r>\(runProperties(bold: bold, italic: italic, monospace: monospace))<w:t xml:space=\"preserve\">\(OOXMLPackageWriter.escape(text))</w:t></w:r>"
+            guard checkCancellation() else { return "" }
+            return "<w:r>\(runProperties(bold: bold, italic: italic, monospace: monospace))<w:t xml:space=\"preserve\">\(OOXMLPackageWriter.escape(text))</w:t></w:r>"
         }
 
         private func runProperties(bold: Bool, italic: Bool, monospace: Bool) -> String {

@@ -51,7 +51,7 @@ public struct PPTXExporter: DocumentExporter {
         let fragments = MarkdownHeadingAnchors.slugs(headings.map(\.title))
         let fragmentSlides = Dictionary(uniqueKeysWithValues: zip(fragments, headings.map(\.slide)))
         var pkg = try OOXMLPackageWriter()
-        try pkg.addCoreProperties(result)
+        try pkg.addCoreProperties(result, maximumBytes: 1024 * 1024)
         func addXML(_ path: String, _ xml: String) throws {
             try packageBudget.admitXML(path, xml)
             try pkg.addXML(path, xml)
