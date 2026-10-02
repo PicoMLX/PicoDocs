@@ -68,7 +68,7 @@ enum IWATable {
         let bodyObjects: [IWAArchive.Object]
         let streamObjects: [[IWAArchive.Object]]
         let tableMarkdown: [UInt64: String]
-        init(documentStream: [UInt8]?, streams: [[UInt8]], objectBudget: IWAObjectBudget, outputBudget: IWAOutputBudget? = nil) throws {
+        init(documentStream: [UInt8]?, streams: [[UInt8]], objectBudget: IWAObjectBudget, outputBudget: IWAOutputBudget? = nil, preserveCellWhitespace: Bool = false) throws {
             guard objectBudget.reserve(streams.count * 32) else { try objectBudget.check(); throw PicoDocsError.fileCorrupted }
             let documentIndex = documentStream.flatMap { streams.firstIndex(of: $0) }
             var streamObjects = Array(repeating: [IWAArchive.Object](), count: streams.count)
@@ -80,7 +80,7 @@ enum IWATable {
             try objectBudget.check()
             self.bodyObjects = bodyObjects
             self.streamObjects = streamObjects
-            tableMarkdown = reconstructTables(objects, budget: outputBudget, objectBudget: objectBudget)
+            tableMarkdown = reconstructTables(objects, budget: outputBudget, objectBudget: objectBudget, preserveCellWhitespace: preserveCellWhitespace)
             try objectBudget.check()
         }
     }
@@ -1052,7 +1052,7 @@ enum IWATable {
     /// rich-text list (`f1==8`, via RichTextPayload → Storage) and/or an
     /// inline-text list (`f1==1`, text stored directly in the entry). Cells choose
     /// between them by value type; dates live in the cell record itself.
-    private static func reconstructTables(_ objects: [UInt64: IWAArchive.Object], budget: IWAOutputBudget? = nil, objectBudget: IWAObjectBudget? = nil) -> [UInt64: String] {
+    private static func reconstructTables(_ objects: [UInt64: IWAArchive.Object], budget: IWAOutputBudget? = nil, objectBudget: IWAObjectBudget? = nil, preserveCellWhitespace: Bool = false) -> [UInt64: String] {
         let copies = objectBudget ?? IWAObjectBudget()
         let output = budget ?? IWAOutputBudget()
         // The implicit allowance is checked through the caller's shared object
@@ -1095,7 +1095,7 @@ enum IWATable {
             for position in positions {
                 guard copies.active, output.active, let tile = objects[position.id] else { continue }
                 mergeTile(tile, rowOffset: position.offset ?? grid.count, rich: rich, inline: inline,
-                          grid: &grid, budget: output, objectBudget: copies)
+                          grid: &grid, budget: output, objectBudget: copies, preserveCellWhitespace: preserveCellWhitespace)
             }
             if let markdown = render(grid: grid, budget: output) { byTile[first.id] = markdown }
         }
@@ -1354,7 +1354,7 @@ enum IWATable {
     /// rows stay absent, and sparse placement is admitted before padding.
     private static func mergeTile(_ tile: IWAArchive.Object, rowOffset: Int,
                                   rich: [UInt32: String], inline: [UInt32: String], grid: inout [[String?]],
-                                  budget: IWAOutputBudget, objectBudget: IWAObjectBudget) {
+                                  budget: IWAOutputBudget, objectBudget: IWAObjectBudget, preserveCellWhitespace: Bool) {
         var reader = ProtobufReader(tile.payload, objectBudget: objectBudget), ordinal = 0
         while let field = reader.next() {
             if field.number == 5, case .length(let rowBytes) = field.value {
@@ -1372,7 +1372,7 @@ enum IWATable {
                     guard budget.reserve(count, copies: 32) else { return }
                     grid += Array(repeating: [], count: count)
                 }
-                grid[index] = cellTexts(inRow: rowBytes, rich: rich, inline: inline, budget: budget, objectBudget: objectBudget)
+                grid[index] = cellTexts(inRow: rowBytes, rich: rich, inline: inline, budget: budget, objectBudget: objectBudget, preserveCellWhitespace: preserveCellWhitespace)
                 ordinal += 1
             }
         }
@@ -1381,7 +1381,7 @@ enum IWATable {
     /// One TileRowInfo: uint16 offsets (field 7) into the cell buffer (field 6);
     /// 0xFFFF marks an absent cell.
     private static func cellTexts(inRow rowBytes: [UInt8],
-                                  rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?, objectBudget: IWAObjectBudget) -> [String?] {
+                                  rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?, objectBudget: IWAObjectBudget, preserveCellWhitespace: Bool) -> [String?] {
         var buffer: [UInt8] = []
         var offsets: [UInt8] = []
         var reader = ProtobufReader(rowBytes, objectBudget: objectBudget)
@@ -1398,7 +1398,7 @@ enum IWATable {
             guard !Task.isCancelled, budget?.reserveCell() != false else { return [] }
             let offset = Int(offsets[i]) | (Int(offsets[i + 1]) << 8)
             i += 2
-            cells.append(offset == 0xFFFF ? nil : cellText(in: buffer, at: offset, rich: rich, inline: inline, budget: budget))
+            cells.append(offset == 0xFFFF ? nil : cellText(in: buffer, at: offset, rich: rich, inline: inline, budget: budget, preserveCellWhitespace: preserveCellWhitespace))
         }
         while let last = cells.last, last == nil { cells.removeLast() }   // trim trailing absent cells
         return cells
@@ -1410,19 +1410,19 @@ enum IWATable {
     /// at +12), a Boolean double, or an explicit error state. Duration cells aren't decoded yet. Returns "" (a present-but-empty
     /// cell) on any unhandled type or out-of-bounds read.
     private static func cellText(in buffer: [UInt8], at offset: Int,
-                                 rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?) -> String {
+                                 rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?, preserveCellWhitespace: Bool) -> String {
         guard offset >= 0, offset + 2 <= buffer.count, buffer[offset] == 0x05 else { return "" }
         switch buffer[offset + 1] {
         case richTextCell:
             guard let key = readUInt32(buffer, at: offset + 12) else { return "" }
             let text = rich[key] ?? ""
             guard budget?.reserve(text.utf8.count, copies: 6) != false else { return "" }
-            return cleanCell(text)
+            return cleanCell(text, preservingBoundaryWhitespace: preserveCellWhitespace, budget: budget)
         case inlineTextCell:
             guard let key = readUInt32(buffer, at: offset + 12) else { return "" }
             let text = inline[key] ?? ""
             guard budget?.reserve(text.utf8.count, copies: 6) != false else { return "" }
-            return cleanCell(text)
+            return cleanCell(text, preservingBoundaryWhitespace: preserveCellWhitespace, budget: budget)
         case dateCell:
             guard let seconds = readDouble(buffer, at: offset + 12) else { return "" }
             return isoDate(seconds)
@@ -1617,8 +1617,8 @@ enum IWATable {
     ///    placeholder-only cell becomes empty (and an all-placeholder table is
     ///    skipped) rather than rendering as visible garbage;
     ///  • escapes backslash and pipe so the text can't break the table; and
-    ///  • trims surrounding whitespace.
-    static func cleanCell(_ text: String) -> String {
+    ///  • trims surrounding whitespace unless the producer owns its preservation.
+    static func cleanCell(_ text: String, preservingBoundaryWhitespace: Bool = false, budget: IWAOutputBudget? = nil) -> String {
         var escaped = ""
         var previousCR = false
         let punctuation = #"\`*_{}[]<>|&~"#.unicodeScalars
@@ -1634,6 +1634,39 @@ enum IWATable {
                 escaped.unicodeScalars.append(scalar)
             }
         }
-        return escaped.trimmingCharacters(in: .whitespaces)
+        guard preservingBoundaryWhitespace else { return escaped.trimmingCharacters(in: .whitespaces) }
+        let scalars = escaped.unicodeScalars
+        var firstContent: Int?, lastContent = -1, count = 0
+        for (index, scalar) in scalars.enumerated() {
+            if index.isMultiple(of: 1024), Task.isCancelled { return "" }
+            if !CharacterSet.whitespaces.contains(scalar) {
+                if firstContent == nil { firstContent = index }
+                lastContent = index
+            }
+            count += 1
+        }
+        let first = firstContent ?? count
+        func encoded(_ index: Int, _ scalar: UnicodeScalar) -> Bool {
+            index < first || index > lastContent || scalar == "\t"
+        }
+        var growth = 0
+        for (index, scalar) in scalars.enumerated() {
+            if index.isMultiple(of: 1024), Task.isCancelled { return "" }
+            guard encoded(index, scalar) else { continue }
+            var value = scalar.value, digits = 1
+            while value >= 10 { digits += 1; value /= 10 }
+            growth += 3 + digits - scalar.utf8.count
+        }
+        // Existing cleaning copies are already admitted by cellText; debit the
+        // exact additional entity bytes before constructing the expanded result.
+        guard budget?.reserve(growth, copies: 2) != false else { return "" }
+        var preserved = ""
+        preserved.reserveCapacity(escaped.utf8.count + growth)
+        for (index, scalar) in scalars.enumerated() {
+            if index.isMultiple(of: 1024), Task.isCancelled { return "" }
+            if encoded(index, scalar) { preserved += "&#\(scalar.value);" }
+            else { preserved.unicodeScalars.append(scalar) }
+        }
+        return preserved
     }
 }

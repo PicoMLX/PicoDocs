@@ -35,7 +35,9 @@ import ZIPFoundation
 
 public struct PagesConverter: DocumentConverter {
 
-    public init() {}
+    private let objectBudgetBytes: Int
+    public init() { objectBudgetBytes = 64 * 1024 * 1024 }
+    init(objectBudgetBytes: Int) { self.objectBudgetBytes = max(0, objectBudgetBytes) }
 
     public func accepts(_ info: StreamInfo) -> Bool {
         info.detectedFormat == .pages
@@ -68,19 +70,19 @@ public struct PagesConverter: DocumentConverter {
             try Task.checkCancellation()
             do {
                 let stream = try Snappy.decompressIWA(component.bytes)
-                if component.name.hasSuffix("Document.iwa") { documentStream = stream }
+                if component.isDocument { documentStream = stream }
                 streams.append((name: component.name, stream: stream))
             } catch let error as CancellationError {
                 throw error
             } catch {
-                if component.name.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
+                if component.isDocument { throw PicoDocsError.fileCorrupted }
             }
         }
 
-        let objectBudget = IWAObjectBudget()
+        let objectBudget = IWAObjectBudget(bytes: objectBudgetBytes)
         let allStreams = streams.map(\.stream)
         var sections: [DocumentSection] = []
-        let prepared = try documentStream.map { try IWATable.PreparedDocument(documentStream: $0, streams: allStreams, objectBudget: objectBudget) }
+        let prepared = try IWATable.PreparedDocument(documentStream: documentStream, streams: allStreams, objectBudget: objectBudget)
 
         // Prefer inline layout: tables placed at their ￼ attachment points, in
         // reading order. Falls back to body text + tables appended after it when
@@ -106,11 +108,11 @@ public struct PagesConverter: DocumentConverter {
                 // Render headings even on the fallback path; degrade to plain text
                 // extraction only if the style-aware renderer yields nothing.
                 let rendered = try IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams, objectBudget: objectBudget, prepared: prepared)
-                bodyText = rendered.isEmpty ? MarkdownLiteral.escapeBackslashes(Self.normalize(IWAArchive.text(from: prepared?.bodyObjects ?? []))) : rendered
+                bodyText = rendered.isEmpty ? MarkdownLiteral.escapeBackslashes(Self.normalize(IWAArchive.text(from: prepared.bodyObjects))) : rendered
             } else {
                 var firstText = ""
-                for entry in streams.sorted(by: { $0.name < $1.name }) {
-                    let extracted = IWAArchive.text(in: entry.stream, objectBudget: objectBudget)
+                for entry in streams.enumerated().sorted(by: { $0.element.name < $1.element.name }) {
+                    let extracted = IWAArchive.text(from: prepared.streamObjects[entry.offset])
                     if !extracted.isEmpty { firstText = MarkdownLiteral.escapeBackslashes(Self.normalize(extracted)); break }
                 }
                 bodyText = firstText
@@ -136,6 +138,7 @@ public struct PagesConverter: DocumentConverter {
     struct Component {
         let name: String
         let bytes: [UInt8]
+        let isDocument: Bool
     }
 
     /// Reads the `.iwa` component streams from loose `Index/*.iwa` entries, or —
@@ -169,10 +172,10 @@ public struct PagesConverter: DocumentConverter {
             guard entry.type == .file, entry.path.hasPrefix("Index/"), entry.path.hasSuffix(".iwa") else { continue }
             try componentBudget.retainComponent()
             guard let data = try readBounded(archive, entry: entry) else {
-                if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
+                if entry.path == "Index/Document.iwa" { throw PicoDocsError.fileCorrupted }
                 continue
             }
-            components.append(Component(name: entry.path, bytes: [UInt8](data)))
+            components.append(Component(name: entry.path, bytes: [UInt8](data), isDocument: entry.path == "Index/Document.iwa"))
         }
         if !components.isEmpty { return components }
 
@@ -189,10 +192,10 @@ public struct PagesConverter: DocumentConverter {
                 guard entry.type == .file, entry.path.hasSuffix(".iwa") else { continue }
                 try componentBudget.retainComponent()
                 guard let data = try readBounded(inner, entry: entry) else {
-                    if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
+                    if entry.path == "Document.iwa" { throw PicoDocsError.fileCorrupted }
                     continue
                 }
-                components.append(Component(name: entry.path, bytes: [UInt8](data)))
+                components.append(Component(name: entry.path, bytes: [UInt8](data), isDocument: entry.path == "Document.iwa"))
             }
         }
         return components
