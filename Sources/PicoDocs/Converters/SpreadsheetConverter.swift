@@ -10,6 +10,7 @@
 
 import Foundation
 import CoreXLSX
+import ZIPFoundation
 
 public struct SpreadsheetConverter: DocumentConverter {
 
@@ -20,7 +21,12 @@ public struct SpreadsheetConverter: DocumentConverter {
     }
 
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
+        try Task.checkCancellation()
         let file = try XLSXFile(data: data)
+        // CoreXLSX's archive is private. A metadata-only handle reuses the same
+        // root relationship, XML admission, CRC and cancellation policy as DOCX.
+        guard let archive = Archive(data: data, accessMode: .read) else { throw PicoDocsError.fileCorrupted }
+        let properties = try WordConverter.coreProperties(archive)
         // A workbook may have no shared-strings part (e.g. numbers-only, or
         // inline strings); don't fail the whole conversion when it's absent.
         let sharedStrings = try? file.parseSharedStrings()
@@ -49,8 +55,8 @@ public struct SpreadsheetConverter: DocumentConverter {
         }
 
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
-        let title = sheetNames.isEmpty ? info.filename : sheetNames.joined(separator: ", ")
-        return ConverterResult(title: title, sections: sections)
+        let title = properties.title ?? (sheetNames.isEmpty ? info.filename : sheetNames.joined(separator: ", "))
+        return ConverterResult(title: title, author: properties.author, sections: sections)
     }
 
     // MARK: - Markdown table
