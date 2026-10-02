@@ -1580,6 +1580,7 @@ public struct PowerPointConverter: DocumentConverter {
         private(set) var sections: [DocumentSection] = []
         private var references: [String: String] = [:]
         private var usedReferences: Set<String>
+        private var usedMaterializedPaths: Set<String>
         private var nextReference = 0
 
         private var remainingEncodedBytes: Int
@@ -1587,6 +1588,7 @@ public struct PowerPointConverter: DocumentConverter {
 
         init(reservedReferences: Set<String> = [], maximumEncodedBytes: Int = 32 * 1024 * 1024, reserveCarrierBytes: ((Int) -> Bool)? = nil) {
             usedReferences = Set(reservedReferences.flatMap(Self.reservationIdentities))
+            usedMaterializedPaths = Set(reservedReferences.compactMap(Self.materializedPathIdentity))
             self.reserveCarrierBytes = reserveCarrierBytes
             remainingEncodedBytes = max(0, maximumEncodedBytes)
         }
@@ -1642,6 +1644,16 @@ public struct PowerPointConverter: DocumentConverter {
             return [full, String(full[..<end])]
         }
 
+        private static func materializedPathIdentity(_ reference: String) -> String? {
+            guard URLComponents(string: reference)?.scheme == nil, !reference.hasPrefix("//") else { return nil }
+            let identity = referenceIdentity(reference)
+            let end = identity.firstIndex(of: "?") ?? identity.endIndex
+            // Carrier paths must also be distinct on case-insensitive volumes.
+            // Keep this local-path reservation separate from case-sensitive URI
+            // identity, retaining encoded separators and ignoring query/fragment.
+            return identity[..<end].lowercased()
+        }
+
         @discardableResult
         func add(path: String, filename: String, archive: PowerPointPackage) -> String? {
             if let existing = references[path] { return existing }
@@ -1661,7 +1673,12 @@ public struct PowerPointConverter: DocumentConverter {
             // scheme position of a generated embedded-image URL.
             let needsRelativePrefix = filename.contains(":") || filename.contains("%") || filename.hasPrefix("/") || filename.hasPrefix("\\")
             var reference = needsRelativePrefix ? "./" + filename : filename
-            while Self.reservationIdentities(PowerPointConverter.linkDestination(reference)).contains(where: usedReferences.contains) {
+            func isReserved(_ reference: String) -> Bool {
+                let emitted = PowerPointConverter.linkDestination(reference)
+                return Self.reservationIdentities(emitted).contains(where: usedReferences.contains)
+                    || Self.materializedPathIdentity(emitted).map(usedMaterializedPaths.contains) == true
+            }
+            while isReserved(reference) {
                 nextReference += 1
                 reference = "picodocs-embedded/\(nextReference)/" + filename
             }
@@ -1673,6 +1690,7 @@ public struct PowerPointConverter: DocumentConverter {
                 + mime.utf8.count + "mimeType".utf8.count + "markdownReference".utf8.count + 5
             guard reserveCarrierBytes?(carrierBytes) != false else { archive.fail(PicoDocsError.fileCorrupted); return nil }
             for identity in Self.reservationIdentities(emitted) { usedReferences.insert(identity) }
+            if let identity = Self.materializedPathIdentity(emitted) { usedMaterializedPaths.insert(identity) }
             references[path] = reference
             sections.append(DocumentSection(
                 title: filename,

@@ -41,17 +41,18 @@ public enum DocumentRenderer {
 
     /// Charge line-array/string slots before footnote and block parsing split
     /// input. Both passes retain line strings; byte-only limits miss empty lines.
-    static func preflightRenderInput(_ result: ConverterResult, maximumBytes: Int = 64 * 1024 * 1024, maximumLines: Int = 100_000, markdownFallbackOnly: Bool = false) throws {
+    static func preflightRenderInput(_ result: ConverterResult, maximumBytes: Int = 64 * 1024 * 1024, maximumLines: Int = 100_000, markdownFallbackOnly: Bool = false, checkCancellation: () throws -> Void = { try Task.checkCancellation() }) throws {
         guard maximumBytes >= 0, maximumLines > 0 else { throw PicoDocsError.fileCorrupted }
         var remaining = maximumBytes, lines = 1, sections = 0
         for section in result.sections where section.kind != .image {
-            try Task.checkCancellation()
+            try checkCancellation()
             if markdownFallbackOnly, let csv = section.metadata["csv"], !csv.isEmpty { continue }
             let bytes = section.markdown.utf8.count
             guard bytes <= remaining else { throw PicoDocsError.fileCorrupted }
             remaining -= bytes
             var previousWasCR = false
-            for byte in section.markdown.utf8 {
+            for (offset, byte) in section.markdown.utf8.enumerated() {
+                if offset.isMultiple(of: 4096) { try checkCancellation() }
                 if byte == 13 || (byte == 10 && !previousWasCR) {
                     guard lines < maximumLines else { throw PicoDocsError.fileCorrupted }
                     lines += 1
@@ -64,6 +65,7 @@ public enum DocumentRenderer {
             }
             sections += 1
         }
+        try checkCancellation()
         guard lines <= remaining / 256 else { throw PicoDocsError.fileCorrupted }
     }
 
