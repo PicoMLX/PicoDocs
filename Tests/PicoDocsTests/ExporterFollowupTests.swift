@@ -863,8 +863,10 @@ struct ExporterFollowupTests {
         }
     }
 
-    @Test func ambiguousLargeCandidatesDoNotChargeEmittedMediaBudget() throws {
-        let payload = Data(repeating: 1, count: 32 * 1024 * 1024).base64EncodedString()
+    @Test func ambiguousCandidatesChargeProbesButNotEmittedMedia() throws {
+        // Keep the two probes plus surrounding images within the cumulative
+        // decoding allowance; released probes still do not consume output media.
+        let payload = Data(repeating: 1, count: 16 * 1024 * 1024).base64EncodedString()
         func image(_ path: String, bytes: String) -> DocumentSection { .init(kind: .image, markdown: "", sourcePath: path, metadata: ["base64": bytes, "mimeType": "image/png"]) }
         let result = ConverterResult(sections: [.init(markdown: "![Before](before.png) ![Ambiguous](logo.png) ![After](after.png)"), image("before.png", bytes: "AQID"), image("a/logo.png", bytes: payload), image("b/logo.png", bytes: payload), image("after.png", bytes: "BAUG")])
         let data = try PicoDocsEngine.write(result, to: .docx)
