@@ -12,6 +12,89 @@
 import Foundation
 
 enum MarkdownTableCell {
+    static func escapeCanonicalPipes(_ text: String) -> String {
+        MarkdownLiteral.escapeStructural(text, characters: "|")
+    }
+
+    static func decodeBreaks(_ text: String, breakText: String = "\n") -> String {
+        var brackets = 0, destinationDepth = 0, angleDestination = false
+        return mapCodeSpans(text, code: { codePipes($0, encoding: false) }, plain: { plain in
+            var output = "", index = plain.startIndex
+            while index < plain.endIndex {
+                let character = plain[index]
+                let next = plain.index(after: index)
+                if character == "\\" {
+                    output.append(character); index = next
+                    if index < plain.endIndex { output.append(plain[index]); index = plain.index(after: index) }
+                    continue
+                }
+                if destinationDepth > 0 {
+                    if angleDestination {
+                        if character == ">" { angleDestination = false }
+                    } else {
+                        if character == "<", destinationDepth == 1 { angleDestination = true }
+                        else if character == "(" { destinationDepth += 1 }
+                        else if character == ")" { destinationDepth -= 1 }
+                    }
+                } else if character == "[" { brackets += 1 }
+                else if character == "]", brackets > 0 {
+                    brackets -= 1
+                    if next < plain.endIndex, plain[next] == "(" {
+                        destinationDepth = 1; output += "]("; index = plain.index(after: next); continue
+                    }
+                } else if plain[index...].hasPrefix("<br>") {
+                    output += breakText; index = plain.index(index, offsetBy: 4); continue
+                }
+                output.append(character); index = next
+            }
+            return output
+        })
+    }
+
+    static func inlineText(_ text: String, breakText: String = "\n", inline: (String) throws -> String) rethrows -> String {
+        let protected = protectBreakSentinels(text)
+        return restoreBreakSentinels(try inline(decodeBreaks(protected, breakText: breakToken)), breakText: breakText, html: breakText == "<br>")
+    }
+
+    static func protectBreakSentinels(_ text: String) -> String {
+        var output = ""
+        for scalar in text.unicodeScalars {
+            output.unicodeScalars.append(scalar)
+            if scalar == "\u{E042}" { output.unicodeScalars.append(scalar) }
+        }
+        return output
+    }
+
+    static func restoreBreakSentinels(_ text: String, breakText: String, html: Bool = false) -> String {
+        let scalars = text.unicodeScalars
+        var output = "", index = scalars.startIndex, inTag = false
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            index = scalars.index(after: index)
+            if scalar == "\u{E042}", index < scalars.endIndex {
+                let next = scalars[index]
+                if next == "\u{E042}" || next == "\u{E044}" {
+                    if next == "\u{E042}" { output.unicodeScalars.append(scalar) }
+                    else { output += html && inTag ? "&#10;" : breakText }
+                    index = scalars.index(after: index)
+                    continue
+                }
+            }
+            if html {
+                if scalar == "<" { inTag = true }
+                else if scalar == ">" { inTag = false }
+            }
+            output.unicodeScalars.append(scalar)
+        }
+        return output
+    }
+
+    static let breakToken = "\u{E042}\u{E044}"
+
+    static func escapeLiteral(_ text: String, punctuation: String) -> String {
+        MarkdownLiteral.escapePunctuation(text, characters: punctuation)
+    }
+
     /// Transform semantic code spans separately from canonical literal text.
     static func mapCodeSpans(_ text: String, keepDelimiters: Bool = true, code: (String) -> String, plain: (String) -> String) -> String {
         guard text.unicodeScalars.contains("`") else { return plain(text) }

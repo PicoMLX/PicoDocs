@@ -2,6 +2,24 @@ import Foundation
 
 /// A list retains source markers and the reading order of text and child lists.
 struct MarkdownList {
+    static func escapeBareMarkerText(_ text: String) -> String {
+        guard !text.contains("\n") else { return text }
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard let parsed = marker(trimmed), parsed.text.isEmpty else { return text }
+        let leading = text.prefix { $0 == " " || $0 == "\t" }
+        let trailing = text.reversed().prefix { $0 == " " || $0 == "\t" }.reversed()
+        let escaped = parsed.number == nil ? "\\" + trimmed : String(trimmed.dropLast()) + "\\."
+        return String(leading) + escaped + String(trailing)
+    }
+
+    static func inlineText(_ text: String, breakText: String, inline: (String) throws -> String) rethrows -> String {
+        let hardBreak = MarkdownTableCell.breakToken
+        let protected = MarkdownTableCell.mapCodeSpans(MarkdownTableCell.protectBreakSentinels(text), code: { $0 }, plain: {
+            $0.replacingOccurrences(of: " {2,}\n", with: hardBreak, options: .regularExpression)
+        })
+        return MarkdownTableCell.restoreBreakSentinels(try inline(protected).replacingOccurrences(of: "\n", with: " "), breakText: breakText, html: breakText == "<br>")
+    }
+
     struct Item {
         let number: Int?
         let padding: String

@@ -50,21 +50,23 @@ struct ZIPEntryReaderTests {
     /// A one-entry, stored (uncompressed) ZIP holding `content`, whose local and
     /// central headers put 0xFFFFFFFF in the 32-bit uncompressed-size field and
     /// claim `declaredSize` in a ZIP64 extended-information extra field.
-    static func zip(name: String, content: [UInt8], declaredSize: UInt64) -> Data {
+    static func zip(name: String, content: [UInt8], declaredSize: UInt64, declaredCompressedSize: UInt64? = nil) -> Data {
         func le16(_ v: Int) -> [UInt8] { [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF)] }
         func le32(_ v: UInt32) -> [UInt8] { (0..<4).map { UInt8((v >> (8 * $0)) & 0xFF) } }
         func le64(_ v: UInt64) -> [UInt8] { (0..<8).map { UInt8((v >> (8 * UInt64($0))) & 0xFF) } }
 
         let nameBytes = Array(name.utf8)
-        let extra = le16(0x0001) + le16(8) + le64(declaredSize)
+        let extra = le16(0x0001) + le16(declaredCompressedSize == nil ? 8 : 16) + le64(declaredSize) + (declaredCompressedSize.map(le64) ?? [])
         let crc = PagesConverterTests.crc32(content)
+        let compressedSize = declaredCompressedSize == nil ? UInt32(content.count) : UInt32.max
+        let method = declaredCompressedSize == nil ? 0 : 8
 
-        var local: [UInt8] = le32(0x04034b50) + le16(45) + le16(0) + le16(0) + le16(0) + le16(0)
-        local += le32(crc) + le32(UInt32(content.count)) + le32(0xFFFFFFFF)
+        var local: [UInt8] = le32(0x04034b50) + le16(45) + le16(0) + le16(method) + le16(0) + le16(0)
+        local += le32(crc) + le32(compressedSize) + le32(0xFFFFFFFF)
         local += le16(nameBytes.count) + le16(extra.count) + nameBytes + extra + content
 
-        var central: [UInt8] = le32(0x02014b50) + le16(45) + le16(45) + le16(0) + le16(0) + le16(0) + le16(0)
-        central += le32(crc) + le32(UInt32(content.count)) + le32(0xFFFFFFFF)
+        var central: [UInt8] = le32(0x02014b50) + le16(45) + le16(45) + le16(0) + le16(method) + le16(0) + le16(0)
+        central += le32(crc) + le32(compressedSize) + le32(0xFFFFFFFF)
         central += le16(nameBytes.count) + le16(extra.count) + le16(0) + le16(0) + le16(0) + le32(0) + le32(0)
         central += nameBytes + extra
 
