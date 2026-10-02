@@ -18,7 +18,34 @@ import ImageIO
 
 public struct WordprocessingMLExporter: DocumentExporter {
 
-    public init() {}
+    private let maximumDocumentBytes: Int
+    public init() { maximumDocumentBytes = 32 * 1024 * 1024 }
+    init(maximumDocumentBytes: Int) { self.maximumDocumentBytes = min(32 * 1024 * 1024, max(0, maximumDocumentBytes)) }
+
+    struct DocumentXMLBudget {
+        private(set) var remainingBytes: Int
+        init(maximumBytes: Int) { remainingBytes = max(0, maximumBytes) }
+        mutating func reserve(_ bytes: Int) throws {
+            try Task.checkCancellation()
+            guard bytes >= 0, bytes <= remainingBytes else {
+                throw ExporterError.serializationFailed("DOCX document XML exceeds its reader-compatible limit")
+            }
+            remainingBytes -= bytes
+        }
+        mutating func reserveText(_ text: String) throws {
+            for (index, scalar) in text.unicodeScalars.enumerated() {
+                if index.isMultiple(of: 4096) { try Task.checkCancellation() }
+                guard OOXMLPackageWriter.isValidXMLScalar(scalar) else { continue }
+                let bytes = scalar == "&" ? 5 : (scalar == "<" || scalar == ">" ? 4 : scalar.utf8.count)
+                // No escaped output exists until the complete text is admitted.
+                guard bytes <= remainingBytes else {
+                    throw ExporterError.serializationFailed("DOCX document XML exceeds its reader-compatible limit")
+                }
+                remainingBytes -= bytes
+            }
+            try Task.checkCancellation()
+        }
+    }
 
     public func accepts(_ format: ExportableFileType) -> Bool { format == .docx }
 
@@ -36,7 +63,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         guard !blocks.isEmpty else { throw PicoDocsError.emptyDocument }
         let images = try Self.imageIndex(result.sections)
         try Task.checkCancellation()
-        let builder = Builder(images: images, blocks: blocks)
+        let builder = Builder(images: images, blocks: blocks, maximumDocumentBytes: maximumDocumentBytes)
         if let failure = builder.failure { throw failure }
         for block in blocks {
             try Task.checkCancellation()
@@ -272,6 +299,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         /// Numbering is needed when any list (bullet or ordered) was emitted.
         var usedNumbering: Bool { usedBullet || !orderedNumIds.isEmpty }
 
+        private var documentBudget: DocumentXMLBudget
         private let images: ImageIndex
         private var relCounter = 0
         private var numberingRelAdded = false
@@ -288,8 +316,11 @@ public struct WordprocessingMLExporter: DocumentExporter {
         private var fragmentBookmarks: [String: String] = [:]
         private var headingIndex = 0
 
-        init(images: ImageIndex, blocks: [MarkdownBlock]) {
+        init(images: ImageIndex, blocks: [MarkdownBlock], maximumDocumentBytes: Int) {
             self.images = images
+            documentBudget = DocumentXMLBudget(maximumBytes: maximumDocumentBytes)
+            do { try documentBudget.reserve(WordprocessingMLExporter.documentXML(body: "").utf8.count) }
+            catch { failure = error; return }
             guard checkCancellation() else { return }
             let titles = blocks.compactMap { block -> String? in
                 guard checkCancellation(), case .heading(_, let text) = block else { return nil }
@@ -311,6 +342,12 @@ public struct WordprocessingMLExporter: DocumentExporter {
             catch { failure = error; return false }
         }
 
+        private func markup(_ fragment: String) -> String {
+            guard checkCancellation() else { return "" }
+            do { try documentBudget.reserve(fragment.utf8.count); return fragment }
+            catch { failure = error; return "" }
+        }
+
         private func addRelationship(_ relation: Relationship) {
             guard checkCancellation() else { return }
             do { try relationships.add(id: relation.id, type: relation.type, target: relation.target, external: relation.external) }
@@ -327,7 +364,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 let bookmark = headingBookmarks[headingIndex]
                 let id = headingIndex
                 headingIndex += 1
-                body += paragraph(pPr: pPr, content: "<w:bookmarkStart w:id=\"\(id)\" w:name=\"\(bookmark)\"/>" + inlineRuns(text) + "<w:bookmarkEnd w:id=\"\(id)\"/>")
+                body += paragraph(pPr: pPr, content: markup("<w:bookmarkStart w:id=\"\(id)\" w:name=\"\(bookmark)\"/>") + inlineRuns(text) + markup("<w:bookmarkEnd w:id=\"\(id)\"/>"))
 
             case .paragraph(let text):
                 body += paragraph(pPr: "", content: inlineRuns(text))
@@ -338,14 +375,17 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 var content = ""
                 for (i, line) in lines.enumerated() {
                     guard checkCancellation() else { return }
-                    if i > 0 { content += "<w:r><w:br/></w:r>" }
+                    if i > 0 { content += markup("<w:r><w:br/></w:r>") }
                     content += textRun(line, bold: false, italic: false, monospace: true)
                 }
                 body += paragraph(pPr: "<w:pPr><w:pStyle w:val=\"PicoCodeBlock\"/></w:pPr>", content: content)
 
             case .blockquote(let lines):
                 let pPr = "<w:pPr><w:pStyle w:val=\"Quote\"/></w:pPr>"
-                let content = lines.map(inlineRuns).joined(separator: "<w:r><w:br/></w:r>")
+                let separator = "<w:r><w:br/></w:r>"
+                do { try documentBudget.reserve(max(0, lines.count - 1) * separator.utf8.count) }
+                catch { failure = error; return }
+                let content = lines.map(inlineRuns).joined(separator: separator)
                 body += paragraph(pPr: pPr, content: content)
 
             case .list(let list):
@@ -356,7 +396,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
 
             case .rule:
                 // A bottom-bordered empty paragraph, recognized by WordConverter.
-                body += "<w:p><w:pPr><w:pBdr><w:bottom w:val=\"single\" w:sz=\"6\" w:space=\"1\" w:color=\"auto\"/></w:pBdr></w:pPr></w:p>"
+                body += markup("<w:p><w:pPr><w:pBdr><w:bottom w:val=\"single\" w:sz=\"6\" w:space=\"1\" w:color=\"auto\"/></w:pBdr></w:pPr></w:p>")
             }
         }
 
@@ -440,7 +480,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                 case .text(let s):
                     out += textRun(s, bold: bold, italic: italic, monospace: false)
                 case .lineBreak(let hard):
-                    out += hard ? "<w:r><w:br/></w:r>" : textRun(" ", bold: bold, italic: italic, monospace: false)
+                    out += hard ? markup("<w:r><w:br/></w:r>") : textRun(" ", bold: bold, italic: italic, monospace: false)
                 case .code(let s):
                     out += textRun(s, bold: bold, italic: italic, monospace: true)
                 case .strong(let children):
@@ -455,7 +495,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
                     if destination.hasPrefix("#") {
                         let fragment = String(destination.dropFirst())
                         if let bookmark = fragmentBookmarks[fragment.removingPercentEncoding ?? fragment] {
-                            out += "<w:hyperlink w:anchor=\"\(bookmark)\">\(renderRuns(label, bold: bold, italic: italic))</w:hyperlink>"
+                            out += markup("<w:hyperlink w:anchor=\"\(bookmark)\">") + renderRuns(label, bold: bold, italic: italic) + markup("</w:hyperlink>")
                         } else {
                             // A missing local target cannot become an external URI.
                             out += renderRuns(label, bold: bold, italic: italic)
@@ -475,13 +515,13 @@ public struct WordprocessingMLExporter: DocumentExporter {
                         guard checkCancellation() else { return out }
                         externalLinkRelationships[destination] = id
                     }
-                    out += "<w:hyperlink r:id=\"\(id)\">\(renderRuns(label, bold: bold, italic: italic))</w:hyperlink>"
+                    out += markup("<w:hyperlink r:id=\"\(id)\">") + renderRuns(label, bold: bold, italic: italic) + markup("</w:hyperlink>")
                 case .image(let alt, let source):
                     out += imageRun(alt: alt, source: source) ?? textRun(node.plainText, bold: bold, italic: italic, monospace: false)
                 case .footnoteReference(let fid):
                     // Keep textual footnotes paired using explicit marker provenance.
                     let id = MarkdownInlineParser.unescape(fid).replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "]", with: "\\]")
-                    out += "<w:r><w:rPr><w:rStyle w:val=\"PicoFootnoteMarker\"/></w:rPr><w:t xml:space=\"preserve\">\(OOXMLPackageWriter.escape("[^" + id + "]"))</w:t></w:r>"
+                    out += serializedText("[^" + id + "]", properties: "<w:rPr><w:rStyle w:val=\"PicoFootnoteMarker\"/></w:rPr>")
                 }
             }
             return out
@@ -543,7 +583,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             let blip = ext == "svg"
                 ? "<a:blip><a:extLst><a:ext uri=\"{96DAC541-7B7A-43D3-8B79-37D633B846F1}\"><asvg:svgBlip xmlns:asvg=\"http://schemas.microsoft.com/office/drawing/2016/SVG/main\" r:embed=\"\(relID)\"/></a:ext></a:extLst></a:blip>"
                 : "<a:blip r:embed=\"\(relID)\"/>"
-            return """
+            return markup("""
             <w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">\
             <wp:extent cx="\(cx)" cy="\(cy)"/>\
             <wp:docPr id="\(docPrID)" name="\(name)"\(descr)/>\
@@ -553,7 +593,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(cx)" cy="\(cy)"/></a:xfrm>\
             <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>\
             </a:graphicData></a:graphic></wp:inline></w:drawing></w:r>
-            """
+            """)
         }
 
         // MARK: Table
@@ -582,19 +622,23 @@ public struct WordprocessingMLExporter: DocumentExporter {
             <w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>\
             </w:tblBorders>
             """
-            let grid = String(repeating: "<w:gridCol w:w=\"2000\"/>", count: columns)
-            var out = "<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/>\(borders)</w:tblPr><w:tblGrid>\(grid)</w:tblGrid>"
+            let prefix = "<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/>" + borders + "</w:tblPr><w:tblGrid>"
+            let gridColumn = "<w:gridCol w:w=\"2000\"/>"
+            do { try documentBudget.reserve(prefix.utf8.count + columns * gridColumn.utf8.count + "</w:tblGrid>".utf8.count) }
+            catch { failure = error; return "" }
+            let grid = String(repeating: gridColumn, count: columns)
+            var out = prefix + grid + "</w:tblGrid>"
             for row in rows {
                 guard checkCancellation() else { return "" }
-                out += "<w:tr>"
+                out += markup("<w:tr>")
                 for col in 0..<columns {
                     if col.isMultiple(of: 64), !checkCancellation() { return "" }
                     let cell = col < row.count ? row[col] : ""
-                    out += "<w:tc><w:tcPr><w:tcW w:w=\"0\" w:type=\"auto\"/></w:tcPr>\(cellParagraph(cell))</w:tc>"
+                    out += markup("<w:tc><w:tcPr><w:tcW w:w=\"0\" w:type=\"auto\"/></w:tcPr>") + cellParagraph(cell) + markup("</w:tc>")
                 }
-                out += "</w:tr>"
+                out += markup("</w:tr>")
             }
-            out += "</w:tbl>"
+            out += markup("</w:tbl>")
             return out
         }
 
@@ -605,18 +649,30 @@ public struct WordprocessingMLExporter: DocumentExporter {
             let nodes = MarkdownInlineParser.parse(cell, tableCell: true)
             guard checkCancellation() else { return "" }
             let content = renderRuns(nodes, bold: false, italic: false)
-            return "<w:p>\(content)</w:p>"
+            return paragraph(pPr: "", content: content)
         }
 
         // MARK: Run/paragraph primitives
 
         private func paragraph(pPr: String, content: String) -> String {
-            "<w:p>\(pPr)\(content)</w:p>"
+            let prefix = markup("<w:p>" + pPr), suffix = markup("</w:p>")
+            guard checkCancellation() else { return "" }
+            return prefix + content + suffix
         }
 
         private func textRun(_ text: String, bold: Bool, italic: Bool, monospace: Bool) -> String {
             guard checkCancellation() else { return "" }
-            return "<w:r>\(runProperties(bold: bold, italic: italic, monospace: monospace))<w:t xml:space=\"preserve\">\(OOXMLPackageWriter.escape(text))</w:t></w:r>"
+            return serializedText(text, properties: runProperties(bold: bold, italic: italic, monospace: monospace))
+        }
+
+        private func serializedText(_ text: String, properties: String) -> String {
+            guard checkCancellation() else { return "" }
+            let prefix = "<w:r>" + properties + "<w:t xml:space=\"preserve\">", suffix = "</w:t></w:r>"
+            do {
+                try documentBudget.reserve(prefix.utf8.count + suffix.utf8.count)
+                try documentBudget.reserveText(text)
+            } catch { failure = error; return "" }
+            return prefix + OOXMLPackageWriter.escape(text) + suffix
         }
 
         private func runProperties(bold: Bool, italic: Bool, monospace: Bool) -> String {

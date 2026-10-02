@@ -102,11 +102,11 @@ struct OOXMLPackageWriter {
             for (index, scalar) in value.unicodeScalars.enumerated() {
                 if index.isMultiple(of: 4096) { try Task.checkCancellation() }
                 guard isValidXMLScalar(scalar) else { continue }
-                try admit(scalar == "&" ? 5 : (scalar == "<" || scalar == ">" ? 4 : scalar.utf8.count))
+                try admit(scalar == "&" || scalar == "\r" ? 5 : (scalar == "<" || scalar == ">" ? 4 : scalar.utf8.count))
             }
         }
-        let title = result.title.map { "<dc:title>\(Self.escape($0))</dc:title>" } ?? ""
-        let author = result.author.map { "<dc:creator>\(Self.escape($0))</dc:creator>" } ?? ""
+        let title = result.title.map { "<dc:title>\(Self.escape($0).replacingOccurrences(of: "\r", with: "&#13;"))</dc:title>" } ?? ""
+        let author = result.author.map { "<dc:creator>\(Self.escape($0).replacingOccurrences(of: "\r", with: "&#13;"))</dc:creator>" } ?? ""
         try Task.checkCancellation()
         return prefix + title + author + suffix
     }

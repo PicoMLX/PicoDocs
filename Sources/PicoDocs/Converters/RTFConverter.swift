@@ -5,7 +5,7 @@
 //  Converts RTF to Markdown with a small, dependency-free parser — no
 //  NSAttributedString (the lossy, main-thread-biased path this rewrite removed).
 //  It extracts text, paragraphs, and bold/italic emphasis, skips the control
-//  tables (font/color/stylesheet/info) and ignorable destinations, and decodes
+//  tables (font/color/stylesheet) and ignorable destinations, and decodes
 //  \uN / \'hh escapes. RTF carries no semantic headings, so none are inferred
 //  (we deliberately don't guess headings from font sizes).
 //
@@ -34,17 +34,37 @@ public struct RTFConverter: DocumentConverter {
             throw PicoDocsError.fileCorrupted
         }
         let fonts = RTFFontTable()
-        let markdown = Self.markdown(fromRTF: rtf, fontBudget: fonts)
+        let metadata = Metadata()
+        let markdown = Self.markdown(fromRTF: rtf, fontBudget: fonts, metadata: metadata)
         try fonts.check()
+        try metadata.check()
         guard !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PicoDocsError.emptyDocument
         }
         let section = DocumentSection(title: info.filename, kind: .body, markdown: markdown)
-        return ConverterResult(title: info.filename, sections: [section])
+        return ConverterResult(title: metadata.title.flatMap { $0.isEmpty ? nil : $0 } ?? info.filename, author: metadata.author.flatMap { $0.isEmpty ? nil : $0 }, sections: [section])
     }
 
     // MARK: - Parser
 
+    final class Metadata {
+        private(set) var title: String?
+        private(set) var author: String?
+        private var remainingBytes: Int
+        private var exceeded = false
+        init(maximumBytes: Int = 64 * 1024 * 1024) { remainingBytes = max(0, maximumBytes) }
+        func append(_ text: String, field: String) {
+            guard !exceeded else { return }
+            guard text.utf8.count <= remainingBytes else { exceeded = true; return }
+            remainingBytes -= text.utf8.count
+            if field == "title" { if title == nil { title = "" }; title!.append(contentsOf: text) }
+            else { if author == nil { author = "" }; author!.append(contentsOf: text) }
+        }
+        func check() throws {
+            try Task.checkCancellation()
+            if exceeded { throw PicoDocsError.fileCorrupted }
+        }
+    }
     private struct Run { var text: String; var bold: Bool; var italic: Bool; var link: String?; var code: Bool; var field: Field? }
     final class Field {
         static let maximumInstructionBytes = 65_536
@@ -69,7 +89,7 @@ public struct RTFConverter: DocumentConverter {
             instruction += text
         }
     }
-    private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool; var ucSkip: Int; var field: Field?; var instruction: Bool; var font: Int; var fontTable: Bool; var fontNameIgnored: Bool }
+    private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool; var ucSkip: Int; var field: Field?; var instruction: Bool; var font: Int; var fontTable: Bool; var fontNameIgnored: Bool; var infoGroup: Bool; var metadataField: String? }
 
     /// Destination control words whose group contents are not body text.
     private static let ignoredDestinations: Set<String> = [
@@ -80,7 +100,7 @@ public struct RTFConverter: DocumentConverter {
         "revtbl", "rsidtbl",
     ]
 
-    static func markdown(fromRTF rtf: String, fontBudget: RTFFontTable? = nil) -> String {
+    static func markdown(fromRTF rtf: String, fontBudget: RTFFontTable? = nil, metadata: Metadata? = nil) -> String {
         let fonts = fontBudget ?? RTFFontTable()
         // convert() decodes bytes as Latin-1: each scalar is exactly one source
         // byte. Keep CR and LF separate so \binN skips N bytes, not graphemes.
@@ -97,6 +117,8 @@ public struct RTFConverter: DocumentConverter {
         var font = 0, defaultFont = 0
         var fontTable = false
         var fontNameIgnored = false
+        var infoGroup = false
+        var metadataField: String?
         var ansiEncoding: String.Encoding = .windowsCP1252
         var isDBCS = false
         var stack: [GroupState] = []
@@ -120,6 +142,7 @@ public struct RTFConverter: DocumentConverter {
         }
 
         func appendText(_ s: String) {
+            if let metadataField { metadata?.append(s, field: metadataField); return }
             if fontTable {
                 if !fontNameIgnored { fonts.append(s, font: font) }
                 return
@@ -207,7 +230,7 @@ public struct RTFConverter: DocumentConverter {
                 // Only the parsed top-level ignorable destination emitted by our
                 // writer signals canonical Markdown. Binary/ignored payloads do not.
                 if stack.count == 1, !ignore, !encounteredBody, chars[i...].starts(with: canonicalMarker) { canonical = true }
-                stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip, field: field, instruction: instruction, font: font, fontTable: fontTable, fontNameIgnored: fontNameIgnored))
+                stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip, field: field, instruction: instruction, font: font, fontTable: fontTable, fontNameIgnored: fontNameIgnored, infoGroup: infoGroup, metadataField: metadataField))
                 i += 1
 
             case "}":
@@ -217,6 +240,7 @@ public struct RTFConverter: DocumentConverter {
                     bold = saved.bold; italic = saved.italic; ignore = saved.ignore; ucSkip = saved.ucSkip
                     field = saved.field; instruction = saved.instruction
                     font = saved.font; fontTable = saved.fontTable; fontNameIgnored = saved.fontNameIgnored
+                    infoGroup = saved.infoGroup; metadataField = saved.metadataField
                 }
                 i += 1
 
@@ -236,16 +260,22 @@ public struct RTFConverter: DocumentConverter {
                     if i < n, chars[i] == " " { i += 1 }
 
                     switch word {
-                    case "fonttbl": fontTable = true; ignore = true
+                    case "info":
+                        infoGroup = stack.count == 2 && !ignore
+                        metadataField = nil; ignore = true
+                    case "title", "author":
+                        if infoGroup, stack.count == 3 { metadataField = word }
+                    case "fonttbl": fontTable = true; ignore = true; metadataField = nil
                     case "deff": if let param { defaultFont = param; font = param }
                     case "f": if let param { finishFont(); font = param; if fontTable { fonts.admit(font) } }
                     case "fmodern": if fontTable, !fontNameIgnored { fonts.markMonospace(font) }
                     case "falt": if fontTable { fontNameIgnored = true }
                     case "field": field = Field()
-                    case "fldinst": instruction = field != nil; ignore = true
+                    case "fldinst": instruction = field != nil; ignore = true; metadataField = nil
                     case "fldrslt": instruction = false
                     case "par", "row", "sect", "page":
-                        if !ignore { encounteredBody = true; flushParagraph() }   // a \par inside a skipped destination isn't a body break
+                        if metadataField != nil { appendText("\n") }
+                        else if !ignore { encounteredBody = true; flushParagraph() }   // a \par inside a skipped destination isn't a body break
                     case "line":
                         appendText("  \n")                // Markdown hard break (matches the DOCX w:br path)
                     case "tab", "cell":
@@ -330,7 +360,7 @@ public struct RTFConverter: DocumentConverter {
                             skipped += 1
                         }
                     default:
-                        if Self.ignoredDestinations.contains(word) { ignore = true }
+                        if Self.ignoredDestinations.contains(word) { ignore = true; metadataField = nil }
                         // All other control words carry no body text.
                     }
                 } else {
@@ -342,7 +372,7 @@ public struct RTFConverter: DocumentConverter {
                     case "_": appendText("-")                 // non-breaking hyphen
                     case "-": break                            // optional hyphen
                     case "*":
-                        ignore = true
+                        ignore = true; metadataField = nil
                         // fonttbl is ignored as body text, but its primary names
                         // are collected separately from ignorable subgroups.
                         if fontTable { fontNameIgnored = true }
@@ -355,14 +385,15 @@ public struct RTFConverter: DocumentConverter {
                                 if instruction, let field {
                                     if field.admitBufferedInstructionByte(pendingBytes.count) { pendingBytes.append(byte) }
                                     else { pendingBytes.removeAll(keepingCapacity: true) }
-                                } else if !ignore { pendingBytes.append(byte) }
+                                } else if !ignore || metadataField != nil { pendingBytes.append(byte) }
                             } else {
                                 appendText(Self.decodeByte(byte, encoding: ansiEncoding))
                             }
                             i += 2
                         }
                     case "\n", "\r", "\r\n":
-                        if !ignore { flushParagraph() }        // escaped newline = \par
+                        if metadataField != nil { appendText("\n") }
+                        else if !ignore { flushParagraph() }        // escaped newline = \par
                     default: break
                     }
                 }

@@ -212,11 +212,16 @@ enum AttributedStringDocumentBuilder {
         }
     }
 
-    private static func escapedText(_ text: String, punctuation: String) throws -> String {
-        try text.enumerated().map { index, character in
+    static func escapedText(_ text: String, punctuation: String) throws -> String {
+        var output = ""
+        output.reserveCapacity(text.utf8.count)
+        for (index, character) in text.enumerated() {
             if index.isMultiple(of: 4096) { try Task.checkCancellation() }
-            return punctuation.contains(character) ? "\\" + String(character) : String(character)
-        }.joined()
+            if punctuation.contains(character) { output.append("\\") }
+            output.append(character)
+        }
+        try Task.checkCancellation()
+        return output
     }
 
     private static func codeFence(_ text: String, minimum: Int) throws -> String {
