@@ -28,7 +28,9 @@ import ZIPFoundation
 
 public struct KeynoteConverter: DocumentConverter {
 
-    public init() {}
+    private let objectBudgetBytes: Int
+    public init() { objectBudgetBytes = 64 * 1024 * 1024 }
+    init(objectBudgetBytes: Int) { self.objectBudgetBytes = objectBudgetBytes }
 
     public func accepts(_ info: StreamInfo) -> Bool {
         info.detectedFormat == .keynote
@@ -61,20 +63,19 @@ public struct KeynoteConverter: DocumentConverter {
         // Per-slide KN.SlideArchive id (to resolve deck order from the document's
         // slide tree) and body text (kind == 0; presenter notes are kind 4 and so
         // already excluded).
-        let objectBudget = IWAObjectBudget()
+        let objectBudget = IWAObjectBudget(bytes: objectBudgetBytes)
+        let documentStream = streams.first { $0.name.hasSuffix("Document.iwa") }?.stream
+        let prepared = try IWATable.PreparedDocument(documentStream: documentStream, streams: streams.map(\.stream), objectBudget: objectBudget)
         var slides: [(name: String, id: UInt64, text: String)] = []
-        for entry in streams where Self.isSlide(entry.name) {
+        for (entry, objects) in zip(streams, prepared.streamObjects) where Self.isSlide(entry.name) {
             try Task.checkCancellation()
-            let objects = IWAArchive.objects(in: entry.stream, objectBudget: objectBudget)
-            try objectBudget.check()
             let slideID = objects.first { $0.type == Self.slideArchiveType }?.identifier ?? 0
             slides.append((entry.name, slideID, Self.normalize(IWAArchive.text(from: objects))))
         }
 
         // Order by the document's slide tree (authoritative); fall back to
         // slide-archive id, then filename, when it can't be resolved.
-        let documentStream = streams.first { $0.name.hasSuffix("Document.iwa") }?.stream
-        let deck = Self.deckOrder(documentStream: documentStream, slideIDs: Set(slides.map(\.id)), objectBudget: objectBudget)
+        let deck = Self.deckOrder(objects: prepared.bodyObjects, slideIDs: Set(slides.map(\.id)))
         let rank = Dictionary(deck.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
         let ordered = slides.sorted { lhs, rhs in
             let lr = rank[lhs.id] ?? Int.max
@@ -92,14 +93,17 @@ public struct KeynoteConverter: DocumentConverter {
         // Master/template object ids, so the table reachability walk can avoid
         // descending into theme subgraphs.
         var masterObjectIDs: Set<UInt64> = []
-        for entry in streams where Self.isMaster(entry.name) {
-            for object in IWAArchive.objects(in: entry.stream, objectBudget: objectBudget) { masterObjectIDs.insert(object.identifier) }
+        for (entry, objects) in zip(streams, prepared.streamObjects) where Self.isMaster(entry.name) {
+            for object in objects {
+                try Task.checkCancellation()
+                masterObjectIDs.insert(object.identifier)
+            }
         }
         // Tables grouped by the slide that owns them (reachable from the slide
         // object, not from master/template subgraphs), so each renders right after
         // its slide rather than appended at the end of the deck.
         let tablesForSlide = IWATable.tablesBySlide(
-            slideIDs: ordered.map(\.id), in: streams.map(\.stream), excludingSubgraphs: masterObjectIDs, objectBudget: objectBudget
+            slideIDs: ordered.map(\.id), in: streams.map(\.stream), excludingSubgraphs: masterObjectIDs, objectBudget: objectBudget, prepared: prepared
         )
 
         var sections: [DocumentSection] = []
@@ -135,8 +139,9 @@ public struct KeynoteConverter: DocumentConverter {
         // recovers its text; the recovered body leads, ahead of any table sections.
         if !emittedSlideText {
             var pieces: [String] = []
-            for entry in streams.filter({ !Self.isMaster($0.name) }).sorted(by: { $0.name < $1.name }) {
-                let text = IWAArchive.text(in: entry.stream, objectBudget: objectBudget)
+            for index in streams.indices.filter({ !Self.isMaster(streams[$0].name) }).sorted(by: { streams[$0].name < streams[$1].name }) {
+                try Task.checkCancellation()
+                let text = IWAArchive.text(from: prepared.streamObjects[index])
                 if !text.isEmpty { pieces.append(text) }
             }
             let cleaned = Self.normalize(pieces.joined(separator: "\n\n"))
@@ -185,9 +190,8 @@ public struct KeynoteConverter: DocumentConverter {
     /// falls back to slide-id / filename order). Structural — it identifies the
     /// tree and nodes via the reference graph rather than hard-coding their
     /// message types; only the slide-archive type above is fixed.
-    private static func deckOrder(documentStream: [UInt8]?, slideIDs: Set<UInt64>, objectBudget: IWAObjectBudget? = nil) -> [UInt64] {
-        guard !slideIDs.isEmpty, let documentStream else { return [] }
-        let objects = IWAArchive.objects(in: documentStream, objectBudget: objectBudget)
+    private static func deckOrder(objects: [IWAArchive.Object], slideIDs: Set<UInt64>) -> [UInt64] {
+        guard !slideIDs.isEmpty else { return [] }
         // A slide-tree node references exactly one slide; map node id -> slide id.
         var nodeToSlide: [UInt64: UInt64] = [:]
         for object in objects {

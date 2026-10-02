@@ -43,7 +43,7 @@ public extension UTType {
             .doc, .docx, .xlsx, .pptx,
             .epub, .pages, .pagesSingleFile, .keynote, .keynoteSingleFile,
             .pdf, .rtf, .rtfd, .text, .flatRTFD, .plainText, .utf8PlainText, .xml,
-            .spreadsheet, .commaSeparatedText, .numbersSingleFile,
+            .spreadsheet, .commaSeparatedText, .numbers, .numbersSingleFile,
             .internetLocation, .internetShortcut, .url, .urlBookmarkData, .html, .xhtml,
             .sourceCode, .json, .objectiveCSource, .phpScript, .perlScript, .shellScript, .script, .javaScript, .pythonScript, .assemblyLanguageSource,
             .emailMessage, .spreadsheet,
@@ -63,7 +63,6 @@ public extension UTType {
 
     /// Returns true if type is listed in `supportedDocumentTypes`
     var isSupported: Bool {
-        if identifier == Self.numbers.identifier { return false } // Package directories are not converted as ZIP data.
         // Match by conformance, not identity. A system-vended UTI (e.g. a `.docx`
         // provided by Files.app) is not necessarily the same instance as our
         // `importedAs` declaration, so the previous `contains(self)` identity

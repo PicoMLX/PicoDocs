@@ -79,6 +79,7 @@ public struct PowerPointConverter: DocumentConverter {
         // slides, before embedded carriers claim a materialized file identity.
         var externalReferences: Set<String> = []
         var pendingParts = PartQueue()
+        try pendingParts.schedule(presentationPath)
         for path in slidePaths { try pendingParts.schedule(path) }
         while let path = pendingParts.popLast() {
             try Task.checkCancellation()
@@ -464,8 +465,8 @@ public struct PowerPointConverter: DocumentConverter {
             (context.master?.children().first().flatMap { context.styles.child(of: $0, named: "p:csld") }, context.masterPath)], context: &context, blocks: &blocks)
         let showInherited = !["0", "false"].contains(booleanValue((try? root.attr("showMasterSp")) ?? ""))
         let showMaster = !["0", "false"].contains(booleanValue((try? context.layout?.children().first()?.attr("showMasterSp")) ?? ""))
-        if showInherited {
-            let inherited = [(showMaster ? context.master : nil, context.masterPath), (context.layout, context.layoutPath)]
+        do {
+            let inherited = [(showInherited && showMaster ? context.master : nil, context.masterPath), (context.layout, context.layoutPath)]
             for (part, path) in inherited {
                 guard let part, let path, let root = part.children().first(),
                       let common = context.styles.child(of: root, named: "p:csld"),
@@ -1114,13 +1115,22 @@ public struct PowerPointConverter: DocumentConverter {
     /// hyperlinks, fields (e.g. dates), and line breaks as `\n`.
     static func renderRuns(_ paragraph: Element, context: inout SlideContext) -> String {
         struct Run { var text: String; var bold: Bool; var italic: Bool; var link: String? }
+        // Test semantic content before xml:space whitespace becomes numeric
+        // references. Individual whitespace runs within visible text still survive.
+        let children = selectedChildren(in: paragraph)
+        let visible = children.contains { node in
+            guard !Task.isCancelled, ["a:r", "a:fld"].contains(node.tagName().lowercased()),
+                  let text = selectedChild(of: node, named: "a:t") else { return false }
+            return hasVisibleText(text)
+        }
+        guard visible else { return "" }
         var runs: [Run] = []
         var retainedRunBytes = 0
         let budget = context.renderBudget
         let paragraphProperties = selectedChild(of: paragraph, named: "a:ppr")
         let level = min(max(integerValue(try? paragraphProperties?.attr("lvl")) ?? 0, 0), 8)
         let defaults = [paragraphProperties.flatMap { selectedChild(of: $0, named: "a:defrpr") }].compactMap { $0 } + context.runDefaults[level]
-        for node in selectedChildren(in: paragraph) {
+        for node in children {
             if Task.isCancelled || budget?.failed == true { return "" }
             switch node.tagName().lowercased() {
             case "a:r", "a:fld":
@@ -1879,6 +1889,22 @@ public struct PowerPointConverter: DocumentConverter {
             }
         }
         return document
+    }
+
+    /// Classify raw text without joining/copying all run text. Check cancellation
+    /// periodically even when a large run contains only whitespace.
+    static func hasVisibleText(_ element: Element, isCancelled: () -> Bool = { Task.isCancelled }) -> Bool {
+        var scanned = 0
+        for child in element.getChildNodes() {
+            guard !isCancelled() else { return false }
+            guard let text = child as? TextNode else { continue }
+            for scalar in text.getWholeText().unicodeScalars {
+                if scanned.isMultiple(of: 4096), isCancelled() { return false }
+                scanned += 1
+                if !CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
+            }
+        }
+        return false
     }
 
     /// Raw text of an element's text nodes, preserving significant whitespace

@@ -54,7 +54,7 @@ struct NumbersConverterTests {
         )
         #expect(byMIME.detectedFormat == .numbers)
 
-        #expect(!UTType.numbers.isSupported)
+        #expect(UTType.numbers.isSupported)
         #expect(UTType.numbersSingleFile.isSupported)
     }
 

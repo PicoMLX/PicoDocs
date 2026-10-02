@@ -69,8 +69,8 @@ import ZIPFoundation
         #expect(result.sections.map(\.markdown) == ["## Empty\n\n", "## Charts\n\n"])
     }
 
-    @Test func directoryWorkbookIsNotAdvertisedAsConvertible() {
-        #expect(!UTType.numbers.isSupported)
+    @Test func normalAndSingleFileNumbersUTIsAreSupported() {
+        #expect(UTType.numbers.isSupported)
         #expect(UTType.numbersSingleFile.isSupported)
     }
 

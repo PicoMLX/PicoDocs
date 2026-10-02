@@ -63,14 +63,36 @@ enum IWATable {
         case table(String)
     }
 
+    struct PreparedDocument {
+        let objects: [UInt64: IWAArchive.Object]
+        let bodyObjects: [IWAArchive.Object]
+        let streamObjects: [[IWAArchive.Object]]
+        let tableMarkdown: [UInt64: String]
+        init(documentStream: [UInt8]?, streams: [[UInt8]], objectBudget: IWAObjectBudget) throws {
+            guard objectBudget.reserve(streams.count * 32) else { try objectBudget.check(); throw PicoDocsError.fileCorrupted }
+            let documentIndex = documentStream.flatMap { streams.firstIndex(of: $0) }
+            var streamObjects = Array(repeating: [IWAArchive.Object](), count: streams.count)
+            var bodyObjects: [IWAArchive.Object] = []
+            objects = buildObjects(streams, objectBudget: objectBudget) { index, decoded in
+                streamObjects[index] = decoded
+                if index == documentIndex { bodyObjects = decoded }
+            }
+            try objectBudget.check()
+            self.bodyObjects = bodyObjects
+            self.streamObjects = streamObjects
+            tableMarkdown = reconstructTables(objects, objectBudget: objectBudget)
+            try objectBudget.check()
+        }
+    }
+
     /// Every text table across the given decompressed IWA streams, rendered as
     /// Markdown and ordered by tile identifier (a stable proxy for document
     /// order). This is the appended-table fallback; `inlineBlocks` instead places
     /// tables at their attachment points. Best-effort: a document with no tables
     /// yields `[]`.
-    static func markdownTables(from streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil) -> [String] {
+    static func markdownTables(from streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil, prepared: PreparedDocument? = nil) -> [String] {
         let parseBudget = objectBudget ?? IWAObjectBudget()
-        let byTile = reconstructTables(buildObjects(streams, objectBudget: parseBudget), objectBudget: parseBudget)
+        let byTile = prepared?.tableMarkdown ?? reconstructTables(buildObjects(streams, objectBudget: parseBudget), objectBudget: parseBudget)
         return byTile.keys.sorted().compactMap { byTile[$0] }
     }
 
@@ -82,17 +104,17 @@ enum IWATable {
     /// attributed to the first slide, in the given order, that reaches it. Lets
     /// Keynote place each table with its slide instead of appending all at the end.
     static func tablesBySlide(slideIDs: [UInt64], in streams: [[UInt8]],
-                              excludingSubgraphs blocked: Set<UInt64>, objectBudget: IWAObjectBudget? = nil) -> [UInt64: [String]] {
-        attributedTables(rootIDs: slideIDs, in: streams, excludingSubgraphs: blocked, objectBudget: objectBudget).byRoot
+                              excludingSubgraphs blocked: Set<UInt64>, objectBudget: IWAObjectBudget? = nil, prepared: PreparedDocument? = nil) -> [UInt64: [String]] {
+        attributedTables(rootIDs: slideIDs, in: streams, excludingSubgraphs: blocked, objectBudget: objectBudget, prepared: prepared).byRoot
     }
 
     /// Preserve unclaimed tile identities as well as attributed ones. Identical
     /// rendered tables can belong to different physical table objects.
     static func attributedTables(rootIDs slideIDs: [UInt64], in streams: [[UInt8]],
-                                 excludingSubgraphs blocked: Set<UInt64>, budget: IWAOutputBudget? = nil, objectBudget: IWAObjectBudget? = nil, drawableOrder: Bool = false) -> (byRoot: [UInt64: [String]], unclaimed: [String]) {
+                                 excludingSubgraphs blocked: Set<UInt64>, budget: IWAOutputBudget? = nil, objectBudget: IWAObjectBudget? = nil, drawableOrder: Bool = false, prepared: PreparedDocument? = nil) -> (byRoot: [UInt64: [String]], unclaimed: [String]) {
         let parseBudget = objectBudget ?? IWAObjectBudget()
-        let objects = buildObjects(streams, objectBudget: parseBudget)
-        let tableMarkdown = reconstructTables(objects, budget: budget, objectBudget: parseBudget)
+        let objects = prepared?.objects ?? buildObjects(streams, objectBudget: parseBudget)
+        let tableMarkdown = prepared?.tableMarkdown ?? reconstructTables(objects, budget: budget, objectBudget: parseBudget)
         guard !Task.isCancelled, budget?.active != false, !tableMarkdown.isEmpty else { return ([:], []) }
         let tiles = Set(tableMarkdown.keys)
 
@@ -182,11 +204,11 @@ enum IWATable {
     /// appended tables — only when the ￼ markers can't be matched 1:1 to attachment
     /// runs, so a table is never dropped. Offsets are UTF-16 code units, the index
     /// space iWork's run/attachment character indices use.
-    static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil) throws -> [Block]? {
+    static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil, prepared: PreparedDocument? = nil) throws -> [Block]? {
         try Task.checkCancellation()
-        let objects = buildObjects(streams, objectBudget: objectBudget)
-        try objectBudget?.check()
-        let tableMarkdown = reconstructTables(objects, objectBudget: objectBudget)
+        let prepared = try prepared ?? PreparedDocument(documentStream: documentStream, streams: streams, objectBudget: objectBudget ?? IWAObjectBudget())
+        let objects = prepared.objects
+        let tableMarkdown = prepared.tableMarkdown
         try objectBudget?.check()
         try Task.checkCancellation()
         let tiles = Set(tableMarkdown.keys)
@@ -195,7 +217,7 @@ enum IWATable {
         var placed = Set<UInt64>()
         // Body storages in document (stream) order; each carries its own text and
         // run tables (paragraph/character styles, smart fields) and attachments.
-        for storage in IWAArchive.objects(in: documentStream, objectBudget: objectBudget) where storage.type == storageType {
+        for storage in prepared.bodyObjects where storage.type == storageType {
             try Task.checkCancellation()
             guard let body = bodyStorage(storage, objects: objects, inlineTableTiles: tiles) else { continue }   // kind 0 only
             let attachments = attachmentRuns(in: storage)
@@ -239,11 +261,11 @@ enum IWATable {
     /// placement) so styles still produce Markdown while the tables are appended
     /// separately; attachment marks are dropped. Empty when there is no body text,
     /// so the caller can degrade to plain extraction.
-    static func bodyMarkdown(documentStream: [UInt8], in streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil) throws -> String {
-        let objects = buildObjects(streams, objectBudget: objectBudget)
+    static func bodyMarkdown(documentStream: [UInt8], in streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil, prepared: PreparedDocument? = nil) throws -> String {
+        let objects = prepared?.objects ?? buildObjects(streams, objectBudget: objectBudget)
         try objectBudget?.check()
         var parts: [String] = []
-        for storage in IWAArchive.objects(in: documentStream, objectBudget: objectBudget) where storage.type == storageType {
+        for storage in prepared?.bodyObjects ?? IWAArchive.objects(in: documentStream, objectBudget: objectBudget) where storage.type == storageType {
             guard let body = bodyStorage(storage, objects: objects) else { continue }
             var lists = ListState()
             let rendered = try renderParagraphs(body, 0 ..< body.units.count, objects: objects,
@@ -1009,12 +1031,14 @@ enum IWATable {
 
     // MARK: - Object graph
 
-    private static func buildObjects(_ streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil) -> [UInt64: IWAArchive.Object] {
+    private static func buildObjects(_ streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil, decoded: ((Int, [IWAArchive.Object]) -> Void)? = nil) -> [UInt64: IWAArchive.Object] {
         let budget = objectBudget ?? IWAObjectBudget()
         var objects: [UInt64: IWAArchive.Object] = [:]
-        for stream in streams {
+        for (index, stream) in streams.enumerated() {
             guard !Task.isCancelled else { return [:] }
-            for object in IWAArchive.objects(in: stream, objectBudget: budget) {
+            let parsed = IWAArchive.objects(in: stream, objectBudget: budget)
+            decoded?(index, parsed)
+            for object in parsed {
                 guard !Task.isCancelled else { return [:] }
                 guard budget.reserve(256) else { return [:] }
                 objects[object.identifier] = object
@@ -1506,7 +1530,16 @@ enum IWATable {
     private static func isoDate(_ secondsSinceReference: Double) -> String {
         guard secondsSinceReference.isFinite, abs(secondsSinceReference) < 4e11 else { return "" }
         // Days since 1970-01-01 (2001-01-01 is 11_323 days after 1970-01-01).
-        let days = Int((secondsSinceReference / 86_400).rounded(.down)) + 11_323
+        // Keep only decimal precision supported by the stored Double. Rounding
+        // integer units within a day avoids exposing subtraction artifacts and
+        // carries a rounded final fraction into the following second/day.
+        let digits = min(9, max(0, Int(floor(-log10(secondsSinceReference.ulp)))))
+        let scale = Int64(pow(10.0, Double(digits)))
+        var referenceDays = floor(secondsSinceReference / 86_400)
+        let daySeconds = secondsSinceReference - referenceDays * 86_400
+        var units = Int64((daySeconds * Double(scale)).rounded())
+        if units >= 86_400 * scale { referenceDays += 1; units = 0 }
+        let days = Int(referenceDays) + 11_323
         // Howard Hinnant's civil-from-days algorithm.
         let z = days + 719_468
         let era = (z >= 0 ? z : z - 146_096) / 146_097
@@ -1523,20 +1556,14 @@ enum IWATable {
             return string
         }
         let date = "\(pad(year, 4))-\(pad(month, 2))-\(pad(day, 2))"
-        let daySeconds = secondsSinceReference - floor(secondsSinceReference / 86_400) * 86_400
-        guard daySeconds != 0 else { return date }
-        let whole = Int(daySeconds)
+        guard units != 0 else { return date }
+        let whole = Int(units / scale)
         var time = "\(pad(whole / 3600, 2)):\(pad((whole / 60) % 60, 2)):\(pad(whole % 60, 2))"
-        let fraction = daySeconds - Double(whole)
+        let fraction = units % scale
         if fraction != 0 {
-            // Binary doubles carry at most nanosecond precision near the epoch.
-            // Truncate the fraction independently so rounding cannot make :60.
-            let nanoseconds = Int(fraction * 1_000_000_000)
-            if nanoseconds > 0 {
-                var digits = pad(nanoseconds, 9)
-                while digits.hasSuffix("0") { digits.removeLast() }
-                time += "." + digits
-            }
+            var fractionalDigits = pad(Int(fraction), digits)
+            while fractionalDigits.hasSuffix("0") { fractionalDigits.removeLast() }
+            time += "." + fractionalDigits
         }
         return date + "T" + time
     }
