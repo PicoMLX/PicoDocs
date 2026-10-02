@@ -695,7 +695,7 @@ public enum DocumentRenderer {
             if let candidate = MarkdownBlockParser.fence(line) ?? (!inCodeFence ? MarkdownBlockParser.listFence(lines[i]) : nil) {
                 if let opening = codeFence {
                     if MarkdownBlockParser.closesFence(line, opening: opening) { codeFence = nil }
-                    else { rows.append(csvField(lines[i])) }
+                    else { rows.append(csvField(restoredCodeText(lines[i]))) }
                 } else { codeFence = candidate }
                 fenceList = inCodeFence ? lists.last : nil
                 i += 1

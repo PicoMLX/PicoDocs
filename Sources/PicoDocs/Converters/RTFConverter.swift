@@ -33,7 +33,9 @@ public struct RTFConverter: DocumentConverter {
         guard rtf.drop(while: { $0.isWhitespace }).hasPrefix("{\\rtf") else {
             throw PicoDocsError.fileCorrupted
         }
-        let markdown = Self.markdown(fromRTF: rtf)
+        let fonts = RTFFontTable()
+        let markdown = Self.markdown(fromRTF: rtf, fontBudget: fonts)
+        try fonts.check()
         guard !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PicoDocsError.emptyDocument
         }
@@ -71,7 +73,8 @@ public struct RTFConverter: DocumentConverter {
         "revtbl", "rsidtbl",
     ]
 
-    static func markdown(fromRTF rtf: String) -> String {
+    static func markdown(fromRTF rtf: String, fontBudget: RTFFontTable? = nil) -> String {
+        let fonts = fontBudget ?? RTFFontTable()
         // convert() decodes bytes as Latin-1: each scalar is exactly one source
         // byte. Keep CR and LF separate so \binN skips N bytes, not graphemes.
         let chars = rtf.unicodeScalars.map { Character(String($0)) }
@@ -87,8 +90,6 @@ public struct RTFConverter: DocumentConverter {
         var font = 0, defaultFont = 0
         var fontTable = false
         var fontNameIgnored = false
-        var fontNames: [Int: String] = [:]
-        var monospacedFonts: Set<Int> = []
         var ansiEncoding: String.Encoding = .windowsCP1252
         var isDBCS = false
         var stack: [GroupState] = []
@@ -108,17 +109,16 @@ public struct RTFConverter: DocumentConverter {
 
         func finishFont() {
             guard fontTable, !fontNameIgnored else { return }
-            let name = fontNames[font, default: ""].lowercased()
-            if ["menlo", "monaco", "courier", "consolas", "sfmono", "sfnsmono", "monospaced"].contains(where: name.contains) { monospacedFonts.insert(font) }
+            fonts.finish(font)
         }
 
         func appendText(_ s: String) {
             if fontTable {
-                if !fontNameIgnored { fontNames[font, default: ""] += s }
+                if !fontNameIgnored { fonts.append(s, font: font) }
                 return
             }
             if instruction, let field { field.appendInstruction(s); return }
-            let code = field?.target != nil && monospacedFonts.contains(font)
+            let code = field?.target != nil && fonts.isMonospace(font)
             guard !ignore, !s.isEmpty else { return }
             encounteredBody = true
             if var last = runs.last, last.bold == bold, last.italic == italic, last.link == field?.target, last.code == code, last.field === field {
@@ -231,8 +231,8 @@ public struct RTFConverter: DocumentConverter {
                     switch word {
                     case "fonttbl": fontTable = true; ignore = true
                     case "deff": if let param { defaultFont = param; font = param }
-                    case "f": if let param { finishFont(); font = param }
-                    case "fmodern": if fontTable, !fontNameIgnored { monospacedFonts.insert(font) }
+                    case "f": if let param { finishFont(); font = param; if fontTable { fonts.admit(font) } }
+                    case "fmodern": if fontTable, !fontNameIgnored { fonts.markMonospace(font) }
                     case "falt": if fontTable { fontNameIgnored = true }
                     case "field": field = Field()
                     case "fldinst": instruction = field != nil; ignore = true

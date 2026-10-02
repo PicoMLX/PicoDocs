@@ -20,6 +20,7 @@ public struct XLSXExporter: DocumentExporter {
     public func accepts(_ format: ExportableFileType) -> Bool { format == .xlsx }
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
+        try Task.checkCancellation()
         guard format == .xlsx else { throw ExporterError.notAccepted }
         try OfficeDocumentBlocks.validateInput(result)
         let result = PicoDocsEngine.withSynthesizedImageReferences(result)
@@ -29,6 +30,7 @@ public struct XLSXExporter: DocumentExporter {
         var nextNameSuffix: [String: Int] = [:]
         var projectionBudget = SpreadsheetProjectionBudget()
         for section in result.sections where section.kind != .image {
+            try Task.checkCancellation()
             let name = Self.uniqueSheetName(section, index: sheets.count + 1, used: &usedNames, nextSuffix: &nextNameSuffix)
             let rows: [[String]]
             if let csv = section.metadata["csv"], !csv.isEmpty {
@@ -44,7 +46,14 @@ public struct XLSXExporter: DocumentExporter {
                 do {
                     try projectionBudget.reserveGrid(rows: rows.count, columns: columns, name: name)
                     try projectionBudget.reserveWriterStorage(rows: rows.count, columns: columns)
-                    for row in rows { for value in row { try projectionBudget.reserveValue(value) } }
+                    for row in rows {
+                        try Task.checkCancellation()
+                        for (index, value) in row.enumerated() {
+                            if index.isMultiple(of: 64) { try Task.checkCancellation() }
+                            try projectionBudget.reserveValue(value)
+                        }
+                    }
+                } catch is CancellationError { throw CancellationError()
                 } catch {
                     throw ExporterError.serializationFailed("Workbook exceeds the supported 64 MiB projection budget")
                 }
@@ -67,7 +76,10 @@ public struct XLSXExporter: DocumentExporter {
         for (i, sheet) in sheets.enumerated() {
             try pkg.addXML("xl/worksheets/sheet\(i + 1).xml", Self.worksheetXML(rows: sheet.rows))
         }
-        return try pkg.data()
+        try Task.checkCancellation()
+        let data = try pkg.data()
+        try Task.checkCancellation()
+        return data
     }
 
     static func validateDimensions(rows: Int, columns: Int) throws {
@@ -84,6 +96,7 @@ public struct XLSXExporter: DocumentExporter {
         var rows = 0, columns = 0, currentColumns = 0
         do {
             try CSVConverter.forEachField(csv) { value, endsRow in
+                if currentColumns.isMultiple(of: 64) { try Task.checkCancellation() }
                 guard value.utf16.count <= 32_767 else {
                     throw ExporterError.serializationFailed("Worksheet cell exceeds Excel's 32,767-character limit")
                 }
@@ -96,6 +109,7 @@ public struct XLSXExporter: DocumentExporter {
             }
             try budget.reserveGrid(rows: rows, columns: columns, name: name)
             try budget.reserveWriterStorage(rows: rows, columns: columns)
+        } catch is CancellationError { throw CancellationError()
         } catch let error as ExporterError { throw error }
         catch { throw ExporterError.serializationFailed("Workbook exceeds the supported 64 MiB projection budget") }
     }
@@ -235,17 +249,21 @@ public struct XLSXExporter: DocumentExporter {
         """
     }
 
-    private static func worksheetXML(rows: [[String]]) -> String {
+    static func worksheetXML(rows: [[String]]) throws -> String {
+        try Task.checkCancellation()
         var data = ""
         for (r, row) in rows.enumerated() {
+            try Task.checkCancellation()
             let rowNumber = r + 1
             var cells = ""
             for (c, value) in row.enumerated() {
+                if c.isMultiple(of: 64) { try Task.checkCancellation() }
                 let ref = "\(columnName(c + 1))\(rowNumber)"
                 cells += "<c r=\"\(ref)\" t=\"inlineStr\"><is><t xml:space=\"preserve\">\(OOXMLPackageWriter.escape(SpreadsheetMLText.encode(value)).replacingOccurrences(of: "\r", with: "&#13;"))</t></is></c>"
             }
             data += "<row r=\"\(rowNumber)\">\(cells)</row>"
         }
+        try Task.checkCancellation()
         return OOXMLPackageWriter.xmlDeclaration + """
         <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">\
         <sheetData>\(data)</sheetData></worksheet>

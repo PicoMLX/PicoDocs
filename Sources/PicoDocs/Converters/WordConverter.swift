@@ -57,8 +57,8 @@ public struct WordConverter: DocumentConverter {
                 if !name.isEmpty { relationships["#" + name] = "#" + slug }
             }
         }
-        let numbering = WordListNumbering(archive: archive)
-        if let failure = numbering.failure { throw failure }
+        previewNumbering.resetRenderingState()
+        let numbering = previewNumbering
         let tableBudget = TableBudget()
         let blocks = try Self.renderBlocks(in: body, relationships: relationships, numbering: numbering, tableBudget: tableBudget)
         var markdown = blocks.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -794,12 +794,25 @@ public struct WordConverter: DocumentConverter {
     private static func imageRelationshipID(_ blip: Element) -> String {
         if let extensions = try? blip.getElementsByTag("a:ext").array() {
             for ext in extensions where (try? ext.attr("uri")) == "{96DAC541-7B7A-43D3-8B79-37D633B846F1}" {
-                if let svg = try? ext.getElementsByTag("asvg:svgBlip").first(),
-                   (try? svg.attr("xmlns:asvg")) == "http://schemas.microsoft.com/office/drawing/2016/SVG/main",
-                   let id = try? svg.attr("r:embed"), !id.isEmpty { return id }
+                for svg in (try? ext.getAllElements().array()) ?? [] where svg.tagName().split(separator: ":").last == "svgBlip" {
+                    guard namespaceURI(of: svg) == "http://schemas.microsoft.com/office/drawing/2016/SVG/main",
+                          let id = try? svg.attr("r:embed"), !id.isEmpty else { continue }
+                    return id
+                }
             }
         }
         return (try? blip.attr("r:embed")) ?? ""
+    }
+
+    private static func namespaceURI(of element: Element) -> String? {
+        let name = element.tagName().split(separator: ":", maxSplits: 1)
+        let attribute = name.count == 2 ? "xmlns:" + name[0] : "xmlns"
+        var current: Element? = element
+        while let node = current {
+            if node.hasAttr(attribute) { return try? node.attr(attribute) }
+            current = node.parent()
+        }
+        return nil
     }
 
     /// Alt text for an image: `descr` then `name` (from `wp:docPr`, then

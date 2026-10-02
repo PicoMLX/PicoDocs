@@ -84,6 +84,16 @@ final class WordListNumbering {
         } catch { failure = error }
     }
 
+    /// The heading preview consumes counters, but never changes definitions.
+    /// Reuse the parsed dictionaries and restart only the mutable render state.
+    func resetRenderingState() {
+        counters.removeAll(); markerWidths.removeAll(); lastInstance.removeAll()
+        renderedInstances.removeAll(); activeMarkerWidths.removeAll()
+        resumeAlias = nil; activeNumberingInstance = nil; listRestartIndent = nil
+        lastParagraphList = nil; lastParagraphIsContinuation = false
+        lastParagraphIsExportedContinuation = false
+    }
+
     /// The Markdown prefix (indent + marker) for a paragraph, or nil when it isn't
     /// a list item. `numPr` is the paragraph's own `w:numPr`, if any; `style` its
     /// `w:pStyle`, whose (inherited) numbering applies when the paragraph has none.

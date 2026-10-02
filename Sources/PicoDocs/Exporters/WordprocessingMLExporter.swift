@@ -91,6 +91,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
         let budget: OfficeMediaDecodeBudget
         private var attemptedDecode = false
         private var cachedData: Data?
+        private var cachedExtents: (Int, Int)?
         var emitted = false
         init(base64: String, mediaFilename: String, metadata: [String: String], budget: OfficeMediaDecodeBudget) {
             self.base64 = base64; self.mediaFilename = mediaFilename; self.metadata = metadata; self.budget = budget
@@ -98,6 +99,11 @@ public struct WordprocessingMLExporter: DocumentExporter {
         func decodedData() throws -> Data? {
             if !attemptedDecode { cachedData = try budget.decodeCandidate(base64); attemptedDecode = true }
             return cachedData
+        }
+        func extents(_ data: Data) -> (Int, Int) {
+            if let cachedExtents { return cachedExtents }
+            let value = WordprocessingMLExporter.imageExtents(data, metadata: metadata)
+            cachedExtents = value; return value
         }
         func commitDecode() throws {
             guard !emitted, let data = cachedData else { return }
@@ -504,7 +510,7 @@ public struct WordprocessingMLExporter: DocumentExporter {
             let name = OOXMLPackageWriter.escapeAttribute(filename)
             let descr = alt.isEmpty ? "" : " descr=\"\(OOXMLPackageWriter.escapeAttribute(alt))\""
             // Fit the intrinsic aspect ratio inside the existing 5 × 3.75-inch box.
-            let (cx, cy) = WordprocessingMLExporter.imageExtents(data, metadata: image.metadata)
+            let (cx, cy) = image.extents(data)
             // Office 2019+ consumes SVG through this extension. Do not label SVG
             // bytes as a raster blip or synthesize a blank raster fallback.
             let blip = ext == "svg"
