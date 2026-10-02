@@ -1084,9 +1084,9 @@ public struct PowerPointConverter: DocumentConverter {
         // references. Individual whitespace runs within visible text still survive.
         let children = selectedChildren(in: paragraph)
         let visible = children.contains { node in
-            guard ["a:r", "a:fld"].contains(node.tagName().lowercased()),
+            guard !Task.isCancelled, ["a:r", "a:fld"].contains(node.tagName().lowercased()),
                   let text = selectedChild(of: node, named: "a:t") else { return false }
-            return wholeText(text).unicodeScalars.contains { !CharacterSet.whitespacesAndNewlines.contains($0) }
+            return hasVisibleText(text)
         }
         guard visible else { return "" }
         var runs: [Run] = []
@@ -1843,6 +1843,22 @@ public struct PowerPointConverter: DocumentConverter {
             }
         }
         return document
+    }
+
+    /// Classify raw text without joining/copying all run text. Check cancellation
+    /// periodically even when a large run contains only whitespace.
+    static func hasVisibleText(_ element: Element, isCancelled: () -> Bool = { Task.isCancelled }) -> Bool {
+        var scanned = 0
+        for child in element.getChildNodes() {
+            guard !isCancelled() else { return false }
+            guard let text = child as? TextNode else { continue }
+            for scalar in text.getWholeText().unicodeScalars {
+                if scanned.isMultiple(of: 4096), isCancelled() { return false }
+                scanned += 1
+                if !CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
+            }
+        }
+        return false
     }
 
     /// Raw text of an element's text nodes, preserving significant whitespace
