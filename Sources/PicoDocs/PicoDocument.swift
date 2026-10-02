@@ -117,7 +117,9 @@ public class PicoDocument {
         self.id = UUID()
         self.originURL = url
         
-        self.utType = utType ?? UTType(filenameExtension: url.pathExtension) ?? .folder
+        // The normal Numbers UTI can describe either a flat ZIP or a package
+        // directory. Local resource values determine directory traversal.
+        self.utType = url.isFileURL && url.isDirectory ? .folder : (utType ?? UTType(filenameExtension: url.pathExtension) ?? .folder)
         self.filename = url.lastPathComponent
         if let parent {
             self.parent = parent

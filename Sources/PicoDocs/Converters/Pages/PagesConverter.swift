@@ -80,12 +80,13 @@ public struct PagesConverter: DocumentConverter {
         let objectBudget = IWAObjectBudget()
         let allStreams = streams.map(\.stream)
         var sections: [DocumentSection] = []
+        let prepared = try documentStream.map { try IWATable.PreparedDocument(documentStream: $0, streams: allStreams, objectBudget: objectBudget) }
 
         // Prefer inline layout: tables placed at their ￼ attachment points, in
         // reading order. Falls back to body text + tables appended after it when
         // the attachments can't be mapped 1:1 (so a table is never dropped).
         if let documentStream,
-           let blocks = try IWATable.inlineBlocks(documentStream: documentStream, in: allStreams, objectBudget: objectBudget) {
+           let blocks = try IWATable.inlineBlocks(documentStream: documentStream, in: allStreams, objectBudget: objectBudget, prepared: prepared) {
             for block in blocks {
                 switch block {
                 case .text(let raw):
@@ -104,8 +105,8 @@ public struct PagesConverter: DocumentConverter {
             if let documentStream {
                 // Render headings even on the fallback path; degrade to plain text
                 // extraction only if the style-aware renderer yields nothing.
-                let rendered = try IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams, objectBudget: objectBudget)
-                bodyText = rendered.isEmpty ? MarkdownLiteral.escapeBackslashes(Self.normalize(IWAArchive.text(in: documentStream, objectBudget: objectBudget))) : rendered
+                let rendered = try IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams, objectBudget: objectBudget, prepared: prepared)
+                bodyText = rendered.isEmpty ? MarkdownLiteral.escapeBackslashes(Self.normalize(IWAArchive.text(from: prepared?.bodyObjects ?? []))) : rendered
             } else {
                 var firstText = ""
                 for entry in streams.sorted(by: { $0.name < $1.name }) {
@@ -118,7 +119,7 @@ public struct PagesConverter: DocumentConverter {
             if !cleaned.isEmpty {
                 sections.append(DocumentSection(kind: .body, markdown: cleaned, sourcePath: "Index/Document.iwa"))
             }
-            for markdown in IWATable.markdownTables(from: allStreams, objectBudget: objectBudget) {
+            for markdown in IWATable.markdownTables(from: allStreams, objectBudget: objectBudget, prepared: prepared) {
                 sections.append(DocumentSection(kind: .table, markdown: markdown, sourcePath: "Index/Tables"))
             }
         }
