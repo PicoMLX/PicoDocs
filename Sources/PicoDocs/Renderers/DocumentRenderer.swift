@@ -591,7 +591,7 @@ public enum DocumentRenderer {
                 // per-occurrence `id`, so there's no unique anchor to return to
                 // (which keeps element ids unique under repeated references).
                 let inner = try inlineHTML(note.text.replacingOccurrences(of: "\n", with: " "), footnoteNumbers: numbers, budget: budget)
-                return "<li id=\"fn-\(escapeHTML(note.id))\">\(inner)</li>"
+                return "<li id=\"fn-\(escapeHTML(restoredCodeText(note.id)))\">\(inner)</li>"
             }
             .joined(separator: "\n")
         return items.isEmpty ? "" : "<section class=\"footnotes\">\n<hr>\n<ol>\n\(items)\n</ol>\n</section>"

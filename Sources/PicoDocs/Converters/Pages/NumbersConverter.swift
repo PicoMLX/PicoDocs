@@ -166,7 +166,7 @@ public struct NumbersConverter: DocumentConverter {
             if index < leading || index >= end || scalar == "\t" {
                 heading += "&#\(scalar.value);"
             } else {
-                if #"\`*_{}[]<>#&"#.unicodeScalars.contains(scalar) { heading += "\\" }
+                if #"\`*_{}[]<>#&~"#.unicodeScalars.contains(scalar) { heading += "\\" }
                 heading.unicodeScalars.append(scalar)
             }
         }

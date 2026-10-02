@@ -75,15 +75,15 @@ public struct PowerPointConverter: DocumentConverter {
         let properties = Self.coreProperties(archive)
         try charge(properties.title ?? info.filename); try charge(properties.author)
         let slidePaths = try Self.slidePaths(presentation, archive: archive, presentationPath: presentationPath)
-        // Reserve all external image destinations first, including later slides,
-        // so embedded references cannot claim an external occurrence's src.
+        // Reserve external image and hyperlink destinations, including later
+        // slides, before embedded carriers claim a materialized file identity.
         var externalReferences: Set<String> = []
         var pendingParts = PartQueue()
         for path in slidePaths { try pendingParts.schedule(path) }
         while let path = pendingParts.popLast() {
             try Task.checkCancellation()
             for relation in Self.relationships(archive, forPart: path).values {
-                if relation.external && relation.isType("/image") {
+                if relation.external && (relation.isType("/image") || relation.isType("/hyperlink")) {
                     externalReferences.insert(Self.linkDestination(relation.target))
                 } else if !relation.external, ["/slideLayout", "/slideMaster", "/notesSlide", "/notesMaster", "/theme", "/themeOverride"].contains(where: relation.isType) {
                     try pendingParts.schedule(Self.resolvePartPath(relation.target, relativeTo: Self.directory(of: path)))
@@ -1214,28 +1214,34 @@ public struct PowerPointConverter: DocumentConverter {
 
     private static func encodeWhitespace(_ text: String, budget: RenderBudget?) -> String {
         var bytes = text.utf8.count
-        for scalar in text.unicodeScalars where CharacterSet.whitespaces.contains(scalar) {
+        for (index, scalar) in text.unicodeScalars.enumerated() {
+            if index.isMultiple(of: 1024), Task.isCancelled { budget?.archive.fail(CancellationError()); return "" }
+            guard CharacterSet.whitespaces.contains(scalar) else { continue }
             let growth = String(scalar.value).utf8.count + 3 - String(scalar).utf8.count
             if let budget, !budget.admit(growth, retained: &bytes) { return "" }
         }
         var output = ""
-        for scalar in text.unicodeScalars {
+        for (index, scalar) in text.unicodeScalars.enumerated() {
+            if index.isMultiple(of: 1024), Task.isCancelled { budget?.archive.fail(CancellationError()); return "" }
             if CharacterSet.whitespaces.contains(scalar) { output += "&#\(scalar.value);" }
             else { output.unicodeScalars.append(scalar) }
         }
         return output
     }
 
-    private static func escapeMarkdown(_ text: String, budget: RenderBudget? = nil) -> String {
+    static func escapeMarkdown(_ text: String, budget: RenderBudget? = nil) -> String {
         if let budget {
             var bytes = text.utf8.count
             guard budget.fits(bytes) else { return "" }
-            for scalar in text.unicodeScalars where #"\`*_{}[]<>&"#.unicodeScalars.contains(scalar) {
+            for (index, scalar) in text.unicodeScalars.enumerated() {
+                if index.isMultiple(of: 1024), Task.isCancelled { budget.archive.fail(CancellationError()); return "" }
+                guard #"\`*_{}[]<>&"#.unicodeScalars.contains(scalar) else { continue }
                 guard budget.admit(1, retained: &bytes) else { return "" }
             }
         }
         var out = ""
-        for scalar in text.unicodeScalars {
+        for (index, scalar) in text.unicodeScalars.enumerated() {
+            if index.isMultiple(of: 1024), Task.isCancelled { budget?.archive.fail(CancellationError()); return "" }
             if #"\`*_{}[]<>&"#.unicodeScalars.contains(scalar) { out.append("\\") }
             out.unicodeScalars.append(scalar)
         }

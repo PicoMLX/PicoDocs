@@ -141,9 +141,11 @@ public struct PagesConverter: DocumentConverter {
     /// failing that — from a nested `Index.zip`. A present-but-unreadable main
     /// story (`Document.iwa`) is treated as corruption; auxiliary entries that
     /// fail to extract are skipped leniently.
-    static func iwaComponents(in archive: Archive, maximumEntryBytes: Int = Int.max, maximumTotalBytes: Int = Int.max) throws -> [Component] {
+    static func iwaComponents(in archive: Archive, maximumEntryBytes: Int = Int.max, maximumTotalBytes: Int = Int.max,
+                              maximumArchiveEntries: Int = 16_384, maximumComponents: Int = 16_384, maximumMetadataBytes: Int = 8 * 1024 * 1024) throws -> [Component] {
         var components: [Component] = []
         var remaining = maximumTotalBytes
+        var componentBudget = IWAComponentBudget(entries: maximumArchiveEntries, components: maximumComponents, bytes: maximumMetadataBytes)
         func readBounded(_ archive: Archive, path: String) throws -> Data? {
             try Task.checkCancellation()
             guard let entry = archive[path] else { return nil }
@@ -156,8 +158,10 @@ public struct PagesConverter: DocumentConverter {
         }
         // Loose layout is `Index/*.iwa`; scope the scan to that path so a stray
         // outer `.iwa` can't shadow the nested `Index.zip` body below.
-        for entry in archive where entry.type == .file
-            && entry.path.hasPrefix("Index/") && entry.path.hasSuffix(".iwa") {
+        for entry in archive {
+            try componentBudget.scan(entry.path)
+            guard entry.type == .file, entry.path.hasPrefix("Index/"), entry.path.hasSuffix(".iwa") else { continue }
+            try componentBudget.retainComponent()
             guard let data = try readBounded(archive, path: entry.path) else {
                 if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
                 continue
@@ -174,7 +178,10 @@ public struct PagesConverter: DocumentConverter {
                   let inner = Archive(data: indexZip, accessMode: .read) else {
                 throw PicoDocsError.fileCorrupted
             }
-            for entry in inner where entry.type == .file && entry.path.hasSuffix(".iwa") {
+            for entry in inner {
+                try componentBudget.scan(entry.path)
+                guard entry.type == .file, entry.path.hasSuffix(".iwa") else { continue }
+                try componentBudget.retainComponent()
                 guard let data = try readBounded(inner, path: entry.path) else {
                     if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
                     continue
