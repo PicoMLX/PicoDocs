@@ -146,23 +146,24 @@ public struct PagesConverter: DocumentConverter {
         var components: [Component] = []
         var remaining = maximumTotalBytes
         var componentBudget = IWAComponentBudget(entries: maximumArchiveEntries, components: maximumComponents, bytes: maximumMetadataBytes)
-        func readBounded(_ archive: Archive, path: String) throws -> Data? {
+        func readBounded(_ archive: Archive, entry: Entry) throws -> Data? {
             try Task.checkCancellation()
-            guard let entry = archive[path] else { return nil }
             let limit = min(maximumEntryBytes, remaining)
             guard limit >= 0, entry.uncompressedSize <= UInt64(limit) else { throw PicoDocsError.fileCorrupted }
-            let data = try ZIPEntryReader.read(archive, path: path, maxBytes: limit)
+            let data = try ZIPEntryReader.read(archive, entry: entry, maxBytes: limit)
             try Task.checkCancellation()
             if let data { remaining -= data.count }
             return data
         }
         // Loose layout is `Index/*.iwa`; scope the scan to that path so a stray
         // outer `.iwa` can't shadow the nested `Index.zip` body below.
+        var indexEntry: Entry?
         for entry in archive {
             try componentBudget.scan(entry.path)
+            if entry.path == "Index.zip", indexEntry == nil { indexEntry = entry }
             guard entry.type == .file, entry.path.hasPrefix("Index/"), entry.path.hasSuffix(".iwa") else { continue }
             try componentBudget.retainComponent()
-            guard let data = try readBounded(archive, path: entry.path) else {
+            guard let data = try readBounded(archive, entry: entry) else {
                 if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
                 continue
             }
@@ -173,8 +174,8 @@ public struct PagesConverter: DocumentConverter {
         // Nested layout: the IWA streams live inside Index.zip. If that container
         // is present but can't be read/opened, the file is corrupt — not an
         // unsupported layout — so surface that distinctly.
-        if archive["Index.zip"] != nil {
-            guard let indexZip = try readBounded(archive, path: "Index.zip"),
+        if let indexEntry {
+            guard let indexZip = try readBounded(archive, entry: indexEntry),
                   let inner = Archive(data: indexZip, accessMode: .read) else {
                 throw PicoDocsError.fileCorrupted
             }
@@ -182,7 +183,7 @@ public struct PagesConverter: DocumentConverter {
                 try componentBudget.scan(entry.path)
                 guard entry.type == .file, entry.path.hasSuffix(".iwa") else { continue }
                 try componentBudget.retainComponent()
-                guard let data = try readBounded(inner, path: entry.path) else {
+                guard let data = try readBounded(inner, entry: entry) else {
                     if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
                     continue
                 }

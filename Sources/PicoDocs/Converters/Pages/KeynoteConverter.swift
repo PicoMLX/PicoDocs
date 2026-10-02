@@ -215,11 +215,13 @@ public struct KeynoteConverter: DocumentConverter {
     private func iwaComponents(in archive: Archive) throws -> [Component] {
         var components: [Component] = []
         var componentBudget = IWAComponentBudget()
+        var indexEntry: Entry?
         for entry in archive {
             try componentBudget.scan(entry.path)
+            if entry.path == "Index.zip", indexEntry == nil { indexEntry = entry }
             guard entry.type == .file, entry.path.hasPrefix("Index/"), entry.path.hasSuffix(".iwa") else { continue }
             try componentBudget.retainComponent()
-            guard let data = try Self.readEntry(archive, path: entry.path) else {
+            guard let data = try ZIPEntryReader.read(archive, entry: entry) else {
                 // A present-but-unreadable slide is corruption (primary content);
                 // auxiliary components are skipped leniently.
                 if Self.isSlide(entry.path) { throw PicoDocsError.fileCorrupted }
@@ -232,8 +234,8 @@ public struct KeynoteConverter: DocumentConverter {
         // Nested layout: slides live inside Index.zip. If that container is present
         // but can't be read/opened, the file is corrupt — not an unsupported
         // layout — so surface that distinctly rather than failing silently.
-        if archive["Index.zip"] != nil {
-            guard let indexZip = try Self.readEntry(archive, path: "Index.zip"),
+        if let indexEntry {
+            guard let indexZip = try ZIPEntryReader.read(archive, entry: indexEntry),
                   let inner = Archive(data: indexZip, accessMode: .read) else {
                 throw PicoDocsError.fileCorrupted
             }
@@ -241,7 +243,7 @@ public struct KeynoteConverter: DocumentConverter {
                 try componentBudget.scan(entry.path)
                 guard entry.type == .file, entry.path.hasSuffix(".iwa") else { continue }
                 try componentBudget.retainComponent()
-                guard let data = try Self.readEntry(inner, path: entry.path) else {
+                guard let data = try ZIPEntryReader.read(inner, entry: entry) else {
                     if Self.isSlide(entry.path) { throw PicoDocsError.fileCorrupted }
                     continue
                 }

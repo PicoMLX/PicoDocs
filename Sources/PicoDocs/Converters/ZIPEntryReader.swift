@@ -39,6 +39,13 @@ enum ZIPEntryReader {
         try Task.checkCancellation()
         let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
         guard let entry = archive[cleanPath] else { return nil }
+        return try read(archive, entry: entry, maxBytes: maxBytes)
+    }
+
+    /// Callers already walking an archive retain the physical entry rather than
+    /// performing another linear central-directory lookup for each component.
+    static func read(_ archive: Archive, entry: Entry, maxBytes: Int = Int.max) throws -> Data? {
+        try Task.checkCancellation()
         let archiveSize = UInt64(archive.data?.count ?? Int.max)
         guard entry.compressedSize <= archiveSize,
               entry.isCompressed || entry.uncompressedSize <= archiveSize else { return nil }
