@@ -155,8 +155,8 @@ public struct WordConverter: DocumentConverter {
         guard properties.tagName().lowercased() == "cp:coreproperties" else { throw PicoDocsError.fileCorrupted }
         func value(_ tag: String) -> String? {
             guard let element = properties.children().first(where: { $0.tagName().lowercased() == tag }) else { return nil }
-            let text = element.getChildNodes().compactMap { ($0 as? TextNode)?.getWholeText() }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-            return text.isEmpty ? nil : text
+            let text = element.getChildNodes().compactMap { ($0 as? TextNode)?.getWholeText() }.joined()
+            return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
         }
         return (value("dc:title"), value("dc:creator"))
     }
