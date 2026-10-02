@@ -119,18 +119,17 @@ enum IWATable {
         let work = objectBudget ?? IWAObjectBudget()
         var found: [UInt64] = [], foundIDs: Set<UInt64> = []
         if drawableOrder {
-            var pending: [(id: UInt64, depth: Int)] = [(root, 0)]
-            var shallowest: [UInt64: Int] = [:]
-            while let item = pending.popLast() {
+            var pending: [UInt64] = [root]
+            var visited: Set<UInt64> = []
+            while let id = pending.popLast() {
                 guard work.reserveVisit() else { return [] }
-                if let depth = shallowest[item.id], depth <= item.depth { continue }
-                shallowest[item.id] = item.depth
-                if tiles.contains(item.id), foundIDs.insert(item.id).inserted { found.append(item.id) }
-                guard item.depth < 12, let object = objects[item.id] else { continue }
+                guard visited.insert(id).inserted else { continue }
+                if tiles.contains(id), foundIDs.insert(id).inserted { found.append(id) }
+                guard let object = objects[id] else { continue }
                 let ordered = orderedDrawables(object, objectBudget: work) ?? object.references
                 for id in ordered.reversed() {
                     guard work.reserveVisit() else { return [] }
-                    if !blocked.contains(id) { pending.append((id, item.depth + 1)) }
+                    if !blocked.contains(id) { pending.append(id) }
                 }
             }
         } else {
