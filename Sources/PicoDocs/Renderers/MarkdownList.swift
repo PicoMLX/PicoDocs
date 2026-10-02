@@ -191,7 +191,14 @@ struct MarkdownList: Equatable {
                 case .list(let child): content.append(.list(child))
                 // These were already retained as text by the export list model.
                 case .heading(let level, let text): content.append(.text(String(repeating: "#", count: level) + " " + text))
-                case .code(let text): content.append(.text("```\n" + text + "\n```"))
+                case .code(let text):
+                    var longest = 0, run = 0
+                    for character in text {
+                        run = character == "`" ? run + 1 : 0
+                        longest = max(longest, run)
+                    }
+                    let fence = String(repeating: "`", count: max(3, longest + 1))
+                    content.append(.text(fence + "\n" + text + "\n" + fence))
                 case .blockquote(let lines): content.append(.text(lines.map { "> " + $0 }.joined(separator: "\n")))
                 case .rule: content.append(.text("---"))
                 case .table(let rows): content.append(.text(rows.map { "| " + $0.joined(separator: " | ") + " |" }.joined(separator: "\n")))

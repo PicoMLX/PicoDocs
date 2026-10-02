@@ -110,8 +110,50 @@ public struct WordConverter: DocumentConverter {
         }
         sections.append(contentsOf: imageSections)
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
+        let properties = try Self.coreProperties(archive)
         try Task.checkCancellation()
-        return ConverterResult(title: info.filename, sections: sections)
+        return ConverterResult(title: properties.title ?? info.filename, author: properties.author, sections: sections)
+    }
+
+    /// Metadata belongs to the package root relationship, not a fixed filename.
+    /// Reuse namespace-aware XML admission and the existing Word entry ceiling.
+    static func coreProperties(_ archive: Archive) throws -> (title: String?, author: String?) {
+        guard archive["_rels/.rels"] != nil else { return (nil, nil) }
+        let budget = PowerPointXML.Budget()
+        func root(_ path: String) throws -> Element {
+            try Task.checkCancellation()
+            guard let data = try readEntry(archive, path: path),
+                  let normalized = PowerPointXML.normalize(data, maximumOutputBytes: 32 * 1024 * 1024, budget: budget) else {
+                try Task.checkCancellation()
+                throw PicoDocsError.fileCorrupted
+            }
+            let document = try SwiftSoup.parse(normalized, "", SwiftSoup.Parser.xmlParser())
+            try Task.checkCancellation()
+            guard let root = document.children().first() else { throw PicoDocsError.fileCorrupted }
+            return root
+        }
+        let relationships = try root("_rels/.rels")
+        guard relationships.tagName().lowercased() == "relationships" else { throw PicoDocsError.fileCorrupted }
+        var target: String?
+        let type = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties"
+        for relationship in relationships.children() {
+            try Task.checkCancellation()
+            guard relationship.tagName().lowercased() == "relationship",
+                  PowerPointConverter.collapsedXMLURI(try relationship.attr("Type")) == type else { continue }
+            let path = PowerPointConverter.collapsedXMLURI(try relationship.attr("Target"))
+            guard target == nil, !path.isEmpty, !path.hasPrefix("//"), URLComponents(string: path)?.scheme == nil,
+                  PowerPointConverter.collapsedXMLURI(try relationship.attr("TargetMode")) != "External" else { throw PicoDocsError.fileCorrupted }
+            target = resolvePartPath(path, relativeTo: "")
+        }
+        guard let target else { return (nil, nil) }
+        let properties = try root(target)
+        guard properties.tagName().lowercased() == "cp:coreproperties" else { throw PicoDocsError.fileCorrupted }
+        func value(_ tag: String) -> String? {
+            guard let element = properties.children().first(where: { $0.tagName().lowercased() == tag }) else { return nil }
+            let text = element.getChildNodes().compactMap { ($0 as? TextNode)?.getWholeText() }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
+        }
+        return (value("dc:title"), value("dc:creator"))
     }
 
     /// Collect only heading text; advance list counters from metadata without
