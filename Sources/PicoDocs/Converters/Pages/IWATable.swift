@@ -1055,6 +1055,9 @@ enum IWATable {
     private static func reconstructTables(_ objects: [UInt64: IWAArchive.Object], budget: IWAOutputBudget? = nil, objectBudget: IWAObjectBudget? = nil) -> [UInt64: String] {
         let copies = objectBudget ?? IWAObjectBudget()
         let output = budget ?? IWAOutputBudget()
+        // The implicit allowance is checked through the caller's shared object
+        // budget, including early exits during data-list reconstruction.
+        defer { if !output.active { copies.fail() } }
         var tileIDs: Set<UInt64> = []
         for object in objects.values {
             guard copies.active, output.active else { return [:] }
@@ -1096,8 +1099,7 @@ enum IWATable {
             }
             if let markdown = render(grid: grid, budget: output) { byTile[first.id] = markdown }
         }
-        if !output.active { copies.fail() }
-        guard copies.active else { return [:] }
+        guard copies.active, output.active else { return [:] }
 
         return byTile
     }
