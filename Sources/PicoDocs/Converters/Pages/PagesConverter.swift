@@ -170,7 +170,7 @@ public struct PagesConverter: DocumentConverter {
             try componentBudget.scan(entry.path)
             if entry.path == "Index.zip", indexEntry == nil { indexEntry = entry }
             guard entry.type == .file, entry.path.hasPrefix("Index/"), entry.path.hasSuffix(".iwa") else { continue }
-            try componentBudget.retainComponent()
+            try componentBudget.retainComponent(entry.path)
             guard let data = try readBounded(archive, entry: entry) else {
                 if entry.path == "Index/Document.iwa" { throw PicoDocsError.fileCorrupted }
                 continue
@@ -190,7 +190,7 @@ public struct PagesConverter: DocumentConverter {
             for entry in inner {
                 try componentBudget.scan(entry.path)
                 guard entry.type == .file, entry.path.hasSuffix(".iwa") else { continue }
-                try componentBudget.retainComponent()
+                try componentBudget.retainComponent(entry.path)
                 guard let data = try readBounded(inner, entry: entry) else {
                     if entry.path == "Document.iwa" { throw PicoDocsError.fileCorrupted }
                     continue

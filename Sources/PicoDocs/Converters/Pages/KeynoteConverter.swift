@@ -224,7 +224,7 @@ public struct KeynoteConverter: DocumentConverter {
             try componentBudget.scan(entry.path)
             if entry.path == "Index.zip", indexEntry == nil { indexEntry = entry }
             guard entry.type == .file, entry.path.hasPrefix("Index/"), entry.path.hasSuffix(".iwa") else { continue }
-            try componentBudget.retainComponent()
+            try componentBudget.retainComponent(entry.path)
             guard let data = try ZIPEntryReader.read(archive, entry: entry) else {
                 // A present-but-unreadable slide is corruption (primary content);
                 // auxiliary components are skipped leniently.
@@ -246,7 +246,7 @@ public struct KeynoteConverter: DocumentConverter {
             for entry in inner {
                 try componentBudget.scan(entry.path)
                 guard entry.type == .file, entry.path.hasSuffix(".iwa") else { continue }
-                try componentBudget.retainComponent()
+                try componentBudget.retainComponent(entry.path)
                 guard let data = try ZIPEntryReader.read(inner, entry: entry) else {
                     if Self.isSlide(entry.path) { throw PicoDocsError.fileCorrupted }
                     continue
