@@ -120,7 +120,7 @@ import ZIPFoundation
         #expect(try DocumentRenderer.render(result, to: .html).contains(value.replacingOccurrences(of: "&", with: "&amp;")))
     }
 
-    @Test func cancellationDuringOneLargeSnappyBlockDoesNotReturnSuccess() async throws {
+    @Test func cancellationDuringOneLargeSnappyBlockRespectsFinalBoundary() async throws {
         let size = 32 * 1024 * 1024
         var block = PagesConverterTests.varint(UInt64(size)) + [0, UInt8(65)]
         var remaining = size - 1
@@ -133,12 +133,21 @@ import ZIPFoundation
         let task = Task.detached {
             do {
                 _ = try Snappy.decompressBlock(input, maximumOutputBytes: size)
-                return false
+                // A loaded runner may not wake the cancelling task until after
+                // decoding completes. Only an already cancelled success fails.
+                return !Task.isCancelled
             } catch is CancellationError { return true }
         }
         try await Task.sleep(nanoseconds: 5_000_000)
         task.cancel()
         #expect(try await task.value)
+    }
+    @Test func preCancelledSnappyBlockThrowsBeforeDecoding() async throws {
+        let task = Task.detached {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try Snappy.decompressBlock([1, 0, 65], maximumOutputBytes: 1)
+        }
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
     }
 
     @Test func cancellationStopsAlreadyDecodedIWAAndTableReconstruction() async throws {
