@@ -156,13 +156,19 @@ enum IWATable {
     private static func orderedDrawables(_ object: IWAArchive.Object, objectBudget: IWAObjectBudget) -> [UInt64]? {
         guard object.type == 2 || object.type == 3008 else { return nil } // TN.Sheet / TSD.Group
         var reader = ProtobufReader(object.payload, objectBudget: objectBudget), ids: [UInt64] = []
+        var partial = false
         while let field = reader.next() {
-            if field.number == 2, case .length(let bytes) = field.value,
-               let id = referencedID(in: bytes, objectBudget: objectBudget) {
+            if field.number == 2 {
+                guard case .length(let bytes) = field.value,
+                      let id = referencedID(in: bytes, objectBudget: objectBudget) else { partial = true; continue }
                 guard objectBudget.reserve(16) else { return [] }
                 ids.append(id)
             }
         }
+        // A partial native order must not hide still-valid envelope references.
+        // The existing fallback uses that complete available order and the same
+        // bounded DFS/visited identities as an undecodable drawable list.
+        if partial || reader.malformed { return nil }
         return ids.isEmpty ? nil : ids
     }
 
