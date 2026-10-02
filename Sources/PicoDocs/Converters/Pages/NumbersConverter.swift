@@ -68,7 +68,7 @@ public struct NumbersConverter: DocumentConverter {
         var documentStream: [UInt8]?
         for component in components {
             try Task.checkCancellation()
-            let isDocument = component.name.split(separator: "/").last == "Document.iwa"
+            let isDocument = component.isDocument
             do {
                 let stream = try Snappy.decompressIWA(component.bytes, maximumOutputBytes: min(32 * 1024 * 1024, remainingDecodedBytes)) { count in
                     guard count <= remainingDecodedBytes else { throw Snappy.SnappyError.outputLimitExceeded }
@@ -86,7 +86,7 @@ public struct NumbersConverter: DocumentConverter {
 
         let objectBudget = IWAObjectBudget(bytes: objectBudgetBytes)
         let budget = IWAOutputBudget(bytes: outputBudgetBytes, cells: outputBudgetCells)
-        let prepared = try IWATable.PreparedDocument(documentStream: documentStream, streams: streams, objectBudget: objectBudget, outputBudget: budget)
+        let prepared = try IWATable.PreparedDocument(documentStream: documentStream, streams: streams, objectBudget: objectBudget, outputBudget: budget, preserveCellWhitespace: true)
         let sheets = Self.sheets(in: prepared.bodyObjects, budget: budget)
         try objectBudget.check()
         try budget.check()
@@ -110,7 +110,7 @@ public struct NumbersConverter: DocumentConverter {
         // Partial reachability must not drop the remaining physical tables.
         for markdown in attribution.unclaimed {
             guard budget.reserve(256) else { try budget.check(); throw PicoDocsError.fileCorrupted }
-            sections.append(DocumentSection(kind: .sheet, markdown: markdown))
+            sections.append(DocumentSection(kind: .sheet, markdown: markdown, metadata: ["preservedWhitespace": "1"]))
         }
 
         try budget.check()
