@@ -35,16 +35,16 @@ enum ZIPEntryReader {
     ///   ZIPFoundation read past the end of the archive, handing back empty chunks
     ///   for up to `size / chunkSize` iterations; the first empty chunk of a
     ///   non-empty entry ends the read instead.
-    static func read(_ archive: Archive, path: String, maxBytes: Int = Int.max) throws -> Data? {
+    static func read(_ archive: Archive, path: String, maxBytes: Int = Int.max, onBytes: ((Int) throws -> Void)? = nil) throws -> Data? {
         try Task.checkCancellation()
         let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
         guard let entry = archive[cleanPath] else { return nil }
-        return try read(archive, entry: entry, maxBytes: maxBytes)
+        return try read(archive, entry: entry, maxBytes: maxBytes, onBytes: onBytes)
     }
 
     /// Callers already walking an archive retain the physical entry rather than
     /// performing another linear central-directory lookup for each component.
-    static func read(_ archive: Archive, entry: Entry, maxBytes: Int = Int.max) throws -> Data? {
+    static func read(_ archive: Archive, entry: Entry, maxBytes: Int = Int.max, onBytes: ((Int) throws -> Void)? = nil) throws -> Data? {
         try Task.checkCancellation()
         let archiveSize = UInt64(archive.data?.count ?? Int.max)
         guard entry.compressedSize <= archiveSize,
@@ -56,6 +56,7 @@ enum ZIPEntryReader {
             _ = try archive.extract(entry) { chunk in
                 if chunk.isEmpty, declaredSize > 0 { throw TruncatedEntry() }
                 try Task.checkCancellation()
+                try onBytes?(chunk.count)
                 guard chunk.count <= maxBytes - data.count else { throw TruncatedEntry() }
                 data.append(chunk)
             }

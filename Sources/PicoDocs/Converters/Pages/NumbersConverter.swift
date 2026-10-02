@@ -29,17 +29,20 @@ public struct NumbersConverter: DocumentConverter {
     private let outputBudgetBytes: Int
     private let outputBudgetCells: Int
     private let objectBudgetBytes: Int
+    private let decodedBudgetBytes: Int
 
     public init() {
         outputBudgetBytes = 64 * 1024 * 1024
         outputBudgetCells = 1_000_000
         objectBudgetBytes = 64 * 1024 * 1024
+        decodedBudgetBytes = 128 * 1024 * 1024
     }
 
-    init(outputBudgetBytes: Int, outputBudgetCells: Int = 1_000_000, objectBudgetBytes: Int = 64 * 1024 * 1024) {
+    init(outputBudgetBytes: Int, outputBudgetCells: Int = 1_000_000, objectBudgetBytes: Int = 64 * 1024 * 1024, decodedBudgetBytes: Int = 128 * 1024 * 1024) {
         self.outputBudgetBytes = outputBudgetBytes
         self.outputBudgetCells = outputBudgetCells
         self.objectBudgetBytes = objectBudgetBytes
+        self.decodedBudgetBytes = decodedBudgetBytes
     }
 
     public func accepts(_ info: StreamInfo) -> Bool {
@@ -61,14 +64,16 @@ public struct NumbersConverter: DocumentConverter {
         // list, so its failure is corruption; auxiliary streams are skipped
         // leniently (a table whose tiles are lost is simply not reconstructed).
         var streams: [[UInt8]] = []
-        var remainingDecodedBytes = 128 * 1024 * 1024
+        var remainingDecodedBytes = decodedBudgetBytes
         var documentStream: [UInt8]?
         for component in components {
             try Task.checkCancellation()
             do {
-                let stream = try Snappy.decompressIWA(component.bytes, maximumOutputBytes: min(32 * 1024 * 1024, remainingDecodedBytes))
+                let stream = try Snappy.decompressIWA(component.bytes, maximumOutputBytes: min(32 * 1024 * 1024, remainingDecodedBytes)) { count in
+                    guard count <= remainingDecodedBytes else { throw Snappy.SnappyError.outputLimitExceeded }
+                    remainingDecodedBytes -= count
+                }
                 if component.name.hasSuffix("Document.iwa") { documentStream = stream }
-                remainingDecodedBytes -= stream.count
                 streams.append(stream)
             } catch Snappy.SnappyError.outputLimitExceeded { throw PicoDocsError.fileCorrupted
             } catch is CancellationError { throw CancellationError()
