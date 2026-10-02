@@ -156,6 +156,9 @@ public enum ContentTypeDetector {
     static func sniffPresentationRoot(_ package: PowerPointPackage, path: String, maximumBytes: Int = 64 * 1024) -> Bool {
         guard maximumBytes > 0, package.failure == nil, let entry = package.entry(path),
               entry.type == .file, entry.uncompressedSize <= 64 * 1024 * 1024 else { return false }
+        let archiveSize = UInt64(package.archive.data?.count ?? Int.max)
+        guard entry.compressedSize <= archiveSize,
+              entry.isCompressed || entry.uncompressedSize <= archiveSize else { return false }
         enum Stop: Error { case prefixComplete }
         var prefix = Data()
         do {

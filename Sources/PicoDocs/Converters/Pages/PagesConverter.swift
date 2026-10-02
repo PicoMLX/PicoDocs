@@ -150,9 +150,13 @@ public struct PagesConverter: DocumentConverter {
             try Task.checkCancellation()
             let limit = min(maximumEntryBytes, remaining)
             guard limit >= 0, entry.uncompressedSize <= UInt64(limit) else { throw PicoDocsError.fileCorrupted }
-            let data = try ZIPEntryReader.read(archive, entry: entry, maxBytes: limit)
+            var exceeded = false
+            let data = try ZIPEntryReader.read(archive, entry: entry, maxBytes: limit) { count in
+                guard count <= remaining else { exceeded = true; throw PicoDocsError.fileCorrupted }
+                remaining -= count
+            }
             try Task.checkCancellation()
-            if let data { remaining -= data.count }
+            guard !exceeded else { throw PicoDocsError.fileCorrupted }
             return data
         }
         // Loose layout is `Index/*.iwa`; scope the scan to that path so a stray
