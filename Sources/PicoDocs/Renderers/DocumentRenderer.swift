@@ -152,7 +152,8 @@ public enum DocumentRenderer {
                 return "---"
             case .blockquote(let lines):
                 return lines.map { stripInline($0, footnoteNumbers: numbers) }.joined(separator: "\n")
-            case .list(_, _, let items):
+            case .list(let list):
+                let items = list.items
                 return items.map { item in
                     let marker = item.number.map { "\($0)\(item.delimiter)" } ?? "-"
                     return plaintextListItem(marker + item.padding, listItemText(item), footnoteNumbers: numbers, depth: depth)
@@ -163,7 +164,7 @@ public enum DocumentRenderer {
         }
     }
 
-    private static func listItemText(_ item: MarkdownList.Item) -> String {
+    static func listItemText(_ item: MarkdownList.Item) -> String {
         item.content.map { content in
             switch content {
             case .text(let text): return text
@@ -244,21 +245,24 @@ public enum DocumentRenderer {
     /// (unique media names) embed exactly as before.
     private static func embedImageDataURLs(_ html: String, sections: [DocumentSection]) throws -> String {
         let imageSections = sections.filter { $0.kind == .image }
-        // Count basenames among *embeddable* sections; a basename shared by two of
-        // them is ambiguous and skipped below.
-        var basenameCounts: [String: Int] = [:]
-        for section in imageSections where !(section.metadata["base64"] ?? "").isEmpty {
-            guard let filename = imageRefName(for: section) else { continue }
-            basenameCounts[filename, default: 0] += 1
+        // Count owners across every emitted identity. An alias can collide
+        // with another carrier's exact path as well as another alias.
+        func references(_ section: DocumentSection) -> Set<String> {
+            Set([section.sourcePath, imageRefName(for: section)].compactMap { $0 }.filter { !$0.isEmpty })
+        }
+        var referenceCounts: [String: Int] = [:]
+        for section in imageSections {
+            for reference in references(section) { referenceCounts[reference, default: 0] += 1 }
         }
         var replacements: [String: (mime: String, base64: String)] = [:]
         for section in imageSections {
-            guard let filename = imageRefName(for: section), basenameCounts[filename] == 1,
-                  let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
+            guard let base64 = section.metadata["base64"], !base64.isEmpty else { continue }
             // Parameters are metadata, not part of the payload delimiter syntax.
             let mime = (section.metadata["mimeType"] ?? "application/octet-stream")
                 .split(separator: ";", maxSplits: 1).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? "application/octet-stream"
-            replacements[filename] = (mime, base64)
+            for reference in references(section) where referenceCounts[reference] == 1 {
+                replacements[reference] = (mime, base64)
+            }
         }
         return try boundedImageReplacements(html, replacements: replacements)
     }
@@ -353,7 +357,8 @@ public enum DocumentRenderer {
             case .blockquote(let lines):
                 let inner = try lines.map { try inlineHTML($0, footnoteNumbers: numbers, budget: budget) }.joined(separator: "<br>\n")
                 return "<blockquote>\(inner)</blockquote>"
-            case .list(let ordered, let start, let items):
+            case .list(let list):
+                let ordered = list.ordered, start = list.items.first?.number ?? 1, items = list.items
                 let tag = ordered ? "ol" : "ul"
                 var expected = start
                 let lis = try items.map { item -> String in
@@ -361,6 +366,7 @@ public enum DocumentRenderer {
                     if let number = item.number { expected = number + 1 }
                     let (lead, nested) = listItemContent(listItemText(item), depth: depth)
                     var html = try MarkdownList.inlineText(lead, breakText: "<br>") { try inlineHTML($0, footnoteNumbers: numbers, budget: budget) }
+                    if !lead.isEmpty, nested.contains(where: { if case .paragraph = $0 { return true }; return false }) { html = "<p>" + html + "</p>" }
                     if !nested.isEmpty {
                         html += "\n" + (try htmlBlocks(nested, footnoteNumbers: numbers, depth: depth + 1, budget: budget).joined(separator: "\n"))
                         if case .list? = nested.last {} else { html += "\n" }
@@ -397,29 +403,32 @@ public enum DocumentRenderer {
     /// in place) and the footnote definitions (`[^id]: text`, with indented
     /// continuation lines folded in), in definition order.
     private static func extractFootnotes(_ markdown: String) -> (body: String, notes: [(id: String, text: String)]) {
-        let lines = markdown.components(separatedBy: "\n")
+        let lines = MarkdownBlockParser.normalizedLineEndings(markdown).components(separatedBy: "\n")
         var bodyLines: [String] = []
         var notes: [(id: String, text: String)] = []
         var i = 0
-        var inFence = false
+        var openingFence: (character: Character, length: Int)?
+        var inFence: Bool { openingFence != nil }
         var fenceList: (base: Int, content: Int)?
         var lists: [(base: Int, content: Int)] = []
         var followsBlank = false
         while i < lines.count {
             let blank = lines[i].trimmingCharacters(in: .whitespaces).isEmpty
             if inFence, let container = fenceList, !blank,
-               !literalListContains(lines[i], base: container.base, content: container.content, afterBlank: followsBlank) {
-                inFence = false; fenceList = nil
+               !MarkdownBlockParser.literalListContains(lines[i], base: container.base, content: container.content, afterBlank: followsBlank) {
+                openingFence = nil; fenceList = nil
             }
             if !inFence, !blank {
-                while let last = lists.last, !literalListContains(lines[i], base: last.base, content: last.content, afterBlank: followsBlank) { lists.removeLast() }
-                if let item = literalListIndent(lines, index: i) { lists.append(item) }
+                while let last = lists.last, !MarkdownBlockParser.literalListContains(lines[i], base: last.base, content: last.content, afterBlank: followsBlank) { lists.removeLast() }
+                if let item = MarkdownBlockParser.literalListIndent(lines, index: i) { lists.append(item) }
             }
             followsBlank = blank
             // A `[^id]: text` line inside a fenced code block is literal code, not
             // a definition — track the fence so it stays in the body.
-            if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") || (!inFence && literalListFenceStart(lines[i])) {
-                inFence.toggle()
+            if let candidate = MarkdownBlockParser.fence(lines[i].trimmingCharacters(in: .whitespaces)) ?? (!inFence ? MarkdownBlockParser.listFence(lines[i]) : nil) {
+                if let opening = openingFence {
+                    if MarkdownBlockParser.closesFence(lines[i], opening: opening) { openingFence = nil }
+                } else { openingFence = candidate }
                 fenceList = inFence ? lists.last : nil
                 bodyLines.append(lines[i])
                 i += 1
@@ -429,7 +438,7 @@ public enum DocumentRenderer {
             // indentation); 4+ spaces is an indented code block, left in the body.
             if !inFence, let (id, first) = parseFootnoteDefinition(dropLeadingSpaces(lines[i], max: 3)) {
                 // Preserve prose boundaries without splitting an enclosing list.
-                let inList = lists.last.map { indentWidth(lines[i]) >= $0.content } ?? false
+                let inList = lists.last.map { MarkdownBlockParser.indentWidth(lines[i]) >= $0.content } ?? false
                 if inList, let container = lists.last {
                     // End inline code context inside the item without a blank line,
                     // which would change continuation indentation or split the list.
@@ -468,7 +477,7 @@ public enum DocumentRenderer {
 
     /// Parses a CommonMark footnote definition line `[^id]: text`, returning the
     /// id and first-line text (nil if the line isn't a definition).
-    private static func parseFootnoteDefinition(_ line: String) -> (id: String, text: String)? {
+    static func parseFootnoteDefinition(_ line: String) -> (id: String, text: String)? {
         guard line.hasPrefix("[^") else { return nil }
         let idStart = line.index(line.startIndex, offsetBy: 2)
         var close = idStart
@@ -491,7 +500,7 @@ public enum DocumentRenderer {
 
     /// Drops up to `max` leading spaces (used to allow Markdown's 1-3 space block
     /// indentation before a footnote definition without consuming a 4-space code indent).
-    private static func dropLeadingSpaces(_ line: String, max: Int) -> String {
+    static func dropLeadingSpaces(_ line: String, max: Int) -> String {
         var count = 0
         var index = line.startIndex
         while index < line.endIndex, line[index] == " ", count < max {
@@ -543,7 +552,8 @@ public enum DocumentRenderer {
                 case .heading(_, let text): try scan(text)
                 case .paragraph(let text): try scan(text)
                 case .blockquote(let lines): try lines.forEach(scan)
-                case .list(_, _, let items):
+                case .list(let list):
+                    let items = list.items
                     if depth < maxListNesting { try items.forEach { try scanBlocks(parseBlocks(listItemText($0)), depth: depth + 1) } }
                     else { try items.forEach { try scan(listItemText($0)) } }
                 case .table(let rows): try rows.forEach { try $0.forEach(scan) }
@@ -641,26 +651,56 @@ public enum DocumentRenderer {
         var parts: [String] = []
         var markdown: [String] = []
         var remaining = 64 * 1024 * 1024
-        func flush() {
+        var outputRemaining = 64 * 1024 * 1024
+        func appendPart(_ text: String) throws {
+            let separator = parts.isEmpty ? 0 : 1
+            guard separator <= outputRemaining, text.utf8.count <= outputRemaining - separator else { throw PicoDocsError.fileCorrupted }
+            outputRemaining -= text.utf8.count + separator
+            parts.append(text)
+        }
+        func flush() throws {
             let rows = csvRows(fromMarkdown: markdown.joined(separator: "\n\n"))
-            if !rows.isEmpty { parts.append(rows.joined(separator: "\n")) }
+            if !rows.isEmpty { try appendPart(rows.joined(separator: "\n")) }
             markdown.removeAll(keepingCapacity: true)
         }
+        let namedSheets = result.sections.filter { $0.kind == .sheet }.count
         for section in result.sections where section.kind != .image {
-            if let rawCSV = section.metadata["csv"], !rawCSV.isEmpty {
-                flush()
-                parts.append(rawCSV)
+            let rawCSV = section.metadata["csv"] ?? ""
+            if !rawCSV.isEmpty ||
+               ([SectionKind.sheet, .table].contains(section.kind) && section.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                try flush()
+                if namedSheets > 1, section.kind == .sheet, let name = section.sheetName ?? section.metadata["sheetName"] ?? section.title {
+                    let separator = parts.isEmpty ? 0 : 1
+                    guard separator <= outputRemaining else { throw PicoDocsError.fileCorrupted }
+                    try appendPart(boundedCSVField(name, maximumBytes: outputRemaining - separator))
+                }
+                if !rawCSV.isEmpty { try appendPart(rawCSV) }
             } else { markdown.append(try preparedMarkdown(section, remaining: &remaining)) }
         }
-        flush()
+        try flush()
         return parts.joined(separator: "\n")
+    }
+
+    static func boundedCSVField(_ text: String, maximumBytes: Int) throws -> String {
+        var bytes = text.utf8.count
+        guard bytes <= maximumBytes else { throw PicoDocsError.fileCorrupted }
+        var quotes = 0, needsQuotes = false
+        for scalar in text.unicodeScalars {
+            if scalar == "\"" { quotes += 1 }
+            if scalar == "\"" || scalar == "," || scalar == "\n" || scalar == "\r" { needsQuotes = true }
+        }
+        let extra = needsQuotes ? quotes + 2 : 0
+        guard extra <= maximumBytes - bytes else { throw PicoDocsError.fileCorrupted }
+        bytes += extra
+        return csvField(text)
     }
 
     private static func csvRows(fromMarkdown markdown: String) -> [String] {
         var rows: [String] = []
-        let lines = markdown.components(separatedBy: "\n")
+        let lines = MarkdownBlockParser.normalizedLineEndings(markdown).components(separatedBy: "\n")
         var i = 0
-        var inCodeFence = false
+        var codeFence: (character: Character, length: Int)?
+        var inCodeFence: Bool { codeFence != nil }
         var fenceList: (base: Int, content: Int)?
         var lists: [(base: Int, content: Int)] = []
         var followsBlank = false
@@ -668,18 +708,21 @@ public enum DocumentRenderer {
         while i < lines.count {
             let line = lines[i].trimmingCharacters(in: .whitespaces)
             if inCodeFence, let container = fenceList, !line.isEmpty,
-               !literalListContains(lines[i], base: container.base, content: container.content, afterBlank: followsBlank) {
-                inCodeFence = false; fenceList = nil
+               !MarkdownBlockParser.literalListContains(lines[i], base: container.base, content: container.content, afterBlank: followsBlank) {
+                codeFence = nil; fenceList = nil
             }
             if !inCodeFence, !line.isEmpty {
                 if inNote, !lines[i].hasPrefix("    "), !lines[i].hasPrefix("\t") { inNote = false }
-                if literalFootnoteDefinition(lines[i]) { inNote = true }
-                while let last = lists.last, !literalListContains(lines[i], base: last.base, content: last.content, afterBlank: followsBlank) { lists.removeLast() }
-                if let item = literalListIndent(lines, index: i) { lists.append(item) }
+                if MarkdownBlockParser.literalFootnoteDefinition(lines[i]) { inNote = true }
+                while let last = lists.last, !MarkdownBlockParser.literalListContains(lines[i], base: last.base, content: last.content, afterBlank: followsBlank) { lists.removeLast() }
+                if let item = MarkdownBlockParser.literalListIndent(lines, index: i) { lists.append(item) }
             }
             followsBlank = line.isEmpty
-            if line.hasPrefix("```") || (!inCodeFence && literalListFenceStart(lines[i])) {
-                inCodeFence.toggle()
+            if let candidate = MarkdownBlockParser.fence(line) ?? (!inCodeFence ? MarkdownBlockParser.listFence(lines[i]) : nil) {
+                if let opening = codeFence {
+                    if MarkdownBlockParser.closesFence(line, opening: opening) { codeFence = nil }
+                    else { rows.append(csvField(restoredCodeText(lines[i]))) }
+                } else { codeFence = candidate }
                 fenceList = inCodeFence ? lists.last : nil
                 i += 1
                 continue
@@ -707,7 +750,7 @@ public enum DocumentRenderer {
             } else {
                 var paragraph = [line]
                 i += 1
-                if !literalBlockBoundary(lines[i - 1]).ends {
+                if !MarkdownBlockParser.literalBlockBoundary(lines[i - 1]).ends {
                     while i < lines.count {
                         let candidate = lines[i].trimmingCharacters(in: .whitespaces)
                         if inNote {
@@ -722,8 +765,8 @@ public enum DocumentRenderer {
                                 }
                             }
                         }
-                        if candidate.isEmpty || candidate.hasPrefix("```") || literalBlockBoundary(lines[i]).starts || confirmedBareMarker(lines, index: i) != nil { break }
-                        if let list = lists.last, indentWidth(lines[i]) < list.base + 2 { break }
+                        if candidate.isEmpty || MarkdownBlockParser.fence(candidate) != nil || MarkdownBlockParser.literalBlockBoundary(lines[i]).starts || MarkdownBlockParser.confirmedBareMarker(lines, index: i) != nil { break }
+                        if let list = lists.last, MarkdownBlockParser.indentWidth(lines[i]) < list.base + 2 { break }
                         if inNote, !lines[i].hasPrefix("    "), !lines[i].hasPrefix("\t") { break }
                         paragraph.append(candidate)
                         i += 1
@@ -737,301 +780,10 @@ public enum DocumentRenderer {
 
     // MARK: - Markdown block parsing
 
-    private enum Block {
-        case heading(Int, String)
-        case paragraph(String)
-        case code(String)
-        case blockquote([String])
-        case list(ordered: Bool, start: Int, items: [MarkdownList.Item])
-        case table([[String]])
-        case rule
-    }
-
-    private static func parseBlocks(_ markdown: String) -> [Block] {
-        let lines = markdown.components(separatedBy: "\n").map { line in
-            let whitespace = line.prefix { $0 == " " || $0 == "\t" }
-            return String(repeating: " ", count: indentWidth(line)) + line.dropFirst(whitespace.count)
-        }
-        var blocks: [Block] = []
-        var i = 0
-
-        func isBlank(_ s: String) -> Bool { s.trimmingCharacters(in: .whitespaces).isEmpty }
-
-        while i < lines.count {
-            let line = lines[i]
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-
-            if isBlank(line) || trimmed == MarkdownLiteral.listRestartBoundary { i += 1; continue }
-
-            if trimmed.hasPrefix("```") {
-                i += 1
-                var code: [String] = []
-                while i < lines.count, !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                    code.append(lines[i]); i += 1
-                }
-                if i < lines.count { i += 1 }   // closing fence
-                blocks.append(.code(code.joined(separator: "\n")))
-                continue
-            }
-
-            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-                blocks.append(.rule); i += 1; continue
-            }
-
-            if let heading = headingMatch(trimmed) {
-                blocks.append(.heading(heading.level, heading.text)); i += 1; continue
-            }
-
-            if trimmed.hasPrefix("|") {
-                var rows: [[String]] = []
-                var rowIndex = 0
-                while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                    let cells = parseTableRow(lines[i])
-                    // The header/body separator is conventionally the second row;
-                    // only drop an all-dash row there, so real data rows that
-                    // happen to be all dashes elsewhere are kept.
-                    if !(rowIndex == 1 && isTableSeparatorRow(cells)) { rows.append(cells) }
-                    rowIndex += 1
-                    i += 1
-                }
-                if !rows.isEmpty { blocks.append(.table(rows)) }
-                continue
-            }
-
-            if trimmed.hasPrefix(">") {
-                var inner: [String] = []
-                while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix(">") {
-                    var quoted = lines[i].trimmingCharacters(in: .whitespaces)
-                    quoted.removeFirst()                       // ">"
-                    if quoted.hasPrefix(" ") { quoted.removeFirst() }
-                    inner.append(quoted)
-                    i += 1
-                }
-                blocks.append(.blockquote(inner)); continue
-            }
-
-            let leadingBare = confirmedBareMarker(lines, index: i)
-            let confirmedBare = leadingBare != nil
-            if listMarker(trimmed) != nil || confirmedBare {
-                let ordered = (listMarker(trimmed) ?? leadingBare) == .ordered
-                let start = ordered ? listStart(trimmed) : 1
-                // Items sit at the list's own indent; a line indented two or more
-                // columns past it continues the current item. It keeps its
-                // indentation relative to the item's content column, so a nested
-                // list stays nested (the renderers parse each item's text again).
-                let base = indentWidth(line)
-                var contentColumn = base
-                var items: [MarkdownList.Item] = []
-                while i < lines.count {
-                    let raw = lines[i]
-                    let itemLine = raw.trimmingCharacters(in: .whitespaces)
-                    let indent = indentWidth(raw)
-                    if indent < base + 2, let marker = listMarker(itemLine), (marker == .ordered) == ordered {
-                        guard let item = MarkdownList.item(from: raw), !ordered || item.delimiter == items.first?.delimiter || items.isEmpty else { break }
-                        items.append(item)
-                        contentColumn = MarkdownList.contentIndent(of: raw) ?? indent + markerWidth(itemLine); i += 1
-                    } else if indent < base + 2, let marker = bareListMarker(itemLine), (marker == .ordered) == ordered {
-                        guard let item = MarkdownList.item(from: raw), !ordered || item.delimiter == items.first?.delimiter || items.isEmpty else { break }
-                        items.append(item)                  // an empty item inside the list
-                        contentColumn = MarkdownList.contentIndent(of: raw) ?? indent + itemLine.count + 1; i += 1
-                    } else if isBlank(raw), !items.isEmpty {
-                        var next = i + 1
-                        while next < lines.count, isBlank(lines[next]) { next += 1 }
-                        guard next < lines.count else { break }
-                        // Blank lines separate loose items as well as nested
-                        // blocks. Native restarts carry an explicit boundary.
-                        let resumesList = resumesLooseList(lines[next], after: items[items.count - 1], base: base)
-                        guard resumesList || indentWidth(lines[next]) >= contentColumn else { break }
-                        if !resumesList { items[items.count - 1].appendText("") }
-                        i = next
-                    } else if !isBlank(raw), !items.isEmpty, literalListContains(raw, base: base, content: contentColumn) {
-                        items[items.count - 1].appendText(String(raw.dropFirst(min(indent, contentColumn))))
-                        i += 1
-                    } else {
-                        break
-                    }
-                }
-                blocks.append(.list(ordered: ordered, start: start, items: items)); continue
-            }
-
-            // Paragraph: gather until a blank line or a structural line.
-            var paragraph: [String] = []
-            while i < lines.count {
-                let candidate = lines[i].trimmingCharacters(in: .whitespaces)
-                if isBlank(lines[i]) || candidate == MarkdownLiteral.listRestartBoundary || candidate.hasPrefix("```") || candidate.hasPrefix("|")
-                    || candidate.hasPrefix(">") || candidate == "---" || candidate == "***" || candidate == "___"
-                    || headingMatch(candidate) != nil || listMarker(candidate) != nil || confirmedBareMarker(lines, index: i) != nil {
-                    break
-                }
-                // Preserve canonical escapes until inline parsing has protected them.
-                paragraph.append(lines[i]); i += 1
-            }
-            if !paragraph.isEmpty {
-                blocks.append(.paragraph(paragraph.joined(separator: "\n")))
-            } else {
-                blocks.append(.paragraph(lines[i])); i += 1
-            }
-        }
-        return blocks
-    }
-
-    private static func headingMatch(_ line: String) -> (level: Int, text: String)? {
-        var level = 0
-        var index = line.startIndex
-        while index < line.endIndex, line[index] == "#", level < 6 {
-            level += 1; index = line.index(after: index)
-        }
-        guard level > 0, index < line.endIndex, line[index] == " " else { return nil }
-        let text = String(line[line.index(after: index)...]).trimmingCharacters(in: .whitespaces)
-        return (level, text)
-    }
-
-    private enum ListKind: Equatable { case ordered, unordered }
-
-    private static func isStructuralContinuation(_ line: String) -> Bool {
-        if line.hasPrefix("|") || headingMatch(line) != nil || line.hasPrefix(">") || line.hasPrefix("```") { return true }
-        if listMarker(line) != nil || bareListMarker(line) != nil { return true }
-        return ["---", "***", "___"].contains(line)
-    }
-
-    private static func listMarker(_ line: String) -> ListKind? {
-        guard let ordered = MarkdownList.isOrderedMarker(line), let item = MarkdownList.item(from: line),
-              !listItemText(item).isEmpty else { return nil }
-        return ordered ? .ordered : .unordered
-    }
-
-    /// Match the list parser's continuation grammar for both literal escaping and CSV.
-    static func literalListContains(_ line: String, base: Int, content: Int, afterBlank: Bool = false) -> Bool {
-        let indent = indentWidth(line)
-        return indent >= content || (!afterBlank && indent >= base + 2 && !isStructuralContinuation(line.trimmingCharacters(in: .whitespaces)))
-    }
-
-    private static func indentWidth(_ line: String) -> Int {
-        line.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $1 == "\t" ? $0 + (4 - $0 % 4) : $0 + 1 }
-    }
-
-    /// The width of a list line's marker and the space after it (`- ` → 2, `12. ` → 4).
-    private static func markerWidth(_ line: String) -> Int {
-        MarkdownList.contentIndent(of: line) ?? 0
-    }
-
-    /// A marker with no content (`-`, `2.`) — an empty list item. Only accepted
-    /// inside an open list, so a lone `-` or `2020.` line never starts one.
-    private static func bareListMarker(_ line: String) -> ListKind? {
-        if line == "-" || line == "*" || line == "+" { return .unordered }
-        let digits = line.prefix { $0.isASCII && $0.isNumber }
-        return (1...9).contains(digits.count) && [".", ")"].contains(String(line.dropFirst(digits.count))) ? .ordered : nil
-    }
-
-    /// The number an ordered list starts at (`5. x` → 5), 1 when it isn't a
-    /// CommonMark list number (one to nine ASCII digits).
-    private static func listStart(_ line: String) -> Int {
-        let digits = line.prefix { $0.isASCII && $0.isNumber }
-        return digits.count <= 9 ? Int(digits) ?? 1 : 1
-    }
-
-    private static func confirmedBareMarker(_ lines: [String], index: Int) -> ListKind? {
-        let line = lines[index], trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard let marker = bareListMarker(trimmed) else { return nil }
-        let next = index + 1, base = indentWidth(line), content = indentWidth(line) + trimmed.count + 1
-        let adjacent = next < lines.count && !lines[next].trimmingCharacters(in: .whitespaces).isEmpty
-            && (indentWidth(lines[next]) < base + 2 || indentWidth(lines[next]) >= content)
-            && (listMarker(lines[next].trimmingCharacters(in: .whitespaces)) ?? bareListMarker(lines[next].trimmingCharacters(in: .whitespaces))) == marker
-        var following = next
-        while following < lines.count, lines[following].trimmingCharacters(in: .whitespaces).isEmpty { following += 1 }
-        let looseSibling = following > next && following < lines.count
-            && MarkdownList.item(from: line).map { resumesLooseList(lines[following], after: $0, base: base) } == true
-        return adjacent || looseSibling || (following < lines.count && indentWidth(lines[following]) >= content) ? marker : nil
-    }
-
-    /// The same continuation rule confirms a leading empty item and resumes an
-    /// open list. Sequential ordered markers avoid turning `2020.\n\n1. item`
-    /// into a list; unordered siblings need no numbering evidence.
-    private static func resumesLooseList(_ line: String, after previous: MarkdownList.Item, base: Int) -> Bool {
-        guard indentWidth(line) < base + 2, let next = MarkdownList.item(from: line) else { return false }
-        if let number = previous.number {
-            return next.number == number + 1 && next.delimiter == previous.delimiter
-        }
-        return next.number == nil
-    }
-
-    static func literalListIndent(_ lines: [String], index: Int) -> (base: Int, content: Int)? {
-        let line = lines[index], trimmed = line.trimmingCharacters(in: .whitespaces)
-        let filled = listMarker(trimmed) != nil
-        guard filled || confirmedBareMarker(lines, index: index) != nil else { return nil }
-        let base = indentWidth(line)
-        return (base, base + (filled ? markerWidth(trimmed) : trimmed.count + 1))
-    }
-
-    /// The block parser removes an item's marker before parsing its first block.
-    static func literalListFenceStart(_ line: String) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard listMarker(trimmed) != nil else { return false }
-        return trimmed.dropFirst(markerWidth(trimmed)).trimmingCharacters(in: .whitespaces).hasPrefix("```")
-    }
-
-    /// Shared boundaries for verbatim-source escaping and rendered inline blocks.
-    static func literalFootnoteDefinition(_ line: String) -> Bool {
-        parseFootnoteDefinition(dropLeadingSpaces(line, max: 3)) != nil
-    }
-
-    static func literalBlockBoundary(_ line: String) -> (starts: Bool, ends: Bool) {
-        let isFootnote = literalFootnoteDefinition(line)
-        let line = line.trimmingCharacters(in: .whitespaces)
-        let single = headingMatch(line) != nil || line.hasPrefix("|") || line.hasPrefix(">")
-            || ["---", "***", "___", MarkdownLiteral.listRestartBoundary].contains(line)
-        return (single || listMarker(line) != nil || isFootnote, single)
-    }
-
-    private static func stripListMarker(_ line: String) -> String {
-        if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
-            return String(line.dropFirst(2))
-        }
-        if let dot = line.firstIndex(of: "."), line[line.startIndex..<dot].allSatisfy(\.isNumber) {
-            return String(line[line.index(after: dot)...]).trimmingCharacters(in: .whitespaces)
-        }
-        return line
-    }
-
-    private static func parseTableRow(_ line: String) -> [String] {
-        var cells = line.trimmingCharacters(in: .whitespaces)
-        if cells.hasPrefix("|") { cells.removeFirst() }
-        if cells.hasSuffix("|") {
-            // Strip the trailing delimiter only if the pipe is unescaped (an even
-            // number of backslashes precede it); otherwise it's a literal `\|` in
-            // a row that omits the closing delimiter.
-            let backslashes = cells.dropLast().reversed().prefix { $0 == "\\" }.count
-            if backslashes.isMultiple(of: 2) { cells.removeLast() }
-        }
-        // Split on unescaped pipes only; a backslash escapes the next character,
-        // so `\|` stays in the cell while `\\|` is a literal backslash + delimiter.
-        var result: [String] = []
-        var current = ""
-        var escaped = false
-        for character in cells {
-            if escaped {
-                current.append(character); escaped = false
-            } else if character == "\\" {
-                current.append(character); escaped = true
-            } else if character == "|" {
-                result.append(current.trimmingCharacters(in: .whitespaces)); current = ""
-            } else {
-                current.append(character)
-            }
-        }
-        result.append(current.trimmingCharacters(in: .whitespaces))
-        return result
-    }
-
-    private static func isTableSeparatorRow(_ cells: [String]) -> Bool {
-        guard !cells.isEmpty else { return false }
-        return cells.allSatisfy { cell in
-            let trimmed = cell.trimmingCharacters(in: .whitespaces)
-            return !trimmed.isEmpty && trimmed.allSatisfy { $0 == "-" || $0 == ":" }
-        }
-    }
-
-
+    private typealias Block = MarkdownBlock
+    private static func parseBlocks(_ markdown: String) -> [Block] { MarkdownBlockParser.parse(markdown, structureLists: false) }
+    private static func parseTableRow(_ line: String) -> [String] { MarkdownBlockParser.parseTableRow(line) }
+    private static func isTableSeparatorRow(_ cells: [String]) -> Bool { MarkdownBlockParser.isTableSeparatorRow(cells) }
     // MARK: - Inline rendering
 
     // Sentinels that bracket extracted spans; private-use scalars that won't
@@ -1375,6 +1127,8 @@ public enum DocumentRenderer {
         return output + ns.substring(from: offset)
     }
 
+    private static let escapableMarkdownScalars = Set(#"\`*_{}[]<>()#+-.!|&~"#.unicodeScalars)
+
     static func boundedProtectEscapes(_ text: String, maximumBytes: Int = 64 * 1024 * 1024) throws -> String {
         let scalars = text.unicodeScalars
         var projected = 0, index = scalars.startIndex
@@ -1383,7 +1137,7 @@ public enum DocumentRenderer {
             let bytes: Int
             if scalar == "\u{E006}" { bytes = 6; index = next }
             else if scalar == "\\", next < scalars.endIndex,
-                    #"\`*_{}[]<>()#+-.!|&~"#.unicodeScalars.contains(scalars[next]) {
+                    escapableMarkdownScalars.contains(scalars[next]) {
                 bytes = 6; index = scalars.index(after: next)
             } else {
                 let value = scalar.value
@@ -1404,7 +1158,7 @@ public enum DocumentRenderer {
             if scalar == "\u{E006}" {
                 output += "\u{E006}\u{E006}"; index = next
             } else if scalar == "\\", next < scalars.endIndex,
-                      #"\`*_{}[]<>()#+-.!|&~"#.unicodeScalars.contains(scalars[next]) {
+                      escapableMarkdownScalars.contains(scalars[next]) {
                 output.unicodeScalars.append("\u{E006}")
                 output.unicodeScalars.append(UnicodeScalar(0xE100 + scalars[next].value)!)
                 index = scalars.index(after: next)

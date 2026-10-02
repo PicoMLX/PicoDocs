@@ -45,7 +45,7 @@ public struct CSVConverter: DocumentConverter {
     /// Serializes rows to canonical RFC 4180 CSV (quoting fields that contain a
     /// comma, quote, or newline), preserving cell values exactly.
     static func serializeCSV(_ rows: [[String]]) -> String {
-        rows.map { row in row.map(csvField).joined(separator: ",") }.joined(separator: "\n")
+        rows.map { row in row == [""] ? "\"\"" : row.map(csvField).joined(separator: ",") }.joined(separator: "\n")
     }
 
     private static func csvField(_ value: String) -> String {
@@ -64,8 +64,16 @@ public struct CSVConverter: DocumentConverter {
     // MARK: - CSV parsing (RFC 4180)
 
     static func parseCSV(_ text: String) -> [[String]] {
-        var rows: [[String]] = []
-        var row: [String] = []
+        var rows: [[String]] = [], row: [String] = []
+        forEachField(text) { field, endsRow in
+            row.append(field)
+            if endsRow { rows.append(row); row = [] }
+        }
+        return rows
+    }
+
+    /// Visit one decoded field at a time so writers can validate before retaining a grid.
+    static func forEachField(_ text: String, consume: (String, Bool) throws -> Void) rethrows {
         var field = ""
         var inQuotes = false
         // Whether the current record has begun a field (content, a quote, or a
@@ -78,8 +86,8 @@ public struct CSVConverter: DocumentConverter {
         let scalars = text.unicodeScalars
         var index = scalars.startIndex
 
-        func endField() { row.append(field); field = "" }
-        func endRow() { endField(); rows.append(row); row = []; fieldStarted = false }
+        func endField(_ endsRow: Bool = false) throws { try consume(field, endsRow); field = "" }
+        func endRow() throws { try endField(true); fieldStarted = false }
 
         while index < scalars.endIndex {
             let scalar = scalars[index]
@@ -107,15 +115,15 @@ public struct CSVConverter: DocumentConverter {
                 index = scalars.index(after: index)
             case ",":
                 fieldStarted = true
-                endField()
+                try endField()
                 index = scalars.index(after: index)
             case "\r":
-                endRow()
+                try endRow()
                 let next = scalars.index(after: index)
                 index = (next < scalars.endIndex && scalars[next] == "\n")   // CRLF
                     ? scalars.index(after: next) : next
             case "\n":
-                endRow()
+                try endRow()
                 index = scalars.index(after: index)
             default:
                 fieldStarted = true
@@ -125,10 +133,9 @@ public struct CSVConverter: DocumentConverter {
         }
         // Flush the final record, but skip a phantom row from a trailing newline
         // (nothing started since the last row end).
-        if fieldStarted || !field.isEmpty || !row.isEmpty {
-            endRow()
+        if fieldStarted || !field.isEmpty {
+            try endRow()
         }
-        return rows
     }
 
     // MARK: - Markdown table
