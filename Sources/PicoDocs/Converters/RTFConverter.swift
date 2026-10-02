@@ -345,7 +345,7 @@ public struct RTFConverter: DocumentConverter {
                             // undecodable) and let flushBytes decode whole characters.
                             // Single-byte code pages decode each byte on its own.
                             if isDBCS {
-                                if !ignore { pendingBytes.append(byte) }
+                                if !ignore || instruction { pendingBytes.append(byte) }
                             } else {
                                 appendText(Self.decodeByte(byte, encoding: ansiEncoding))
                             }
