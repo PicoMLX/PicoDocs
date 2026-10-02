@@ -68,7 +68,7 @@ enum IWATable {
         let bodyObjects: [IWAArchive.Object]
         let streamObjects: [[IWAArchive.Object]]
         let tableMarkdown: [UInt64: String]
-        init(documentStream: [UInt8]?, streams: [[UInt8]], objectBudget: IWAObjectBudget) throws {
+        init(documentStream: [UInt8]?, streams: [[UInt8]], objectBudget: IWAObjectBudget, outputBudget: IWAOutputBudget? = nil) throws {
             guard objectBudget.reserve(streams.count * 32) else { try objectBudget.check(); throw PicoDocsError.fileCorrupted }
             let documentIndex = documentStream.flatMap { streams.firstIndex(of: $0) }
             var streamObjects = Array(repeating: [IWAArchive.Object](), count: streams.count)
@@ -80,7 +80,7 @@ enum IWATable {
             try objectBudget.check()
             self.bodyObjects = bodyObjects
             self.streamObjects = streamObjects
-            tableMarkdown = reconstructTables(objects, objectBudget: objectBudget)
+            tableMarkdown = reconstructTables(objects, budget: outputBudget, objectBudget: objectBudget)
             try objectBudget.check()
         }
     }

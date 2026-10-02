@@ -85,10 +85,11 @@ public struct NumbersConverter: DocumentConverter {
 
         let objectBudget = IWAObjectBudget(bytes: objectBudgetBytes)
         let budget = IWAOutputBudget(bytes: outputBudgetBytes, cells: outputBudgetCells)
-        let sheets = Self.sheets(in: IWAArchive.objects(in: documentStream, objectBudget: objectBudget), budget: budget)
+        let prepared = try IWATable.PreparedDocument(documentStream: documentStream, streams: streams, objectBudget: objectBudget, outputBudget: budget)
+        let sheets = Self.sheets(in: prepared.bodyObjects, budget: budget)
         try objectBudget.check()
         try budget.check()
-        let attribution = IWATable.attributedTables(rootIDs: sheets.map(\.id), in: streams, excludingSubgraphs: [], budget: budget, objectBudget: objectBudget, drawableOrder: true)
+        let attribution = IWATable.attributedTables(rootIDs: sheets.map(\.id), in: streams, excludingSubgraphs: [], budget: budget, objectBudget: objectBudget, drawableOrder: true, prepared: prepared)
         try objectBudget.check()
         try budget.check()
 
