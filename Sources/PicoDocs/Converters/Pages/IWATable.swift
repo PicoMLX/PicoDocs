@@ -66,15 +66,20 @@ enum IWATable {
     struct PreparedDocument {
         let objects: [UInt64: IWAArchive.Object]
         let bodyObjects: [IWAArchive.Object]
+        let streamObjects: [[IWAArchive.Object]]
         let tableMarkdown: [UInt64: String]
-        init(documentStream: [UInt8], streams: [[UInt8]], objectBudget: IWAObjectBudget) throws {
-            let documentIndex = streams.firstIndex(of: documentStream)
+        init(documentStream: [UInt8]?, streams: [[UInt8]], objectBudget: IWAObjectBudget) throws {
+            guard objectBudget.reserve(streams.count * 32) else { try objectBudget.check(); throw PicoDocsError.fileCorrupted }
+            let documentIndex = documentStream.flatMap { streams.firstIndex(of: $0) }
+            var streamObjects = Array(repeating: [IWAArchive.Object](), count: streams.count)
             var bodyObjects: [IWAArchive.Object] = []
             objects = buildObjects(streams, objectBudget: objectBudget) { index, decoded in
+                streamObjects[index] = decoded
                 if index == documentIndex { bodyObjects = decoded }
             }
             try objectBudget.check()
             self.bodyObjects = bodyObjects
+            self.streamObjects = streamObjects
             tableMarkdown = reconstructTables(objects, objectBudget: objectBudget)
             try objectBudget.check()
         }
@@ -99,17 +104,17 @@ enum IWATable {
     /// attributed to the first slide, in the given order, that reaches it. Lets
     /// Keynote place each table with its slide instead of appending all at the end.
     static func tablesBySlide(slideIDs: [UInt64], in streams: [[UInt8]],
-                              excludingSubgraphs blocked: Set<UInt64>, objectBudget: IWAObjectBudget? = nil) -> [UInt64: [String]] {
-        attributedTables(rootIDs: slideIDs, in: streams, excludingSubgraphs: blocked, objectBudget: objectBudget).byRoot
+                              excludingSubgraphs blocked: Set<UInt64>, objectBudget: IWAObjectBudget? = nil, prepared: PreparedDocument? = nil) -> [UInt64: [String]] {
+        attributedTables(rootIDs: slideIDs, in: streams, excludingSubgraphs: blocked, objectBudget: objectBudget, prepared: prepared).byRoot
     }
 
     /// Preserve unclaimed tile identities as well as attributed ones. Identical
     /// rendered tables can belong to different physical table objects.
     static func attributedTables(rootIDs slideIDs: [UInt64], in streams: [[UInt8]],
-                                 excludingSubgraphs blocked: Set<UInt64>, budget: IWAOutputBudget? = nil, objectBudget: IWAObjectBudget? = nil, drawableOrder: Bool = false) -> (byRoot: [UInt64: [String]], unclaimed: [String]) {
+                                 excludingSubgraphs blocked: Set<UInt64>, budget: IWAOutputBudget? = nil, objectBudget: IWAObjectBudget? = nil, drawableOrder: Bool = false, prepared: PreparedDocument? = nil) -> (byRoot: [UInt64: [String]], unclaimed: [String]) {
         let parseBudget = objectBudget ?? IWAObjectBudget()
-        let objects = buildObjects(streams, objectBudget: parseBudget)
-        let tableMarkdown = reconstructTables(objects, budget: budget, objectBudget: parseBudget)
+        let objects = prepared?.objects ?? buildObjects(streams, objectBudget: parseBudget)
+        let tableMarkdown = prepared?.tableMarkdown ?? reconstructTables(objects, budget: budget, objectBudget: parseBudget)
         guard !Task.isCancelled, budget?.active != false, !tableMarkdown.isEmpty else { return ([:], []) }
         let tiles = Set(tableMarkdown.keys)
 
