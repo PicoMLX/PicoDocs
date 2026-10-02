@@ -1569,7 +1569,8 @@ public struct PowerPointConverter: DocumentConverter {
             let end = reference.firstIndex(where: { $0 == "?" || $0 == "#" }) ?? reference.endIndex
             // RFC 3986 unreserved escapes are equivalent to literal bytes.
             // Decode them before dot-segment removal, retaining reserved escapes
-            // such as %2F and all encoded non-ASCII octets.
+            // such as %2F. Literal UTF-8 bytes use the same encoded identity as
+            // URL serialization, without decoding package-path octets.
             let bytes = Array(reference[..<end].utf8)
             var decoded: [UInt8] = []
             decoded.reserveCapacity(bytes.count)
@@ -1582,12 +1583,19 @@ public struct PowerPointConverter: DocumentConverter {
                 }
             }
             var index = 0
+            let hexDigits = Array("0123456789ABCDEF".utf8)
             while index < bytes.count {
                 if bytes[index] == 37, index + 2 < bytes.count, let high = hex(bytes[index + 1]), let low = hex(bytes[index + 2]) {
                     let byte = high * 16 + low
                     if (65...90).contains(byte) || (97...122).contains(byte) || (48...57).contains(byte) || [45, 46, 95, 126].contains(byte) {
                         decoded.append(byte); index += 3; continue
                     }
+                }
+                if bytes[index] >= 128 {
+                    decoded.append(37)
+                    decoded.append(hexDigits[Int(bytes[index] >> 4)])
+                    decoded.append(hexDigits[Int(bytes[index] & 15)])
+                    index += 1; continue
                 }
                 decoded.append(bytes[index]); index += 1
             }
