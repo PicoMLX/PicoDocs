@@ -904,7 +904,7 @@ public struct PowerPointConverter: DocumentConverter {
                     for element in container.children().array() {
                         if Task.isCancelled { return }
                         switch element.tagName().lowercased() {
-                        case "p:sp":
+                        case "p:sp", "p:pic", "p:graphicframe":
                             guard let ph = PowerPointConverter.placeholder(of: element) else { continue }
                             guard let id = PowerPointConverter.placeholderIndex(ph) else { continue }
                             let kind = PowerPointConverter.effectivePlaceholderType(ph)
@@ -1630,7 +1630,7 @@ public struct PowerPointConverter: DocumentConverter {
                 reference = "picodocs-embedded/\(nextReference)/" + filename
             }
             let emitted = PowerPointConverter.linkDestination(reference)
-            let mime = PowerPointConverter.contentType(path, archive: archive) ?? PowerPointConverter.mimeType(forExtension: (filename as NSString).pathExtension)
+            let mime = PowerPointConverter.contentType(path, archive: archive) ?? PowerPointConverter.mimeType(forExtension: PowerPointConverter.partExtension(filename))
             guard archive.failure == nil else { return nil }
             let labelBytes = filename.utf8.count + filename.unicodeScalars.filter { #"\`*_{}[]<>&"#.unicodeScalars.contains($0) }.count
             let carrierBytes = filename.utf8.count + path.utf8.count + labelBytes + 2 * emitted.utf8.count
@@ -1677,7 +1677,14 @@ public struct PowerPointConverter: DocumentConverter {
             }
             archive.contentTypes = types
         }
-        return archive.contentTypes?["/" + PowerPointPackage.canonicalPartPath(path)] ?? archive.contentTypes?["." + (path as NSString).pathExtension.lowercased()]
+        return archive.contentTypes?["/" + PowerPointPackage.canonicalPartPath(path)] ?? archive.contentTypes?["." + partExtension(path)]
+    }
+
+    /// OPC takes the suffix after the final dot, including a leading dot in the
+    /// final URI segment; filesystem hidden-file conventions do not apply.
+    static func partExtension(_ path: String) -> String {
+        guard let segment = path.split(separator: "/").last, let dot = segment.lastIndex(of: ".") else { return "" }
+        return String(segment[segment.index(after: dot)...]).lowercased()
     }
 
     private static let mediaTypePattern: NSRegularExpression = {

@@ -33,6 +33,7 @@ struct ProtobufReader {
     private let objectBudget: IWAObjectBudget?
     private var pos: Int
     private let end: Int
+    private(set) var malformed = false
 
     init(_ bytes: [UInt8], objectBudget: IWAObjectBudget? = nil) {
         self.objectBudget = objectBudget
@@ -43,6 +44,13 @@ struct ProtobufReader {
 
     /// Returns the next field, or nil at end of message / on malformed input.
     mutating func next() -> Field? {
+        guard !Task.isCancelled, objectBudget?.active != false, pos < end else { return nil }
+        let field = readNextField()
+        if field == nil, !Task.isCancelled, objectBudget?.active != false { malformed = true }
+        return field
+    }
+
+    private mutating func readNextField() -> Field? {
         guard !Task.isCancelled, objectBudget?.active != false, pos < end, let tag = readVarint() else { return nil }
         let number = Int(tag >> 3)
         let wireType = Int(tag & 0x07)
