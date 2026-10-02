@@ -259,12 +259,12 @@ public struct PowerPointConverter: DocumentConverter {
             guard !Task.isCancelled else { return }
             for shape in selectedChildren(in: container, visibleOnly: true) {
                 if Task.isCancelled { return }
+                if let type = placeholderType(of: shape, cache: context.styles), skippedPlaceholders.contains(type) { continue }
                 let click = shapeClick(shape)
                 let link = click == nil ? inheritedLink : hyperlink(click, context: context)
                 if shape.tagName().lowercased() == "p:grpsp" {
                     appendNotes(in: shape, inheritedLink: link)
                 } else if shape.tagName().lowercased() == "p:sp" {
-                    if let type = placeholderType(of: shape, cache: context.styles), skippedPlaceholders.contains(type) { continue }
                     context.defaultLink = link
                     if let image = pictureMarkdown(shape, context: &context) { context.appendBlock(image, to: &paragraphs) }
                     context.runDefaults = inheritedRunDefaults(for: shape, context: context)
@@ -592,12 +592,12 @@ public struct PowerPointConverter: DocumentConverter {
             if context.shapeBudget?.admit(context.archive) == false { return }
             if inheritedOnly, placeholder(of: shape, cache: context.styles) != nil { continue }
             if isHidden(shape, cache: context.styles) { continue }
+            let type = placeholderType(of: shape, cache: context.styles)
+            if let type, skippedPlaceholders.contains(type) { continue }
             let click = shapeClick(shape, cache: context.styles)
             context.defaultLink = click == nil ? inheritedLink : hyperlink(click, context: context)
             switch shape.tagName().lowercased() {
             case "p:sp":
-                let type = placeholderType(of: shape, cache: context.styles)
-                if let type, skippedPlaceholders.contains(type) { continue }
                 if let image = pictureMarkdown(shape, context: &context) { context.appendBlock(image, to: &blocks) }
                 guard let body = context.styles.child(of: shape, named: "p:txbody") else { continue }
                 context.runDefaults = inheritedRunDefaults(for: shape, context: context)
@@ -1720,10 +1720,10 @@ public struct PowerPointConverter: DocumentConverter {
             guard element.tagName().lowercased() == "relationship", element.children().isEmpty() else {
                 archive.fail(PicoDocsError.fileCorrupted); return [:]
             }
-            guard let id = try? element.attr("Id"), let rawTarget = try? element.attr("Target"),
-                  !id.isEmpty, !rawTarget.isEmpty, let rawType = try? element.attr("Type"), !rawType.isEmpty else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
-            let target = collapsedXMLURI(rawTarget), type = collapsedXMLURI(rawType)
-            guard !target.isEmpty, !type.isEmpty, map[id] == nil else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
+            guard let rawID = try? element.attr("Id"), let rawTarget = try? element.attr("Target"),
+                  !rawTarget.isEmpty, let rawType = try? element.attr("Type"), !rawType.isEmpty else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
+            let id = collapsedXMLURI(rawID), target = collapsedXMLURI(rawTarget), type = collapsedXMLURI(rawType)
+            guard !id.isEmpty, !target.isEmpty, !type.isEmpty, map[id] == nil else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
             let mode = (try? element.attr("TargetMode")) ?? ""
             guard !element.hasAttr("TargetMode") || ["Internal", "External"].contains(mode) else { archive.fail(PicoDocsError.fileCorrupted); return [:] }
             // Bound allocation in this validation and subsequent path resolution.
