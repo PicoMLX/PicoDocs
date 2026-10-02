@@ -13,16 +13,21 @@ struct OfficeNinthStackReviewTests {
         let inlines = MarkdownInlineParser.parse(text)
         #expect(inlines == [.code("before ``` after")])
     }
-    @Test(arguments: [#"[foo]( "title")"#, #"[foo]( 'title')"#, #"[foo]( (title))"#])
-    func titleOnlyLinksHaveEmptyDestinations(_ markdown: String) throws {
-        #expect(MarkdownInlineParser.parse(markdown) == [.link(label: [.text("foo")], destination: "")])
+    @Test(arguments: ["\"title\"", "'title'", "(title)"])
+    func titleLikeDestinationsRetainCommonMarkPrecedence(_ destination: String) throws {
+        let markdown = "[foo]( " + destination + ")"
+        #expect(MarkdownInlineParser.parse(markdown) == [.link(label: [.text("foo")], destination: destination)])
+        let independent = try AttributedString(markdown: markdown)
+        #expect(independent.runs.first?.link?.relativeString.removingPercentEncoding == destination)
         for format in [ExportableFileType.docx, .pptx] {
             let data = try PicoDocsEngine.write(markdown: markdown, to: format)
             let archive = try #require(Archive(data: data, accessMode: .read))
             for entry in archive where entry.path.hasSuffix(".rels") {
                 var bytes = Data()
                 _ = try archive.extract(entry) { bytes.append($0) }
-                #expect(!String(decoding: bytes, as: UTF8.self).contains("/hyperlink"))
+                if entry.path.contains("word/_rels/document.xml") || entry.path.contains("ppt/slides/_rels/") {
+                    #expect(String(decoding: bytes, as: UTF8.self).contains("/hyperlink"))
+                }
             }
         }
     }

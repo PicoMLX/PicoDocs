@@ -296,16 +296,13 @@ enum MarkdownInlineParser {
 
         var cursor = parenOpen + 1
         while cursor < chars.count, chars[cursor].isWhitespace { cursor += 1 }
-        let leadingTitle = cursor > parenOpen + 1 && cursor < chars.count && ["\"", "'", "("].contains(chars[cursor])
         let destStart = cursor
         var dest = ""
-        // Leading whitespace distinguishes an omitted destination followed
-        // by a title from a quoted/parenthesized bare destination.
-        if !leadingTitle, cursor < chars.count, chars[cursor] == "<" {
+        if cursor < chars.count, chars[cursor] == "<" {
             guard let gt = nextAngle[cursor] else { return nil }
             dest = unescape(String(chars[(cursor + 1)..<gt]))
             cursor = gt + 1
-        } else if !leadingTitle {
+        } else {
             // Separate the bare URL from its optional title. Balanced URL
             // parentheses are paired and checked for whitespace by the initial scan.
             while cursor < chars.count, !chars[cursor].isWhitespace, chars[cursor] != ")" {
@@ -320,7 +317,7 @@ enum MarkdownInlineParser {
         let afterDestination = cursor
         while cursor < chars.count, chars[cursor].isWhitespace { cursor += 1 }
         if cursor < chars.count, chars[cursor] != ")" {
-            guard (leadingTitle || cursor > afterDestination), ["\"", "'", "("].contains(chars[cursor]) else { return nil }
+            guard cursor > afterDestination, ["\"", "'", "("].contains(chars[cursor]) else { return nil }
             let delimiter: Character = chars[cursor] == "(" ? ")" : chars[cursor]
             cursor += 1
             while cursor < chars.count, chars[cursor] != delimiter {
