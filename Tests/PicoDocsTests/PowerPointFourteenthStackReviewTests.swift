@@ -70,7 +70,12 @@ struct PowerPointFourteenthStackReviewTests {
     }
 
     @Test func denseLinksAndCodeSpansRetainRenderingAndSafety() throws {
-        let links = (0..<2_500).map { "[label" + String($0) + "](https://example.com/" + String($0) + ")" }
+        let links = (0..<2_500).map { index -> String in
+            let number = String(index)
+            let label = "[label" + number + "]"
+            let destination = "(https://example.com/" + number + ")"
+            return label + destination
+        }
         let codes = (0..<2_500).map { "`code" + String($0) + "`" }
         let literal = "\u{E002}0\u{E003} \u{E000}0\u{E001}"
         let markdown = (links + codes).joined(separator: " ") + " [literal `code`](https://example.com) [unsafe](javascript:alert) " + literal
