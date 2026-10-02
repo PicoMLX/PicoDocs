@@ -12,7 +12,7 @@
 //  object graph (`MessageInfo.object_references`):
 //
 //    • TST.TableModelArchive (type 6001 / 6316) — the table itself; its
-//      references point at exactly one Tile and the DataLists backing its
+//      references point at one or more Tiles and the DataLists backing its
 //      columns (one per aspect: strings, formats, styles, …).
 //    • TST.Tile (type 6002) — the cell grid: `repeated TileRowInfo` (field 5),
 //      each row carrying a packed cell buffer (field 6) and a uint16 offset
@@ -67,7 +67,8 @@ enum IWATable {
     /// tables at their attachment points. Best-effort: a document with no tables
     /// yields `[]`.
     static func markdownTables(from streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil) -> [String] {
-        let byTile = reconstructTables(buildObjects(streams, objectBudget: objectBudget))
+        let parseBudget = objectBudget ?? IWAObjectBudget()
+        let byTile = reconstructTables(buildObjects(streams, objectBudget: parseBudget), objectBudget: parseBudget)
         return byTile.keys.sorted().compactMap { byTile[$0] }
     }
 
@@ -86,53 +87,84 @@ enum IWATable {
     /// Preserve unclaimed tile identities as well as attributed ones. Identical
     /// rendered tables can belong to different physical table objects.
     static func attributedTables(rootIDs slideIDs: [UInt64], in streams: [[UInt8]],
-                                 excludingSubgraphs blocked: Set<UInt64>, budget: IWAOutputBudget? = nil, objectBudget: IWAObjectBudget? = nil) -> (byRoot: [UInt64: [String]], unclaimed: [String]) {
-        let objects = buildObjects(streams, objectBudget: objectBudget)
-        let tableMarkdown = reconstructTables(objects, budget: budget)
+                                 excludingSubgraphs blocked: Set<UInt64>, budget: IWAOutputBudget? = nil, objectBudget: IWAObjectBudget? = nil, drawableOrder: Bool = false) -> (byRoot: [UInt64: [String]], unclaimed: [String]) {
+        let parseBudget = objectBudget ?? IWAObjectBudget()
+        let objects = buildObjects(streams, objectBudget: parseBudget)
+        let tableMarkdown = reconstructTables(objects, budget: budget, objectBudget: parseBudget)
         guard !Task.isCancelled, budget?.active != false, !tableMarkdown.isEmpty else { return ([:], []) }
         let tiles = Set(tableMarkdown.keys)
 
         var result: [UInt64: [String]] = [:]
         var claimed = Set<UInt64>()
         for slideID in slideIDs {
-            guard !Task.isCancelled, budget?.active != false else { return ([:], []) }
+            if claimed.count == tiles.count { break }
+            guard parseBudget.active, budget?.active != false else { return ([:], []) }
             var markdowns: [String] = []
-            for tile in reachableTiles(from: slideID, objects: objects, tiles: tiles, blocked: blocked)
+            for tile in reachableTiles(from: slideID, objects: objects, tiles: tiles, blocked: blocked, objectBudget: parseBudget, drawableOrder: drawableOrder)
             where claimed.insert(tile).inserted {
                 if let markdown = tableMarkdown[tile] { markdowns.append(markdown) }
             }
+            guard parseBudget.active else { return ([:], []) }
             if !markdowns.isEmpty { result[slideID] = markdowns }
         }
         return (result, tableMarkdown.keys.sorted().filter { !claimed.contains($0) }.compactMap { tableMarkdown[$0] })
     }
 
-    /// Bounded breadth-first walk from a root object collecting every
-    /// reconstructed table's tile reachable from it (a slide → its drawables →
-    /// TableInfo → model → tile), in discovery order. References in `blocked`
-    /// (master/template objects) are not traversed, so a slide can't reach its
-    /// template's tables. Depth-bounded so the walk stays within a slide's own
-    /// content subgraph rather than fanning out through shared objects.
+    /// Walk each Numbers drawable's containment subtree before the next one.
+    /// Other iWork callers retain breadth-first discovery. Both routes share a
+    /// cumulative edge/node allowance across roots and admit queued work first.
     static func reachableTiles(from root: UInt64, objects: [UInt64: IWAArchive.Object],
-                                       tiles: Set<UInt64>, blocked: Set<UInt64>) -> [UInt64] {
-        var frontier = [root]
-        var visited: Set<UInt64> = [root]
-        var found: [UInt64] = []
-        var foundIDs: Set<UInt64> = []
-        for _ in 0 ..< 12 {
-            var next: [UInt64] = []
-            for id in frontier {
-                guard !Task.isCancelled else { return [] }
-                guard let object = objects[id] else { continue }
-                for reference in object.references where !blocked.contains(reference) {
-                    guard !Task.isCancelled else { return [] }
-                    if tiles.contains(reference), foundIDs.insert(reference).inserted { found.append(reference) }
-                    if visited.insert(reference).inserted { next.append(reference) }
+                               tiles: Set<UInt64>, blocked: Set<UInt64>, objectBudget: IWAObjectBudget? = nil,
+                               drawableOrder: Bool = false) -> [UInt64] {
+        let work = objectBudget ?? IWAObjectBudget()
+        var found: [UInt64] = [], foundIDs: Set<UInt64> = []
+        if drawableOrder {
+            var pending: [(id: UInt64, depth: Int)] = [(root, 0)]
+            var shallowest: [UInt64: Int] = [:]
+            while let item = pending.popLast() {
+                guard work.reserveVisit() else { return [] }
+                if let depth = shallowest[item.id], depth <= item.depth { continue }
+                shallowest[item.id] = item.depth
+                if tiles.contains(item.id), foundIDs.insert(item.id).inserted { found.append(item.id) }
+                guard item.depth < 12, let object = objects[item.id] else { continue }
+                let ordered = orderedDrawables(object, objectBudget: work) ?? object.references
+                for id in ordered.reversed() {
+                    guard work.reserveVisit() else { return [] }
+                    if !blocked.contains(id) { pending.append((id, item.depth + 1)) }
                 }
             }
-            if next.isEmpty { break }
-            frontier = next
+        } else {
+            var frontier = [root], visited: Set<UInt64> = [root]
+            for _ in 0..<12 {
+                var next: [UInt64] = []
+                for id in frontier {
+                    guard work.reserveVisit() else { return [] }
+                    guard let object = objects[id] else { continue }
+                    for reference in object.references {
+                        guard work.reserveVisit() else { return [] }
+                        if blocked.contains(reference) { continue }
+                        if tiles.contains(reference), foundIDs.insert(reference).inserted { found.append(reference) }
+                        if visited.insert(reference).inserted { next.append(reference) }
+                    }
+                }
+                if next.isEmpty { break }
+                frontier = next
+            }
         }
-        return found
+        return work.active ? found : []
+    }
+
+    private static func orderedDrawables(_ object: IWAArchive.Object, objectBudget: IWAObjectBudget) -> [UInt64]? {
+        guard object.type == 2 || object.type == 3008 else { return nil } // TN.Sheet / TSD.Group
+        var reader = ProtobufReader(object.payload, objectBudget: objectBudget), ids: [UInt64] = []
+        while let field = reader.next() {
+            if field.number == 2, case .length(let bytes) = field.value,
+               let id = referencedID(in: bytes, objectBudget: objectBudget) {
+                guard objectBudget.reserve(16) else { return [] }
+                ids.append(id)
+            }
+        }
+        return ids.isEmpty ? nil : ids
     }
 
     /// Splits the document body into ordered text/table blocks: body text is
@@ -147,7 +179,8 @@ enum IWATable {
         try Task.checkCancellation()
         let objects = buildObjects(streams, objectBudget: objectBudget)
         try objectBudget?.check()
-        let tableMarkdown = reconstructTables(objects)
+        let tableMarkdown = reconstructTables(objects, objectBudget: objectBudget)
+        try objectBudget?.check()
         try Task.checkCancellation()
         let tiles = Set(tableMarkdown.keys)
 
@@ -988,10 +1021,12 @@ enum IWATable {
     /// rich-text list (`f1==8`, via RichTextPayload → Storage) and/or an
     /// inline-text list (`f1==1`, text stored directly in the entry). Cells choose
     /// between them by value type; dates live in the cell record itself.
-    private static func reconstructTables(_ objects: [UInt64: IWAArchive.Object], budget: IWAOutputBudget? = nil) -> [UInt64: String] {
+    private static func reconstructTables(_ objects: [UInt64: IWAArchive.Object], budget: IWAOutputBudget? = nil, objectBudget: IWAObjectBudget? = nil) -> [UInt64: String] {
+        let copies = objectBudget ?? IWAObjectBudget()
+        let output = budget ?? IWAOutputBudget()
         var tileIDs: Set<UInt64> = []
         for object in objects.values {
-            guard !Task.isCancelled, budget?.active != false else { return [:] }
+            guard copies.active, output.active else { return [:] }
             if object.type == tileType { tileIDs.insert(object.identifier) }
         }
         guard !tileIDs.isEmpty else { return [:] }
@@ -1000,33 +1035,78 @@ enum IWATable {
         var richMaps: [UInt64: [UInt32: String]] = [:]
         var inlineMaps: [UInt64: [UInt32: String]] = [:]
         for object in objects.values where object.type == dataListType {
-            guard !Task.isCancelled, budget?.active != false else { return [:] }
+            guard copies.active, output.active else { return [:] }
             // Dispatch on list_type (field 1) so each datalist's entries are fully
             // parsed at most once — rich and inline text are mutually exclusive.
             var listType: UInt64?
-            var reader = ProtobufReader(object.payload)
+            var reader = ProtobufReader(object.payload, objectBudget: copies)
             while let field = reader.next() {
                 if field.number == 1, case .varint(let type) = field.value { listType = type; break }
             }
             if listType == stringListType {
-                if let map = richTextMap(object, objects: objects, cache: &storageCache, budget: budget) { richMaps[object.identifier] = map }
+                if let map = richTextMap(object, objects: objects, cache: &storageCache, budget: output, objectBudget: copies) { richMaps[object.identifier] = map }
             } else if listType == inlineListType {
-                if let map = inlineTextMap(object, budget: budget) { inlineMaps[object.identifier] = map }
+                if let map = inlineTextMap(object, budget: output, objectBudget: copies) { inlineMaps[object.identifier] = map }
             }
         }
 
         var byTile: [UInt64: String] = [:]
         for object in objects.values where tableModelTypes.contains(object.type) {
-            guard !Task.isCancelled, budget?.active != false else { return [:] }
-            guard let tile = object.references.first(where: { tileIDs.contains($0) }), byTile[tile] == nil,
-                  let tileObject = objects[tile] else { continue }
-            let rich = object.references.compactMap { richMaps[$0] }.first ?? [:]
-            let inline = object.references.compactMap { inlineMaps[$0] }.first ?? [:]
-            if let markdown = render(grid: cellGrid(tileObject, rich: rich, inline: inline, budget: budget), budget: budget) {
-                byTile[tile] = markdown
+            guard copies.active, output.active else { return [:] }
+            let positions = tableTiles(object, available: tileIDs, objectBudget: copies)
+            guard let first = positions.first, byTile[first.id] == nil else { continue }
+            let rich = object.references.lazy.compactMap { richMaps[$0] }.first ?? [:]
+            let inline = object.references.lazy.compactMap { inlineMaps[$0] }.first ?? [:]
+            var grid: [[String?]] = []
+            for position in positions {
+                guard copies.active, output.active, let tile = objects[position.id] else { continue }
+                mergeTile(tile, rowOffset: position.offset ?? grid.count, rich: rich, inline: inline,
+                          grid: &grid, budget: output, objectBudget: copies)
+            }
+            if let markdown = render(grid: grid, budget: output) { byTile[first.id] = markdown }
+        }
+        if !output.active { copies.fail() }
+        guard copies.active else { return [:] }
+
+        return byTile
+    }
+
+    private static func tableTiles(_ model: IWAArchive.Object, available: Set<UInt64>, objectBudget: IWAObjectBudget) -> [(id: UInt64, offset: Int?)] {
+        var result: [(id: UInt64, offset: Int?)] = [], seen: Set<UInt64> = []
+        var modelReader = ProtobufReader(model.payload, objectBudget: objectBudget)
+        while let field = modelReader.next() {
+            guard field.number == 4, case .length(let store) = field.value else { continue }
+            var storeReader = ProtobufReader(store, objectBudget: objectBudget)
+            while let field = storeReader.next() {
+                guard field.number == 3, case .length(let storage) = field.value else { continue }
+                var reader = ProtobufReader(storage, objectBudget: objectBudget)
+                var positions: [(UInt64, UInt64)] = [], size: UInt64 = 256
+                while let field = reader.next() {
+                    if field.number == 2, case .varint(let value) = field.value { size = value }
+                    if field.number == 1, case .length(let bytes) = field.value {
+                        var entry = ProtobufReader(bytes, objectBudget: objectBudget), index: UInt64?, id: UInt64?
+                        while let value = entry.next() {
+                            if value.number == 1, case .varint(let number) = value.value { index = number }
+                            if value.number == 2, case .length(let ref) = value.value { id = referencedID(in: ref, objectBudget: objectBudget) }
+                        }
+                        if let index, let id, available.contains(id) {
+                            guard objectBudget.reserve(32) else { return [] }
+                            positions.append((index, id))
+                        }
+                    }
+                }
+                guard size > 0, size <= 1_000_000 else { objectBudget.fail(); return [] }
+                for (index, id) in positions.sorted(by: { $0.0 < $1.0 }) where seen.insert(id).inserted {
+                    guard index <= 999_999 / size else { objectBudget.fail(); return [] }
+                    result.append((id, Int(index * size)))
+                }
             }
         }
-        return byTile
+        for id in model.references where available.contains(id) && seen.insert(id).inserted {
+            guard objectBudget.reserve(32) else { return [] }
+            result.append((id, nil))
+        }
+        return result
     }
 
     // MARK: - Inline attachments
@@ -1106,17 +1186,17 @@ enum IWATable {
     /// TSWP.StorageArchive (2001). Returns nil for other list types or no text.
     /// Field-order independent.
     private static func richTextMap(_ object: IWAArchive.Object,
-                                    objects: [UInt64: IWAArchive.Object], cache: inout [UInt64: String], budget: IWAOutputBudget?) -> [UInt32: String]? {
+                                    objects: [UInt64: IWAArchive.Object], cache: inout [UInt64: String], budget: IWAOutputBudget?, objectBudget: IWAObjectBudget) -> [UInt32: String]? {
         var listType: UInt64?
         var entries: [(key: UInt32, payload: UInt64)] = []
-        var reader = ProtobufReader(object.payload)
+        var reader = ProtobufReader(object.payload, objectBudget: objectBudget)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (1, .varint(let type)):
                 listType = type
             case (3, .length(let entryBytes)):
                 guard budget?.reserve(48) != false else { return nil }
-                if let entry = dataListEntry(entryBytes) { entries.append(entry) }
+                if let entry = dataListEntry(entryBytes, objectBudget: objectBudget) { entries.append(entry) }
             default:
                 continue
             }
@@ -1127,11 +1207,11 @@ enum IWATable {
         for entry in entries {
             guard !Task.isCancelled, budget?.reserve(64) != false else { return nil }
             guard let richText = objects[entry.payload], richText.type == richTextPayloadType,
-                  let storageID = referencedID(in: richText.payload),
+                  let storageID = referencedID(in: richText.payload, objectBudget: objectBudget),
                   let storage = objects[storageID], storage.type == storageType else { continue }
             if let text = cache[storageID] { map[entry.key] = text }
             else {
-                let text = storageText(storage.payload, budget: budget)
+                let text = storageText(storage.payload, budget: budget, objectBudget: objectBudget)
                 guard budget?.active != false else { return nil }
                 cache[storageID] = text
                 map[entry.key] = text
@@ -1143,10 +1223,10 @@ enum IWATable {
     /// Resolves an inline-text DataList (`list_type == 1`): entry key → text stored
     /// directly in the entry (field 3). Keynote tables (and some Pages cells) use
     /// this instead of the rich-text list. Returns nil for other types or no text.
-    private static func inlineTextMap(_ object: IWAArchive.Object, budget: IWAOutputBudget?) -> [UInt32: String]? {
+    private static func inlineTextMap(_ object: IWAArchive.Object, budget: IWAOutputBudget?, objectBudget: IWAObjectBudget) -> [UInt32: String]? {
         var listType: UInt64?
         var map: [UInt32: String] = [:]
-        var reader = ProtobufReader(object.payload)
+        var reader = ProtobufReader(object.payload, objectBudget: objectBudget)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (1, .varint(let type)):
@@ -1154,7 +1234,7 @@ enum IWATable {
             case (3, .length(let entryBytes)):
                 var key: UInt32?
                 var text: String?
-                var entryReader = ProtobufReader(entryBytes)
+                var entryReader = ProtobufReader(entryBytes, objectBudget: objectBudget)
                 while let entryField = entryReader.next() {
                     switch (entryField.number, entryField.value) {
                     case (1, .varint(let k)): key = UInt32(truncatingIfNeeded: k)
@@ -1177,16 +1257,16 @@ enum IWATable {
     }
 
     /// One DataList entry: key (field 1) + RichTextPayload id (field 9 → field 1).
-    private static func dataListEntry(_ bytes: [UInt8]) -> (key: UInt32, payload: UInt64)? {
+    private static func dataListEntry(_ bytes: [UInt8], objectBudget: IWAObjectBudget) -> (key: UInt32, payload: UInt64)? {
         var key: UInt32?
         var payload: UInt64?
-        var reader = ProtobufReader(bytes)
+        var reader = ProtobufReader(bytes, objectBudget: objectBudget)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (1, .varint(let k)):
                 key = UInt32(truncatingIfNeeded: k)
             case (9, .length(let sub)):
-                payload = referencedID(in: sub)
+                payload = referencedID(in: sub, objectBudget: objectBudget)
             default:
                 continue
             }
@@ -1198,27 +1278,29 @@ enum IWATable {
     /// Reads a referenced object id out of field 1 — either a bare varint id or a
     /// TSP.Reference sub-message whose field 1 is the id. Used for both the
     /// DataList entry → RichTextPayload and RichTextPayload → Storage hops.
-    private static func referencedID(in bytes: [UInt8]) -> UInt64? {
-        var reader = ProtobufReader(bytes)
-        while let field = reader.next() {
+    static func referencedID(in bytes: [UInt8], objectBudget: IWAObjectBudget? = nil) -> UInt64? {
+        let copies = objectBudget ?? IWAObjectBudget()
+        var readers = [ProtobufReader(bytes, objectBudget: copies)]
+        while !readers.isEmpty {
+            guard copies.active else { return nil }
+            guard let field = readers[readers.count - 1].next() else { readers.removeLast(); continue }
             guard field.number == 1 else { continue }
             switch field.value {
-            case .varint(let id):
-                return id
+            case .varint(let id): return id
             case .length(let sub):
-                if let id = referencedID(in: sub) { return id }
-            default:
-                continue
+                guard readers.count < 64, copies.reserve(64) else { copies.fail(); return nil }
+                readers.append(ProtobufReader(sub, objectBudget: copies))
+            default: continue
             }
         }
         return nil
     }
 
     /// TSWP.StorageArchive text: the concatenated `repeated string text` (field 3).
-    private static func storageText(_ payload: [UInt8], budget: IWAOutputBudget?) -> String {
+    private static func storageText(_ payload: [UInt8], budget: IWAOutputBudget?, objectBudget: IWAObjectBudget) -> String {
         var runs: [String] = []
         var byteCount = 0
-        var reader = ProtobufReader(payload)
+        var reader = ProtobufReader(payload, objectBudget: objectBudget)
         while let field = reader.next() {
             if field.number == 3, case .length(let bytes) = field.value {
                 guard budget?.reserve(bytes.count, copies: 2) != false,
@@ -1235,28 +1317,41 @@ enum IWATable {
 
     // MARK: - Tile (cell grid)
 
-    /// Decodes a Tile into a grid of rendered cell strings (nil = absent cell).
-    /// Trailing absent columns are trimmed per row.
-    private static func cellGrid(_ tile: IWAArchive.Object,
-                                 rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?) -> [[String?]] {
-        var rows: [[String?]] = []
-        var reader = ProtobufReader(tile.payload)
+    /// Place tile-local row indexes in the model's native tile range. Missing
+    /// rows stay absent, and sparse placement is admitted before padding.
+    private static func mergeTile(_ tile: IWAArchive.Object, rowOffset: Int,
+                                  rich: [UInt32: String], inline: [UInt32: String], grid: inout [[String?]],
+                                  budget: IWAOutputBudget, objectBudget: IWAObjectBudget) {
+        var reader = ProtobufReader(tile.payload, objectBudget: objectBudget), ordinal = 0
         while let field = reader.next() {
             if field.number == 5, case .length(let rowBytes) = field.value {
-                guard budget?.reserve(64) != false else { return [] }
-                rows.append(cellTexts(inRow: rowBytes, rich: rich, inline: inline, budget: budget))
+                var rowReader = ProtobufReader(rowBytes, objectBudget: objectBudget)
+                var local = UInt64(ordinal)
+                while let row = rowReader.next() {
+                    if row.number == 1, case .varint(let index) = row.value { local = index; break }
+                }
+                guard rowOffset >= 0, rowOffset < 1_000_000, local < UInt64(1_000_000 - rowOffset) else {
+                    objectBudget.fail(); return
+                }
+                let index = rowOffset + Int(local)
+                if index >= grid.count {
+                    let count = index - grid.count + 1
+                    guard budget.reserve(count, copies: 32) else { return }
+                    grid += Array(repeating: [], count: count)
+                }
+                grid[index] = cellTexts(inRow: rowBytes, rich: rich, inline: inline, budget: budget, objectBudget: objectBudget)
+                ordinal += 1
             }
         }
-        return rows
     }
 
     /// One TileRowInfo: uint16 offsets (field 7) into the cell buffer (field 6);
     /// 0xFFFF marks an absent cell.
     private static func cellTexts(inRow rowBytes: [UInt8],
-                                  rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?) -> [String?] {
+                                  rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?, objectBudget: IWAObjectBudget) -> [String?] {
         var buffer: [UInt8] = []
         var offsets: [UInt8] = []
-        var reader = ProtobufReader(rowBytes)
+        var reader = ProtobufReader(rowBytes, objectBudget: objectBudget)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (6, .length(let bytes)): buffer = bytes

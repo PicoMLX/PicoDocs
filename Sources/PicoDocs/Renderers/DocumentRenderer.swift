@@ -844,31 +844,48 @@ public enum DocumentRenderer {
         // safety and references carry no `id`, so repeated references don't produce
         // duplicate element ids. The escaped id also matches the escaped body text.
         result = renderFootnoteReferences(result, numbers: footnoteNumbers, html: true)
-        for (index, link) in links.enumerated() {
-            let tag: String
+        var linkTags: [String] = [], linkBytes = 0
+        for link in links {
+            var tag = "", tagBytes = 0
+            let available = budget.remaining - linkBytes
+            func append(_ fragment: String) throws {
+                guard fragment.utf8.count <= available - tagBytes else { throw PicoDocsError.fileCorrupted }
+                tagBytes += fragment.utf8.count; tag += fragment
+            }
+            func escaped(_ value: String) throws -> String {
+                try boundedEscapeHTML(value, maximumBytes: available - tagBytes)
+            }
             if let image = link.imageSource, isSafeURL(image, isImage: true) {
-                let picture = "<img src=\"\(try boundedEscapeHTML(image, maximumBytes: budget.remaining))\" alt=\"\(try boundedEscapeHTML(link.label, maximumBytes: budget.remaining))\">"
-                tag = isSafeURL(link.url, isImage: false) ? "<a href=\"\(try boundedEscapeHTML(link.url, maximumBytes: budget.remaining))\">\(picture)</a>" : picture
+                let liveLink = isSafeURL(link.url, isImage: false)
+                if liveLink { try append("<a href=\""); try append(escaped(link.url)); try append("\">") }
+                try append("<img src=\""); try append(escaped(image)); try append("\" alt=\"")
+                try append(escaped(link.label)); try append("\">")
+                if liveLink { try append("</a>") }
             } else if !isSafeURL(link.url, isImage: link.isImage) {
                 // A script-capable URL (`javascript:` …) would make the exported
                 // page executable when displayed; keep only the visible text.
-                let label = try boundedEscapeHTML(link.label, maximumBytes: budget.remaining)
-                tag = link.isImage ? label : applyEmphasisHTML(label)
+                let label = try escaped(link.label)
+                try append(link.isImage ? label : applyEmphasisHTML(label))
             } else if link.isImage {
-                tag = "<img src=\"\(try boundedEscapeHTML(link.url, maximumBytes: budget.remaining))\" alt=\"\(try boundedEscapeHTML(link.label, maximumBytes: budget.remaining))\">"
+                try append("<img src=\""); try append(escaped(link.url)); try append("\" alt=\"")
+                try append(escaped(link.label)); try append("\">")
             } else {
-                tag = "<a href=\"\(try boundedEscapeHTML(link.url, maximumBytes: budget.remaining))\">\(applyEmphasisHTML(try boundedEscapeHTML(link.label, maximumBytes: budget.remaining)))</a>"
+                try append("<a href=\""); try append(escaped(link.url)); try append("\">")
+                try append(applyEmphasisHTML(escaped(link.label))); try append("</a>")
             }
-            result = try boundedInlineTokenReplacement(result, open: linkOpen, close: linkClose, index: index, replacement: tag, maximumBytes: budget.remaining)
-
+            linkBytes += tagBytes; linkTags.append(tag)
         }
+        result = try boundedInlineTokenReplacements(result, open: linkOpen, close: linkClose, replacements: linkTags, maximumBytes: budget.remaining)
         result = try boundedHTMLWhitespaceReferences(result, maximumBytes: budget.remaining)
         result = restoreEscapes(result, html: true)
-        for (index, span) in spans.enumerated() {
-            guard budget.remaining >= 13 else { throw PicoDocsError.fileCorrupted }
-            let escaped = try boundedEscapeHTML(span, maximumBytes: budget.remaining - 13)
-            result = try boundedInlineTokenReplacement(result, open: codeOpen, close: codeClose, index: index, replacement: "<code>\(escaped)</code>", maximumBytes: budget.remaining)
+        var codeTags: [String] = [], codeBytes = 0
+        for span in spans {
+            guard budget.remaining - codeBytes >= 13 else { throw PicoDocsError.fileCorrupted }
+            let escaped = try boundedEscapeHTML(span, maximumBytes: budget.remaining - codeBytes - 13)
+            let tag = "<code>\(escaped)</code>"
+            codeBytes += tag.utf8.count; codeTags.append(tag)
         }
+        result = try boundedInlineTokenReplacements(result, open: codeOpen, close: codeClose, replacements: codeTags, maximumBytes: budget.remaining)
         guard result.utf8.count <= budget.remaining else { throw PicoDocsError.fileCorrupted }
         budget.remaining -= result.utf8.count
         return restoreInlineSentinels(result)
@@ -934,23 +951,29 @@ public enum DocumentRenderer {
         return output
     }
 
-    private static func boundedInlineTokenReplacement(_ text: String, open: String, close: String, index: Int, replacement: String, maximumBytes: Int) throws -> String {
-        let pattern = "(?<!" + open + ")" + open + String(index) + close + "(?!" + close + ")"
+    /// Admit the complete restored output before constructing it. Each stage
+    /// scans the source twice regardless of the number of distinct spans.
+    static func boundedInlineTokenReplacements(_ text: String, open: String, close: String, replacements: [String], maximumBytes: Int) throws -> String {
+        let pattern = "(?<!" + open + ")" + open + "([0-9]+)" + close + "(?!" + close + ")"
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
         let source = text as NSString
         var bytes = text.utf8.count, exceeded = bytes > maximumBytes
-        let needleBytes = open.utf8.count + String(index).utf8.count + close.utf8.count
-        let growth = replacement.utf8.count - needleBytes
+        func replacement(for match: NSTextCheckingResult) -> (text: String, needleBytes: Int)? {
+            let digits = source.substring(with: match.range(at: 1))
+            guard let index = Int(digits), index >= 0, index < replacements.count, String(index) == digits else { return nil }
+            return (replacements[index], open.utf8.count + digits.utf8.count + close.utf8.count)
+        }
         regex.enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, stop in
-            guard match != nil, !exceeded else { return }
+            guard let match, let replacement = replacement(for: match), !exceeded else { return }
+            let growth = replacement.text.utf8.count - replacement.needleBytes
             if growth > maximumBytes - bytes { exceeded = true; stop.pointee = true }
             else { bytes += growth }
         }
         guard !exceeded else { throw PicoDocsError.fileCorrupted }
         var output = "", offset = 0
         regex.enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, _ in
-            guard let match else { return }
-            output += source.substring(with: NSRange(location: offset, length: match.range.location - offset)) + replacement
+            guard let match, let replacement = replacement(for: match) else { return }
+            output += source.substring(with: NSRange(location: offset, length: match.range.location - offset)) + replacement.text
             offset = NSMaxRange(match.range)
         }
         return output + source.substring(from: offset)
@@ -974,14 +997,10 @@ public enum DocumentRenderer {
         // Footnote references become `[N]` here (code spans already extracted, so
         // markers inside code are preserved; code blocks never reach stripInline).
         result = renderFootnoteReferences(result, numbers: footnoteNumbers, html: false)
-        for (index, link) in links.enumerated() {
-            result = (try? boundedInlineTokenReplacement(result, open: linkOpen, close: linkClose, index: index, replacement: applyEmphasisStrip(link.label), maximumBytes: Int.max)) ?? result
-        }
+        result = (try? boundedInlineTokenReplacements(result, open: linkOpen, close: linkClose, replacements: links.map { applyEmphasisStrip($0.label) }, maximumBytes: Int.max)) ?? result
         result = restoreWhitespaceReferences(result, html: false)
         result = restoreEscapes(result, html: false)
-        for (index, span) in spans.enumerated() {
-            result = (try? boundedInlineTokenReplacement(result, open: codeOpen, close: codeClose, index: index, replacement: span, maximumBytes: Int.max)) ?? result
-        }
+        result = (try? boundedInlineTokenReplacements(result, open: codeOpen, close: codeClose, replacements: spans, maximumBytes: Int.max)) ?? result
         return restoreInlineSentinels(result)
     }
 
