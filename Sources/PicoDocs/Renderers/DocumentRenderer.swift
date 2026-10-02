@@ -529,7 +529,7 @@ public enum DocumentRenderer {
             var cursor = afterLinks.startIndex
             while let open = afterLinks.range(of: "[^", range: cursor..<afterLinks.endIndex) {
                 guard let close = afterLinks.range(of: "]", range: open.upperBound..<afterLinks.endIndex) else { break }
-                register(restoreEscapes(String(afterLinks[open.upperBound..<close.lowerBound]), html: false))
+                register(restoreInlineSentinels(restoreEscapes(String(afterLinks[open.upperBound..<close.lowerBound]), html: false)))
                 cursor = close.upperBound
             }
         }
@@ -1353,7 +1353,7 @@ public enum DocumentRenderer {
         for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
             output += ns.substring(with: NSRange(location: offset, length: match.range.location - offset))
             let protectedID = ns.substring(with: match.range(at: 1))
-            let id = restoreEscapes(protectedID, html: html)
+            let id = restoreInlineSentinels(restoreEscapes(protectedID, html: html))
             if let number = lookup[id] {
                 output += html ? "<sup class=\"footnote-ref\"><a href=\"#fn-\(protectedID)\">\(number)</a></sup>" : "[\(number)]"
             } else { output += ns.substring(with: match.range) }

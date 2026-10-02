@@ -53,7 +53,7 @@ enum MarkdownTableCell {
 
     static func inlineText(_ text: String, breakText: String = "\n", inline: (String) throws -> String) rethrows -> String {
         let protected = protectBreakSentinels(text)
-        return restoreBreakSentinels(try inline(decodeBreaks(protected, breakText: breakToken)), breakText: breakText)
+        return restoreBreakSentinels(try inline(decodeBreaks(protected, breakText: breakToken)), breakText: breakText, html: breakText == "<br>")
     }
 
     static func protectBreakSentinels(_ text: String) -> String {
@@ -65,9 +65,9 @@ enum MarkdownTableCell {
         return output
     }
 
-    static func restoreBreakSentinels(_ text: String, breakText: String) -> String {
+    static func restoreBreakSentinels(_ text: String, breakText: String, html: Bool = false) -> String {
         let scalars = text.unicodeScalars
-        var output = "", index = scalars.startIndex
+        var output = "", index = scalars.startIndex, inTag = false
         while index < scalars.endIndex {
             let scalar = scalars[index]
             index = scalars.index(after: index)
@@ -75,10 +75,14 @@ enum MarkdownTableCell {
                 let next = scalars[index]
                 if next == "\u{E042}" || next == "\u{E044}" {
                     if next == "\u{E042}" { output.unicodeScalars.append(scalar) }
-                    else { output += breakText }
+                    else { output += html && inTag ? "&#10;" : breakText }
                     index = scalars.index(after: index)
                     continue
                 }
+            }
+            if html {
+                if scalar == "<" { inTag = true }
+                else if scalar == ">" { inTag = false }
             }
             output.unicodeScalars.append(scalar)
         }

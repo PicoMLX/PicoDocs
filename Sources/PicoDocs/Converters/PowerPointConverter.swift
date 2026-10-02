@@ -200,6 +200,7 @@ public struct PowerPointConverter: DocumentConverter {
         var pending = selectedChildren(in: root), total = 0
         while let element = pending.popLast() {
             try Task.checkCancellation()
+            if ["p:ext", "a:ext"].contains(element.tagName().lowercased()) { continue }
             if element.tagName().lowercased() == "p:sldid" { total += 1 }
             pending += selectedChildren(in: element)
         }
@@ -578,6 +579,21 @@ public struct PowerPointConverter: DocumentConverter {
             return nil
         }
         return isValidTarget(relation.target, isImage: false) ? relation.target : nil
+    }
+
+    private static func hyperlinkContext(for click: Element?, context: SlideContext) -> SlideContext {
+        guard let owner = click?.ownerDocument() else { return context }
+        var path: String?
+        if owner === context.layout { path = context.layoutPath }
+        else if owner === context.master { path = context.masterPath }
+        else if owner === context.defaultTextStyle?.ownerDocument() {
+            path = relatedPart(of: "", type: "/officeDocument", relationships: relationships(context.archive, forPart: ""), archive: context.archive)
+        }
+        guard let path, path != context.partPath else { return context }
+        var inherited = context
+        inherited.partPath = path
+        inherited.relationships = relationships(context.archive, forPart: path)
+        return inherited
     }
 
     /// Placeholder types that are slide furniture, not content.
@@ -1082,7 +1098,8 @@ public struct PowerPointConverter: DocumentConverter {
                 guard !text.isEmpty else { continue }
                 if let budget, !budget.admit(text.utf8.count, retained: &retainedRunBytes) { return "" }
                 let click = properties.flatMap { selectedChild(of: $0, named: "a:hlinkclick") }
-                let link = hyperlink(click, context: context)
+                    ?? defaults.lazy.compactMap { selectedChild(of: $0, named: "a:hlinkclick") }.first
+                let link = hyperlink(click, context: hyperlinkContext(for: click, context: context))
                 let bold = isOn(properties, "b", defaults: defaults), italic = isOn(properties, "i", defaults: defaults)
                 let destination = click == nil ? context.defaultLink : link
                 let last = runs.count - 1
@@ -1524,7 +1541,7 @@ public struct PowerPointConverter: DocumentConverter {
         private let reserveCarrierBytes: ((Int) -> Bool)?
 
         init(reservedReferences: Set<String> = [], maximumEncodedBytes: Int = 32 * 1024 * 1024, reserveCarrierBytes: ((Int) -> Bool)? = nil) {
-            usedReferences = Set(reservedReferences.map(Self.referenceIdentity))
+            usedReferences = Set(reservedReferences.flatMap(Self.reservationIdentities))
             self.reserveCarrierBytes = reserveCarrierBytes
             remainingEncodedBytes = max(0, maximumEncodedBytes)
         }
@@ -1571,6 +1588,15 @@ public struct PowerPointConverter: DocumentConverter {
             return path + reference[end..<resourceEnd]
         }
 
+        private static func reservationIdentities(_ reference: String) -> [String] {
+            let full = referenceIdentity(reference)
+            guard URLComponents(string: reference)?.scheme == nil, !reference.hasPrefix("//"),
+                  let end = full.firstIndex(of: "?") else { return [full] }
+            // A carrier materializes one filesystem path. Queries distinguish
+            // remote representations but cannot distinguish that local file.
+            return [full, String(full[..<end])]
+        }
+
         @discardableResult
         func add(path: String, filename: String, archive: PowerPointPackage) -> String? {
             if let existing = references[path] { return existing }
@@ -1590,7 +1616,7 @@ public struct PowerPointConverter: DocumentConverter {
             // scheme position of a generated embedded-image URL.
             let needsRelativePrefix = filename.contains(":") || filename.contains("%") || filename.hasPrefix("/") || filename.hasPrefix("\\")
             var reference = needsRelativePrefix ? "./" + filename : filename
-            while usedReferences.contains(Self.referenceIdentity(PowerPointConverter.linkDestination(reference))) {
+            while Self.reservationIdentities(PowerPointConverter.linkDestination(reference)).contains(where: usedReferences.contains) {
                 nextReference += 1
                 reference = "picodocs-embedded/\(nextReference)/" + filename
             }
@@ -1601,7 +1627,8 @@ public struct PowerPointConverter: DocumentConverter {
             let carrierBytes = filename.utf8.count + path.utf8.count + labelBytes + 2 * emitted.utf8.count
                 + mime.utf8.count + "mimeType".utf8.count + "markdownReference".utf8.count + 5
             guard reserveCarrierBytes?(carrierBytes) != false else { archive.fail(PicoDocsError.fileCorrupted); return nil }
-            usedReferences.insert(Self.referenceIdentity(emitted)); references[path] = reference
+            for identity in Self.reservationIdentities(emitted) { usedReferences.insert(identity) }
+            references[path] = reference
             sections.append(DocumentSection(
                 title: filename,
                 kind: .image,
