@@ -9,6 +9,9 @@
 //
 
 import Foundation
+#if canImport(FoundationXML)
+import FoundationXML
+#endif
 import ZIPFoundation
 import SwiftSoup
 
@@ -880,13 +883,63 @@ public struct WordConverter: DocumentConverter {
                         }
                         budget.remainingProbeBytes -= count
                     })
-                    valid = bytes?.isEmpty == false
+                    valid = try bytes.map { try SVGProbe.valid($0, budget: budget.svgXMLBudget) } ?? false
                     budget.svgValidity[path] = valid
                 }
                 if !valid { usable.removeValue(forKey: id) }
             }
         }
         return usable
+    }
+
+    /// A preferred SVG must be well-formed SVG XML, not merely readable bytes.
+    /// Probe with SAX without constructing a DOM or retaining another payload.
+    private final class SVGProbe: NSObject, XMLParserDelegate {
+        let budget: PowerPointXML.Budget
+        var depth = 0, rootIsSVG = false, failed = false
+        init(budget: PowerPointXML.Budget) { self.budget = budget }
+
+        static func valid(_ data: Data, budget: PowerPointXML.Budget) throws -> Bool {
+            try Task.checkCancellation()
+            guard !data.isEmpty, PowerPointXML.lexicalPreflight(data) else {
+                try Task.checkCancellation()
+                return false
+            }
+            let delegate = SVGProbe(budget: budget)
+            let parser = XMLParser(data: data)
+            parser.shouldProcessNamespaces = true
+            parser.shouldResolveExternalEntities = false
+            parser.delegate = delegate
+            let parsed = parser.parse()
+            try Task.checkCancellation()
+            return parsed && !delegate.failed && delegate.rootIsSVG && delegate.depth == 0
+        }
+        func reject(_ parser: XMLParser) { failed = true; parser.abortParsing() }
+        func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes: [String: String]) {
+            guard !Task.isCancelled, depth < 128, budget.nodes > 0,
+                  attributes.count <= budget.attributes else { reject(parser); return }
+            budget.nodes -= 1
+            budget.attributes -= attributes.count
+            for (key, value) in attributes {
+                let count = key.utf8.count + value.utf8.count
+                guard count <= budget.attributeBytes else { reject(parser); return }
+                budget.attributeBytes -= count
+            }
+            if depth == 0 {
+                rootIsSVG = elementName == "svg" && namespaceURI == "http://www.w3.org/2000/svg"
+                guard rootIsSVG else { reject(parser); return }
+            }
+            depth += 1
+        }
+        func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+            if Task.isCancelled { reject(parser); return }
+            depth -= 1
+        }
+        func parser(_ parser: XMLParser, foundCharacters string: String) {
+            if Task.isCancelled { reject(parser) }
+        }
+        func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) { reject(parser) }
+        func parser(_ parser: XMLParser, foundExternalEntityDeclarationWithName name: String, publicID: String?, systemID: String?) { reject(parser) }
     }
 
     private static func namespaceURI(of element: Element) -> String? {
@@ -919,6 +972,7 @@ public struct WordConverter: DocumentConverter {
         var svgValidity: [String: Bool] = [:]
         var remainingProbeBytes: Int
         var remainingProbes: Int
+        let svgXMLBudget = PowerPointXML.Budget()
         init(maxBytes: Int = 64 * 1024 * 1024, maxImages: Int = 1024) {
             remainingBytes = max(0, maxBytes); remainingImages = max(0, maxImages)
             remainingProbeBytes = max(0, maxBytes); remainingProbes = max(0, maxImages)

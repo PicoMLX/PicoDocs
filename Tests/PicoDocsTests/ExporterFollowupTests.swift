@@ -1441,7 +1441,7 @@ struct ExporterFollowupTests {
             #expect(restored.markdown().components(separatedBy: "Agenda").count - 1 == 1)
             #expect(restored.markdown().contains("## Agenda")); #expect(restored.markdown().contains("Details"))
             #if canImport(AppKit)
-            #expect(AttributedStringDocumentBuilder.attributedString(from: result).string.components(separatedBy: "Agenda").count - 1 == 1)
+            #expect(try AttributedStringDocumentBuilder.attributedString(from: result).string.components(separatedBy: "Agenda").count - 1 == 1)
             #endif
         }
     }
@@ -1605,7 +1605,7 @@ struct ExporterFollowupTests {
         #expect(try xml(PicoDocsEngine.write(result, to: .pptx), "ppt/slides/slide1.xml").contains("<a:br/>"))
         #expect(try xml(PicoDocsEngine.write(result, to: .xlsx), "xl/worksheets/sheet1.xml").contains("first\nsecond"))
         #if canImport(AppKit)
-        #expect(AttributedStringDocumentBuilder.attributedString(from: result).string.contains("first\nsecond"))
+        #expect(try AttributedStringDocumentBuilder.attributedString(from: result).string.contains("first\nsecond"))
         #endif
         #expect(MarkdownInlineParser.parse("[`<br>`](url)", tableCell: true).plainText == "<br>")
         #expect(MarkdownInlineParser.parse(#"[\<br>](url)"#, tableCell: true).plainText == "<br>")
@@ -1648,7 +1648,7 @@ struct ExporterFollowupTests {
             #expect(try xml(PicoDocsEngine.write(result, to: .docx), "word/document.xml").contains("Template"))
             #expect(try xml(PicoDocsEngine.write(result, to: .pptx), "ppt/slides/slide1.xml").contains("Template"))
             #if canImport(AppKit)
-            #expect(AttributedStringDocumentBuilder.attributedString(from: result).string.contains("Template"))
+            #expect(try AttributedStringDocumentBuilder.attributedString(from: result).string.contains("Template"))
             #endif
         }
     }
@@ -1686,7 +1686,7 @@ struct ExporterFollowupTests {
             #expect(pptx.contains("<a:br/>") == !count.isMultiple(of: 2))
             #if canImport(AppKit)
             let expected = "foo" + String(repeating: "\\", count: count / 2) + (count.isMultiple(of: 2) ? " " : "\n") + "bar"
-            #expect(AttributedStringDocumentBuilder.attributedString(from: result).string.contains(expected))
+            #expect(try AttributedStringDocumentBuilder.attributedString(from: result).string.contains(expected))
             #endif
         }
     }
@@ -1700,7 +1700,7 @@ struct ExporterFollowupTests {
             #expect(pptx.contains("&lt;br&gt;")); #expect(!pptx.contains("<a:br/>"))
             #expect(try xml(PicoDocsEngine.write(result, to: .xlsx), "xl/worksheets/sheet1.xml").contains("&lt;br&gt;"))
             #if canImport(AppKit)
-            #expect(AttributedStringDocumentBuilder.attributedString(from: result).string.contains("<br>"))
+            #expect(try AttributedStringDocumentBuilder.attributedString(from: result).string.contains("<br>"))
             #endif
         }
     }
@@ -1714,7 +1714,7 @@ struct ExporterFollowupTests {
             let pptx = try xml(PicoDocsEngine.write(result, to: .pptx), "ppt/slides/slide1.xml")
             #expect(pptx.contains("> leading </a:t>")); #expect(pptx.contains(">trailing </a:t>")); #expect(pptx.contains("<a:br/>"))
             #if canImport(AppKit)
-            #expect(AttributedStringDocumentBuilder.attributedString(from: result).string.contains(" leading \ntrailing "))
+            #expect(try AttributedStringDocumentBuilder.attributedString(from: result).string.contains(" leading \ntrailing "))
             #endif
         }
     }
@@ -1869,7 +1869,7 @@ struct ExporterFollowupTests {
         #expect(try xml(slides,"ppt/slides/slide1.xml").contains("A *literal*"))
         #expect(try xml(slides,"ppt/slides/slide2.xml").contains("Second"))
         #if canImport(AppKit) || canImport(UIKit)
-        let attributed = AttributedStringDocumentBuilder.attributedString(from:result).string
+        let attributed = try AttributedStringDocumentBuilder.attributedString(from:result).string
         #expect(attributed.contains("A *literal*")); #expect(attributed.contains("Second"))
         #endif
     }
@@ -1965,7 +1965,7 @@ struct ExporterFollowupTests {
         #expect(pptx.contains(#"<a:t xml:space="preserve">  first</a:t>"#))
         #expect(pptx.contains(#"<a:t xml:space="preserve">second  </a:t>"#)); #expect(pptx.contains("<a:br/>"))
         #if canImport(AppKit) || canImport(UIKit)
-        #expect(AttributedStringDocumentBuilder.attributedString(from:recovered).string.contains("  first\nsecond  "))
+        #expect(try AttributedStringDocumentBuilder.attributedString(from:recovered).string.contains("  first\nsecond  "))
         #endif
     }
 
@@ -1997,7 +1997,7 @@ struct ExporterFollowupTests {
         let code = try xml(PicoDocsEngine.write(markdown:"```\n  x  \n```",to:.pptx),"ppt/slides/slide1.xml")
         #expect(code.contains(#"<a:t xml:space="preserve">  x  </a:t>"#))
         #if canImport(AppKit) || canImport(UIKit)
-        #expect(AttributedStringDocumentBuilder.attributedString(from:result).string.contains("*open\tclose*"))
+        #expect(try AttributedStringDocumentBuilder.attributedString(from:result).string.contains("*open\tclose*"))
         #endif
     }
 
@@ -2146,7 +2146,7 @@ struct ExporterFollowupTests {
             #expect(visible == "one two")
         }
         #if canImport(AppKit)
-        let attributed = AttributedStringDocumentBuilder.attributedString(from: ConverterResult(sections: [.init(markdown: "one \ntwo")]))
+        let attributed = try AttributedStringDocumentBuilder.attributedString(from: ConverterResult(sections: [.init(markdown: "one \ntwo")]))
         #expect(attributed.string.trimmingCharacters(in: .whitespacesAndNewlines) == "one two")
         #endif
         #expect(MarkdownInlineParser.parse("[^docs](https://example.com)") == [.link(label: [.text("^docs")], destination: "https://example.com")])
@@ -2227,13 +2227,13 @@ struct ExporterFollowupTests {
         #expect(try xml(pptx, "ppt/slides/slide1.xml").contains("first second</a:t></a:r><a:br/>"))
         #if canImport(AppKit)
         for source in ["*`code`*", "***`code`***"] {
-            let string = AttributedStringDocumentBuilder.attributedString(from: ConverterResult(sections: [.init(markdown: source)]))
+            let string = try AttributedStringDocumentBuilder.attributedString(from: ConverterResult(sections: [.init(markdown: source)]))
             let font = try #require(string.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
             #expect(font.fontDescriptor.symbolicTraits.contains(.italic))
             #expect(font.fontDescriptor.symbolicTraits.contains(.monoSpace))
             if source.hasPrefix("***") { #expect(font.fontDescriptor.symbolicTraits.contains(.bold)) }
         }
-        let list = AttributedStringDocumentBuilder.attributedString(from: ConverterResult(sections: [.init(markdown: source)]))
+        let list = try AttributedStringDocumentBuilder.attributedString(from: ConverterResult(sections: [.init(markdown: source)]))
         #expect(list.string.contains("first second\nthird"))
         #endif
     }
@@ -2452,7 +2452,7 @@ struct ExporterFollowupTests {
         #expect(workbook.contains(#"name="A B (2)""#))
         #if canImport(AppKit) || canImport(UIKit)
         let result = ConverterResult(sections: [.init(markdown: "first\nsecond\n\nfirst\\\nsecond\n\nfirst  \nsecond")])
-        let text = AttributedStringDocumentBuilder.attributedString(from: result).string
+        let text = try AttributedStringDocumentBuilder.attributedString(from: result).string
         #expect(text.contains("first second"))
         #expect(text.components(separatedBy: "first\nsecond").count == 3)
         #expect(!text.contains("\\"))

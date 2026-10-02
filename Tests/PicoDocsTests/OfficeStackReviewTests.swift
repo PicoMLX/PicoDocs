@@ -22,7 +22,7 @@ struct OfficeStackReviewTests {
                 #expect(!relationships.contains("/hyperlink"))
             }
             #if canImport(AppKit)
-            let attributed = AttributedStringDocumentBuilder.attributedString(from: result)
+            let attributed = try AttributedStringDocumentBuilder.attributedString(from: result)
             #expect(attributed.attribute(.link, at: 0, effectiveRange: nil) == nil)
             #endif
         }

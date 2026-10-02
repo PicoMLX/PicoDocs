@@ -251,7 +251,7 @@ public enum DocumentRenderer {
             Set([section.sourcePath, imageRefName(for: section)].compactMap { $0 }.filter { !$0.isEmpty })
         }
         var referenceCounts: [String: Int] = [:]
-        for section in imageSections where !(section.metadata["base64"] ?? "").isEmpty {
+        for section in imageSections {
             for reference in references(section) { referenceCounts[reference, default: 0] += 1 }
         }
         var replacements: [String: (mime: String, base64: String)] = [:]
@@ -665,7 +665,8 @@ public enum DocumentRenderer {
         }
         let namedSheets = result.sections.filter { $0.kind == .sheet }.count
         for section in result.sections where section.kind != .image {
-            if let rawCSV = section.metadata["csv"], !rawCSV.isEmpty ||
+            let rawCSV = section.metadata["csv"] ?? ""
+            if !rawCSV.isEmpty ||
                ([SectionKind.sheet, .table].contains(section.kind) && section.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
                 try flush()
                 if namedSheets > 1, section.kind == .sheet, let name = section.sheetName ?? section.metadata["sheetName"] ?? section.title {

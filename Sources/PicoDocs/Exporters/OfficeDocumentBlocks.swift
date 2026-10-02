@@ -6,6 +6,7 @@ enum OfficeDocumentBlocks {
     /// These writers do not serialize result.cover; do not silently discard it
     /// when it is the only payload. Custom exporters remain free to support it.
     static func validateInput(_ result: ConverterResult, includesNativeNotes: Bool = false, maximumBytes: Int = 64 * 1024 * 1024) throws {
+        try Task.checkCancellation()
         if !(result.cover?.isEmpty ?? true), PicoDocsEngine.isEmptyForExport(result, includingCover: false) {
             throw PicoDocsError.emptyDocument
         }
@@ -21,6 +22,7 @@ enum OfficeDocumentBlocks {
             try charge(value.utf8.count * 7)
         }
         for section in result.sections {
+            try Task.checkCancellation()
             // Parser section entries and joined separators exist even without text.
             try charge(256)
             if section.kind == .image {
@@ -49,7 +51,8 @@ enum OfficeDocumentBlocks {
                     // Notes metadata can exist without the visible Notes suffix.
                     // Admit its native run/paragraph projection independently.
                     try charge(1024)
-                    for scalar in notes.unicodeScalars {
+                    for (index, scalar) in notes.unicodeScalars.enumerated() {
+                        if index.isMultiple(of: 4096) { try Task.checkCancellation() }
                         let value = scalar.value
                         let bytes = value <= 0x7F ? 1 : value <= 0x7FF ? 2 : value <= 0xFFFF ? 3 : 4
                         try charge(bytes * 7)
@@ -68,6 +71,7 @@ enum OfficeDocumentBlocks {
                 guard csv.utf8.count <= remaining / 7 else { throw ExporterError.serializationFailed("Office CSV projection exceeds the supported byte budget") }
                 var rows = 0, columns = 0, cells = 0
                 try CSVConverter.forEachField(csv) { field, endsRow in
+                    if cells.isMultiple(of: 64) { try Task.checkCancellation() }
                     columns += 1; cells += 1
                     guard columns <= 16_384, cells <= 1_000_000, rows < 1_048_576 else {
                         throw ExporterError.serializationFailed("Office CSV projection exceeds supported dimensions")
@@ -77,7 +81,8 @@ enum OfficeDocumentBlocks {
                 }
             } else {
                 var hasContent = false, tableLine = false, previousWasCR = false
-                for scalar in section.markdown.unicodeScalars {
+                for (index, scalar) in section.markdown.unicodeScalars.enumerated() {
+                    if index.isMultiple(of: 4096) { try Task.checkCancellation() }
                     // Match the block parser's CRLF normalization for both byte
                     // and physical-line charges, without allocating a new string.
                     if scalar == "\n", previousWasCR { previousWasCR = false; continue }
@@ -104,6 +109,7 @@ enum OfficeDocumentBlocks {
                 }
             }
         }
+        try Task.checkCancellation()
     }
 
     static func parse(_ result: ConverterResult, includeSlideTitles: Bool = true) -> [MarkdownBlock] {

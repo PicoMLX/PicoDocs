@@ -77,14 +77,15 @@ struct OfficeFourteenthStackReviewTests {
     @Test func SVGProbeBudgetIsSharedAndDecisionsAreCached() throws {
         let shape = #"<root xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main"><a:blip r:embed="raster"><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip r:embed="svg"/></a:ext></a:blip></root>"#
         let root = try SwiftSoup.parse(shape, "", SwiftSoup.Parser.xmlParser())
-        let archive = try Archive(data: PagesConverterTests.makeZip([("word/media/vector.svg", [1, 2, 3, 4])]), accessMode: .read)
+        let svg = Array(#"<svg xmlns="http://www.w3.org/2000/svg"/>"#.utf8)
+        let archive = try Archive(data: PagesConverterTests.makeZip([("word/media/vector.svg", svg)]), accessMode: .read)
         let relationships = ["svg": "media/vector.svg", "raster": "media/fallback.png"]
-        let exact = WordConverter.MediaBudget(maxBytes: 4, maxImages: 1)
+        let exact = WordConverter.MediaBudget(maxBytes: svg.count, maxImages: 1)
         #expect(try WordConverter.usableSVGRelationships(in: root, relationships: relationships, archive: archive, budget: exact)["svg"] != nil)
         #expect(exact.remainingProbeBytes == 0)
         #expect(exact.remainingProbes == 0)
         #expect(try WordConverter.usableSVGRelationships(in: root, relationships: relationships, archive: archive, budget: exact)["svg"] != nil)
-        let tooSmall = WordConverter.MediaBudget(maxBytes: 3, maxImages: 1)
+        let tooSmall = WordConverter.MediaBudget(maxBytes: svg.count - 1, maxImages: 1)
         let fallback = try WordConverter.usableSVGRelationships(in: root, relationships: relationships, archive: archive, budget: tooSmall)
         #expect(fallback["svg"] == nil)
         #expect(fallback["raster"] == relationships["raster"])

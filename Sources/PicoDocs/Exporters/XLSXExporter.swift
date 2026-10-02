@@ -115,7 +115,8 @@ public struct XLSXExporter: DocumentExporter {
         if let csv = section.metadata["csv"], !csv.isEmpty {
             return CSVConverter.parseCSV(csv)
         }
-        var blocks = MarkdownBlockParser.parse(section.markdown)
+        let markdown = section.metadata["preservedWhitespace"] == "1" ? OfficeDocumentBlocks.decodedPreservedWhitespace(section.markdown) : section.markdown
+        var blocks = MarkdownBlockParser.parse(markdown)
         // `SpreadsheetConverter` prefixes each sheet's Markdown with `## <sheetName>`
         // while also carrying the name in `section.sheetName`. Without this guard that
         // redundant title would become cell A1 and push the real data down a row,
