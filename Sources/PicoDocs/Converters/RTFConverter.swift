@@ -5,7 +5,7 @@
 //  Converts RTF to Markdown with a small, dependency-free parser — no
 //  NSAttributedString (the lossy, main-thread-biased path this rewrite removed).
 //  It extracts text, paragraphs, and bold/italic emphasis, skips the control
-//  tables (font/color/stylesheet/info) and ignorable destinations, and decodes
+//  tables (font/color/stylesheet) and ignorable destinations, and decodes
 //  \uN / \'hh escapes. RTF carries no semantic headings, so none are inferred
 //  (we deliberately don't guess headings from font sizes).
 //
@@ -33,18 +33,63 @@ public struct RTFConverter: DocumentConverter {
         guard rtf.drop(while: { $0.isWhitespace }).hasPrefix("{\\rtf") else {
             throw PicoDocsError.fileCorrupted
         }
-        let markdown = Self.markdown(fromRTF: rtf)
+        let fonts = RTFFontTable()
+        let metadata = Metadata()
+        let markdown = Self.markdown(fromRTF: rtf, fontBudget: fonts, metadata: metadata)
+        try fonts.check()
+        try metadata.check()
         guard !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PicoDocsError.emptyDocument
         }
         let section = DocumentSection(title: info.filename, kind: .body, markdown: markdown)
-        return ConverterResult(title: info.filename, sections: [section])
+        return ConverterResult(title: metadata.title.flatMap { $0.isEmpty ? nil : $0 } ?? info.filename, author: metadata.author.flatMap { $0.isEmpty ? nil : $0 }, sections: [section])
     }
 
     // MARK: - Parser
 
-    private struct Run { var text: String; var bold: Bool; var italic: Bool }
-    private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool; var ucSkip: Int }
+    final class Metadata {
+        private(set) var title: String?
+        private(set) var author: String?
+        private var remainingBytes: Int
+        private var exceeded = false
+        init(maximumBytes: Int = 64 * 1024 * 1024) { remainingBytes = max(0, maximumBytes) }
+        func append(_ text: String, field: String) {
+            guard !exceeded else { return }
+            guard text.utf8.count <= remainingBytes else { exceeded = true; return }
+            remainingBytes -= text.utf8.count
+            if field == "title" { if title == nil { title = "" }; title!.append(contentsOf: text) }
+            else { if author == nil { author = "" }; author!.append(contentsOf: text) }
+        }
+        func check() throws {
+            try Task.checkCancellation()
+            if exceeded { throw PicoDocsError.fileCorrupted }
+        }
+    }
+    private struct Run { var text: String; var bold: Bool; var italic: Bool; var link: String?; var code: Bool; var field: Field? }
+    final class Field {
+        static let maximumInstructionBytes = 65_536
+        private(set) var instruction = ""
+        private var instructionBytes = 0
+        private var oversized = false
+        var target: String?
+        func admitBufferedInstructionByte(_ bufferedBytes: Int) -> Bool {
+            guard !oversized else { return false }
+            guard bufferedBytes < Self.maximumInstructionBytes - instructionBytes else {
+                oversized = true; instruction = ""; target = nil; return false
+            }
+            return true
+        }
+        func appendInstruction(_ text: String) {
+            guard !oversized else { return }
+            let bytes = text.utf8.count
+            guard bytes <= Self.maximumInstructionBytes - instructionBytes else {
+                oversized = true; instruction = ""; return
+            }
+            instructionBytes += bytes
+            instruction += text
+        }
+    }
+    private struct GroupState { var bold: Bool; var italic: Bool; var ignore: Bool; var ucSkip: Int; var field: Field?; var instruction: Bool; var font: Int; var fontTable: Bool; var fontNameIgnored: Bool; var infoGroup: Bool; var metadataField: String? }
 
     /// Destination control words whose group contents are not body text.
     private static let ignoredDestinations: Set<String> = [
@@ -55,12 +100,11 @@ public struct RTFConverter: DocumentConverter {
         "revtbl", "rsidtbl",
     ]
 
-    static func markdown(fromRTF rtf: String) -> String {
-        // NOTE: Swift clusters "\r\n" into a single Character, so the newline
-        // handling below matches it as one grapheme (alongside lone "\r"/"\n")
-        // rather than normalizing the string — which keeps `\bin` byte-offset
-        // skipping (which indexes this array) untouched.
-        let chars = Array(rtf)
+    static func markdown(fromRTF rtf: String, fontBudget: RTFFontTable? = nil, metadata: Metadata? = nil) -> String {
+        let fonts = fontBudget ?? RTFFontTable()
+        // convert() decodes bytes as Latin-1: each scalar is exactly one source
+        // byte. Keep CR and LF separate so \binN skips N bytes, not graphemes.
+        let chars = rtf.unicodeScalars.map { Character(String($0)) }
         let n = chars.count
         var i = 0
 
@@ -68,6 +112,13 @@ public struct RTFConverter: DocumentConverter {
         var italic = false
         var ignore = false
         var ucSkip = 1
+        var field: Field?
+        var instruction = false
+        var font = 0, defaultFont = 0
+        var fontTable = false
+        var fontNameIgnored = false
+        var infoGroup = false
+        var metadataField: String?
         var ansiEncoding: String.Encoding = .windowsCP1252
         var isDBCS = false
         var stack: [GroupState] = []
@@ -77,15 +128,34 @@ public struct RTFConverter: DocumentConverter {
         var pendingBytes: [UInt8] = []
 
         var runs: [Run] = []
-        var paragraphs: [[Run]] = []
+        var canonical = false
+        var encounteredBody = false
+        let canonicalMarker = Array("{\\*\\picodocsmarkdown1}")
+        var nativeParagraphs: [[Run]] = []
+        var paragraphs: [String] = []
+        var markdownFence: (character: Character, length: Int)?
+        var previousBlankParagraph = true
+
+        func finishFont() {
+            guard fontTable, !fontNameIgnored else { return }
+            fonts.finish(font)
+        }
 
         func appendText(_ s: String) {
+            if let metadataField { metadata?.append(s, field: metadataField); return }
+            if fontTable {
+                if !fontNameIgnored { fonts.append(s, font: font) }
+                return
+            }
+            if instruction, let field { field.appendInstruction(s); return }
+            let code = field?.target != nil && fonts.isMonospace(font)
             guard !ignore, !s.isEmpty else { return }
-            if var last = runs.last, last.bold == bold, last.italic == italic {
+            encounteredBody = true
+            if var last = runs.last, last.bold == bold, last.italic == italic, last.link == field?.target, last.code == code, last.field === field {
                 last.text += s
                 runs[runs.count - 1] = last
             } else {
-                runs.append(Run(text: s, bold: bold, italic: italic))
+                runs.append(Run(text: s, bold: bold, italic: italic, link: field?.target, code: code, field: field))
             }
         }
 
@@ -99,8 +169,49 @@ public struct RTFConverter: DocumentConverter {
         }
 
         func flushParagraph() {
-            if runs.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) { paragraphs.append(runs) }
+            if !canonical {
+                if runs.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) { nativeParagraphs.append(runs) }
+                runs.removeAll(keepingCapacity: true)
+                return
+            }
+            let raw = runs.map(\.text).joined()
+            if let opening = markdownFence, !paragraphs.isEmpty {
+                paragraphs[paragraphs.count - 1] += "\n" + raw
+                if MarkdownBlockParser.closesFence(raw, opening: opening) { markdownFence = nil }
+                runs.removeAll(keepingCapacity: true)
+                previousBlankParagraph = false
+                return
+            }
+            var rendered = "", index = 0
+            while index < runs.count {
+                let start = index, link = runs[index].link, origin = runs[index].field
+                while index < runs.count, runs[index].link == link, runs[index].field === origin { index += 1 }
+                let text = runs[start..<index].map { renderRun($0) }.joined()
+                if let link {
+                    let target = link.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E")
+                    let destination = target.contains(where: { $0.isWhitespace || $0 == "(" || $0 == ")" }) ? "<" + target + ">" : target
+                    rendered += "[" + text + "](" + destination + ")"
+                } else { rendered += text }
+            }
             runs.removeAll(keepingCapacity: true)
+            // Apple's writer serializes attributed hard breaks as U+2028.
+            // Keep table breaks canonical and prose/list breaks as Markdown.
+            rendered = rendered.replacingOccurrences(of: "\u{2028}", with: rendered.hasPrefix("|") ? "<br>" : "  \n")
+            let trimmed = rendered.trimmingCharacters(in: CharacterSet(charactersIn: " \t\r\n"))
+            if !trimmed.isEmpty {
+                // Leading indentation carries nested list content columns.
+                let trailing = rendered.reversed().prefix { " \t\r\n".contains($0) }.count
+                let paragraph = String(rendered.dropLast(trailing))
+                if let opening = MarkdownBlockParser.fence(raw.trimmingCharacters(in: .whitespaces)) {
+                    markdownFence = opening
+                    paragraphs.append(raw)
+                } else if !previousBlankParagraph,
+                          (paragraph.hasPrefix(">") && paragraphs.last?.hasPrefix(">") == true)
+                            || (paragraph.hasPrefix("|") && paragraphs.last?.hasPrefix("|") == true) {
+                    paragraphs[paragraphs.count - 1] += "\n" + paragraph
+                } else { paragraphs.append(paragraph) }
+                previousBlankParagraph = false
+            } else { previousBlankParagraph = true }
         }
 
         while i < n {
@@ -109,7 +220,6 @@ public struct RTFConverter: DocumentConverter {
             // flush the buffer before any other token so byte order is preserved.
             // Raw newlines are non-content (RTF line-wrapping) and can fall *inside*
             // a DBCS character (\'82\r\n\'a0), so they must not flush the buffer.
-            // "\r\n" is matched explicitly because Swift treats it as one Character.
             if !pendingBytes.isEmpty,
                !(c == "\\" && i + 1 < n && chars[i + 1] == "'"),
                c != "\r", c != "\n", c != "\r\n" {
@@ -117,12 +227,20 @@ public struct RTFConverter: DocumentConverter {
             }
             switch c {
             case "{":
-                stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip))
+                // Only the parsed top-level ignorable destination emitted by our
+                // writer signals canonical Markdown. Binary/ignored payloads do not.
+                if stack.count == 1, !ignore, !encounteredBody, chars[i...].starts(with: canonicalMarker) { canonical = true }
+                stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip, field: field, instruction: instruction, font: font, fontTable: fontTable, fontNameIgnored: fontNameIgnored, infoGroup: infoGroup, metadataField: metadataField))
                 i += 1
 
             case "}":
                 if let saved = stack.popLast() {
+                    finishFont()
+                    if instruction, !saved.instruction, let field { field.target = hyperlinkTarget(field.instruction) }
                     bold = saved.bold; italic = saved.italic; ignore = saved.ignore; ucSkip = saved.ucSkip
+                    field = saved.field; instruction = saved.instruction
+                    font = saved.font; fontTable = saved.fontTable; fontNameIgnored = saved.fontNameIgnored
+                    infoGroup = saved.infoGroup; metadataField = saved.metadataField
                 }
                 i += 1
 
@@ -142,8 +260,22 @@ public struct RTFConverter: DocumentConverter {
                     if i < n, chars[i] == " " { i += 1 }
 
                     switch word {
+                    case "info":
+                        infoGroup = stack.count == 2 && !ignore
+                        metadataField = nil; ignore = true
+                    case "title", "author":
+                        if infoGroup, stack.count == 3 { metadataField = word }
+                    case "fonttbl": fontTable = true; ignore = true; metadataField = nil
+                    case "deff": if let param { defaultFont = param; font = param }
+                    case "f": if let param { finishFont(); font = param; if fontTable { fonts.admit(font) } }
+                    case "fmodern": if fontTable, !fontNameIgnored { fonts.markMonospace(font) }
+                    case "falt": if fontTable { fontNameIgnored = true }
+                    case "field": field = Field()
+                    case "fldinst": instruction = field != nil; ignore = true; metadataField = nil
+                    case "fldrslt": instruction = false
                     case "par", "row", "sect", "page":
-                        if !ignore { flushParagraph() }   // a \par inside a skipped destination isn't a body break
+                        if metadataField != nil { appendText("\n") }
+                        else if !ignore { encounteredBody = true; flushParagraph() }   // a \par inside a skipped destination isn't a body break
                     case "line":
                         appendText("  \n")                // Markdown hard break (matches the DOCX w:br path)
                     case "tab", "cell":
@@ -167,7 +299,7 @@ public struct RTFConverter: DocumentConverter {
                         // them so they can't corrupt group/brace parsing.
                         if let param, param > 0 { i += min(param, n - i) }
                     case "plain":
-                        bold = false; italic = false
+                        bold = false; italic = false; font = defaultFont
                     case "b":
                         bold = (param ?? 1) != 0
                     case "i":
@@ -205,7 +337,10 @@ public struct RTFConverter: DocumentConverter {
                         var skipped = 0
                         while i < n, skipped < ucSkip {
                             let fallback = chars[i]
-                            if fallback == "{" || fallback == "}" {
+                            if fallback == "\r" || fallback == "\n" {
+                                i += 1
+                                continue // Source wrapping is not an ANSI fallback unit.
+                            } else if fallback == "{" || fallback == "}" {
                                 break
                             } else if fallback == "\\" {
                                 if i + 1 < n, chars[i + 1] == "'" {
@@ -225,7 +360,7 @@ public struct RTFConverter: DocumentConverter {
                             skipped += 1
                         }
                     default:
-                        if Self.ignoredDestinations.contains(word) { ignore = true }
+                        if Self.ignoredDestinations.contains(word) { ignore = true; metadataField = nil }
                         // All other control words carry no body text.
                     }
                 } else {
@@ -236,27 +371,35 @@ public struct RTFConverter: DocumentConverter {
                     case "~": appendText("\u{00A0}")          // non-breaking space
                     case "_": appendText("-")                 // non-breaking hyphen
                     case "-": break                            // optional hyphen
-                    case "*": ignore = true                    // ignorable destination
+                    case "*":
+                        ignore = true; metadataField = nil
+                        // fonttbl is ignored as body text, but its primary names
+                        // are collected separately from ignorable subgroups.
+                        if fontTable { fontNameIgnored = true }
                     case "'":
                         if i + 1 < n, let byte = UInt8(String([chars[i], chars[i + 1]]), radix: 16) {
                             // DBCS code pages: buffer the byte (a lead byte alone is
                             // undecodable) and let flushBytes decode whole characters.
                             // Single-byte code pages decode each byte on its own.
                             if isDBCS {
-                                if !ignore { pendingBytes.append(byte) }
+                                if instruction, let field {
+                                    if field.admitBufferedInstructionByte(pendingBytes.count) { pendingBytes.append(byte) }
+                                    else { pendingBytes.removeAll(keepingCapacity: true) }
+                                } else if !ignore || metadataField != nil { pendingBytes.append(byte) }
                             } else {
                                 appendText(Self.decodeByte(byte, encoding: ansiEncoding))
                             }
                             i += 2
                         }
                     case "\n", "\r", "\r\n":
-                        if !ignore { flushParagraph() }        // escaped newline = \par
+                        if metadataField != nil { appendText("\n") }
+                        else if !ignore { flushParagraph() }        // escaped newline = \par
                     default: break
                     }
                 }
 
             case "\r", "\n", "\r\n":
-                i += 1                                          // raw newlines aren't content (CRLF is one grapheme)
+                i += 1                                          // raw line-wrapping bytes are not content
 
             default:
                 appendText(String(c))
@@ -265,33 +408,34 @@ public struct RTFConverter: DocumentConverter {
         }
         flushBytes()
         flushParagraph()
+        if canonical { return paragraphs.joined(separator: "\n\n") }
         // Trim the source runs before classifying block/code boundaries, so the
         // projection sees the same indentation as the emitted paragraph.
-        paragraphs = paragraphs.map { paragraph in
+        nativeParagraphs = nativeParagraphs.map { paragraph in
             var trimmed = paragraph
             for index in trimmed.indices {
-                trimmed[index].text = String(trimmed[index].text.drop { $0.isWhitespace })
+                trimmed[index].text = String(trimmed[index].text.drop { $0 == " " || $0 == "\t" || $0 == "\r" || $0 == "\n" })
                 if !trimmed[index].text.isEmpty { break }
             }
             for index in trimmed.indices.reversed() {
-                trimmed[index].text = String(trimmed[index].text.reversed().drop { $0.isWhitespace }.reversed())
+                trimmed[index].text = String(trimmed[index].text.reversed().drop { $0 == " " || $0 == "\t" || $0 == "\r" || $0 == "\n" }.reversed())
                 if !trimmed[index].text.isEmpty { break }
             }
             return trimmed.filter { !$0.text.isEmpty }
         }
         // Source offsets retain escape provenance. Classify block boundaries
         // from composed style runs, whose prefixes can change Markdown syntax.
-        let source = paragraphs.map { $0.map(\.text).joined() }.joined(separator: "\n\n")
+        let source = nativeParagraphs.map { $0.map(\.text).joined() }.joined(separator: "\n\n")
         var boundaries: Set<Int> = [], position = 0
-        for paragraph in paragraphs {
+        for paragraph in nativeParagraphs {
             for run in paragraph { boundaries.insert(position); position += run.text.utf16.count }
             position += 2
         }
-        let structure = paragraphs.map { $0.map(renderRun).joined() }.joined(separator: "\n\n")
+        let structure = nativeParagraphs.map { renderRuns($0) }.joined(separator: "\n\n")
         let escapes = MarkdownLiteral.escapeProjection(source, boundaries: boundaries, structuralText: structure)
         var offset = 0
-        return paragraphs.map { paragraph in
-            let rendered = paragraph.map { run in
+        return nativeParagraphs.map { paragraph in
+            let escapedRuns = paragraph.map { run in
                 var escapedRun = run
                 var units: [UInt16] = []
                 for unit in run.text.utf16 {
@@ -301,11 +445,53 @@ public struct RTFConverter: DocumentConverter {
                     offset += 1
                 }
                 escapedRun.text = String(decoding: units, as: UTF16.self)
-                return renderRun(escapedRun)
-            }.joined()
+                return escapedRun
+            }
             offset += 2
-            return rendered
+            return renderRuns(escapedRuns)
         }.joined(separator: "\n\n")
+    }
+
+    private static func renderRuns(_ runs: [Run]) -> String {
+        var rendered = "", index = 0
+        while index < runs.count {
+            let start = index, link = runs[index].link, origin = runs[index].field
+            while index < runs.count, runs[index].link == link, runs[index].field === origin { index += 1 }
+            let text = runs[start..<index].map { renderRun($0) }.joined()
+            if let link {
+                let target = link.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "<", with: "%3C").replacingOccurrences(of: ">", with: "%3E")
+                let destination = target.contains(where: { $0.isWhitespace || $0 == "(" || $0 == ")" }) ? "<" + target + ">" : target
+                rendered += "[" + text + "](" + destination + ")"
+            } else { rendered += text }
+        }
+        return rendered
+    }
+
+    private static let fieldTokenPattern = try! NSRegularExpression(pattern: #""([^"]*)"|(\S+)"#)
+    private static func hyperlinkTarget(_ instruction: String) -> String? {
+        guard instruction.utf8.count <= Field.maximumInstructionBytes else { return nil }
+        let ns = instruction as NSString
+        let tokens = fieldTokenPattern.matches(in: instruction, range: NSRange(location: 0, length: ns.length)).map { match in
+            let quoted = match.range(at: 1).location != NSNotFound
+            return (text: ns.substring(with: match.range(at: quoted ? 1 : 2)), quoted: quoted)
+        }
+        guard tokens.first?.text.uppercased() == "HYPERLINK" else { return nil }
+        var target: String?, bookmark: String?, index = 1
+        while index < tokens.count {
+            let entry = tokens[index], token = entry.text
+            let switchName = token.lowercased()
+            index += 1
+            if !entry.quoted, switchName == "\\l" || switchName == "\\o" || switchName == "\\t" {
+                guard index < tokens.count else { return nil }
+                if switchName == "\\l" { bookmark = tokens[index].text }
+                index += 1
+            } else if !entry.quoted, token.hasPrefix("\\") { continue }
+            else if target == nil { target = token }
+        }
+        if let bookmark, !bookmark.isEmpty {
+            return (target?.components(separatedBy: "#").first ?? "") + "#" + bookmark
+        }
+        return target.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// Windows code pages that are double-byte (DBCS): one character may span two
@@ -377,6 +563,15 @@ public struct RTFConverter: DocumentConverter {
     /// `**word** ` rather than `** word **`).
     private static func renderRun(_ run: Run) -> String {
         guard !run.text.isEmpty else { return "" }
+        if run.code {
+            let text = run.text
+            let delimiter = String(repeating: "`", count: max(1, (text.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0) + 1))
+            let padding = text.hasPrefix("`") || text.hasSuffix("`") || (text.hasPrefix(" ") && text.hasSuffix(" ") && text.contains(where: { $0 != " " })) ? " " : ""
+            var fragment = delimiter + padding + text + padding + delimiter
+            if run.italic { fragment = "*" + fragment + "*" }
+            if run.bold { fragment = "**" + fragment + "**" }
+            return fragment
+        }
         if run.text.allSatisfy({ $0 == " " || $0 == "\t" || $0 == "\n" }) { return run.text }
         let isSpace: (Character) -> Bool = { $0 == " " || $0 == "\t" }
         let afterLeading = run.text.drop(while: isSpace)
@@ -384,6 +579,7 @@ public struct RTFConverter: DocumentConverter {
         let trailingCount = afterLeading.reversed().prefix(while: isSpace).count
         let trailing = String(afterLeading.suffix(trailingCount))
         var core = String(afterLeading.dropLast(trailingCount))
+        if run.link != nil { core = core.map { #"\`*_[]<>"#.contains($0) ? "\\" + String($0) : String($0) }.joined() }
         if run.italic { core = "*\(core)*" }
         if run.bold { core = "**\(core)**" }
         return leading + core + trailing

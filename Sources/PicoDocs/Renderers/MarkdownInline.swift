@@ -1,0 +1,591 @@
+//
+//  MarkdownInline.swift
+//  PicoDocs
+//
+//  A structured inline intermediate representation for the Markdown subset the
+//  converters emit. The renderer's existing inline helpers (`extractCodeSpans`,
+//  `extractLinks`, `applyEmphasisHTML`/`Strip`) are geared toward emitting HTML or
+//  stripping to text; the office exporters instead need *run structure* — a DOCX
+//  `w:r` with `w:b`/`w:i`, a `w:hyperlink`, an inline image — so they consume this
+//  tree.
+//
+//  Scope (Phase 0B): this IR is introduced for the exporters. The HTML/plaintext
+//  renderers keep their own battle-tested inline path for now; converging them onto
+//  this model is a separate, test-guarded step.
+//
+
+import Foundation
+
+/// One inline node of the canonical Markdown subset. Emphasis/strong/link labels
+/// nest, so they carry child nodes.
+indirect enum MarkdownInline: Equatable {
+    case text(String)
+    case strong([MarkdownInline])
+    case emphasis([MarkdownInline])
+    case code(String)
+    case link(label: [MarkdownInline], destination: String)
+    case image(alt: String, source: String)
+    case footnoteReference(String)
+    case lineBreak(hard: Bool)
+}
+
+enum MarkdownInlineParser {
+    final class ParseMetrics { var copiedLabelBytes = 0 }
+    /// Integer offsets without a Character-sized allocation for every character.
+    /// Sequential and nearby reads reuse a cursor; arbitrary jumps start from a
+    /// sparse checkpoint, at most 255 graphemes away. Both parser passes share
+    /// this representation, so sparse syntax cannot trigger dense index arrays.
+    final class IndexedText: RandomAccessCollection {
+        typealias Index = Int
+        typealias Element = Character
+        private let text: String
+        private let checkpoints: [String.Index]
+        let endIndex: Int
+        var startIndex: Int { 0 }
+        var checkpointCount: Int { checkpoints.count }
+        private var cursor: String.Index
+        private var offset = 0
+        init(_ text: String) {
+            self.text = text; cursor = text.startIndex
+            var points: [String.Index] = [], count = 0
+            for index in text.indices {
+                if count.isMultiple(of: 256) { points.append(index) }
+                count += 1
+            }
+            checkpoints = points; endIndex = count
+        }
+        func index(after i: Int) -> Int { i + 1 }
+        func index(before i: Int) -> Int { i - 1 }
+        subscript(position: Int) -> Character {
+            precondition(position >= 0 && position < endIndex)
+            if abs(position - offset) > 255 {
+                offset = position / 256 * 256
+                cursor = checkpoints[position / 256]
+            }
+            cursor = text.index(cursor, offsetBy: position - offset)
+            offset = position
+            return text[cursor]
+        }
+    }
+
+    private static let structuredRegex = try! NSRegularExpression(pattern: "\u{E020}([0-9]+)\u{E021}")
+    private static let punctuation = ##"!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"##
+
+    /// Parses an inline Markdown string into structured nodes. Code spans, links,
+    /// images, and footnote references are pulled out by a single scan (so their
+    /// contents aren't reinterpreted), and the remaining plain-text runs are parsed
+    /// for `*`/`**`/`***` emphasis.
+    static func parse(_ text: String, depth: Int = 0, tableCell: Bool = false, metrics: ParseMetrics? = nil) -> [MarkdownInline] {
+        guard depth < 64 else { return [.text(text)] }
+        // Plain paragraphs need no character/index tables or delimiter state.
+        let syntax: Set<Unicode.Scalar> = ["\\", "`", "[", "*", "_", "\n", "<", "\u{E020}"]
+        if !text.unicodeScalars.contains(where: { syntax.contains($0) }) {
+            return text.isEmpty ? [] : [.text(text)]
+        }
+        if let literal = escapeOnlyText(text) { return literal.isEmpty ? [] : [.text(literal)] }
+        let chars = IndexedText(text)
+        // Inspect backslash parity only at actual delimiters. The preceding
+        // runs are disjoint, so this is linear without a per-escape index/set.
+        func isEscapedDelimiter(at index: Int) -> Bool {
+            var start = index
+            while start > 0, chars[start - 1] == "\\" { start -= 1 }
+            return !(index - start).isMultiple(of: 2)
+        }
+        // Footnote candidates advance monotonically, so retain one closer
+        // instead of a dictionary entry per opener (dense or sparse).
+        var footnoteSearch = 0
+        var footnoteClose: Int?
+        func footnoteCloser(after opener: Int) -> Int? {
+            if let close = footnoteClose, close > opener { return close }
+            footnoteSearch = max(footnoteSearch, opener + 2)
+            while footnoteSearch < chars.count {
+                let index = footnoteSearch
+                footnoteSearch += 1
+                if chars[index] == "]", !isEscapedDelimiter(at: index) {
+                    footnoteClose = index
+                    return index
+                }
+            }
+            footnoteClose = nil
+            return nil
+        }
+        // Pair destinations once; failed candidates never rescan a suffix.
+        var parenCloses: [Int: Int] = [:], stack: [Int] = []
+        var nextAngle: [Int: Int] = [:]
+        var lastWhitespace = -1
+        for index in chars.indices {
+            let delimiter = chars[index]
+            if delimiter.isWhitespace { lastWhitespace = index }
+            guard delimiter == "(" || delimiter == ")", !isEscapedDelimiter(at: index) else { continue }
+            if delimiter == "(" { stack.append(index) }
+            else if chars[index] == ")", let open = stack.popLast(), lastWhitespace < open {
+                // Only index ranges safe to skip within a bare destination.
+                // One position validates nested ranges without rescanning them.
+                parenCloses[open] = index
+            }
+        }
+        var angleClose: Int?
+        for index in chars.indices.reversed() {
+            let delimiter = chars[index]
+            // Angle destinations cannot cross a physical line, including CRLF
+            // represented as one extended grapheme cluster by String.
+            if delimiter == "\n" || delimiter == "\r" || delimiter == "\r\n" { angleClose = nil; continue }
+            guard delimiter == "<" || delimiter == ">", !isEscapedDelimiter(at: index) else { continue }
+            if delimiter == ">" { angleClose = index }
+            else if delimiter == "<" {
+                if let close = angleClose { nextAngle[index] = close }
+                // An unescaped opener invalidates any enclosing angle range.
+                angleClose = nil
+            }
+        }
+        var tickRuns: [(start: Int, length: Int)] = [], scan = 0
+        while scan < chars.count {
+            if chars[scan] == "`" {
+                let start = scan
+                while scan < chars.count, chars[scan] == "`" { scan += 1 }
+                tickRuns.append((start, scan - start))
+            } else { scan += 1 }
+        }
+        var nextTicks: [Int: (close: Int, length: Int)] = [:], lastTick: [Int: Int] = [:]
+        for tick in tickRuns.reversed() {
+            if let close = lastTick[tick.length] { nextTicks[tick.start] = (close, tick.length) }
+            lastTick[tick.length] = tick.start
+        }
+        // Balance labels once, ignoring escaped brackets and complete code spans.
+        var labelCloses: [Int: Int] = [:]
+        var labels: [(open: Int, firstLinkEnd: Int?)] = []
+        var deactivatedLinks: Set<Int> = []
+        scan = 0
+        while scan < chars.count {
+            if chars[scan] == "\\", scan + 1 < chars.count, punctuation.contains(chars[scan + 1]) { scan += 2; continue }
+            if chars[scan] == "`", let (close, length) = nextTicks[scan] { scan = close + length; continue }
+            if chars[scan] == "[" { labels.append((scan, nil)) }
+            else if chars[scan] == "]", let label = labels.popLast() {
+                labelCloses[label.open] = scan
+                let candidate = linkDestination(chars, labelEnd: scan, parenCloses: parenCloses, nextAngle: nextAngle)
+                let image = label.open > 0 && chars[label.open - 1] == "!" && !isEscapedDelimiter(at: label.open - 1)
+                let footnote = candidate == nil && label.open + 2 < scan && chars[label.open + 1] == "^"
+                let containsLink = label.firstLinkEnd.map { $0 <= scan } ?? false
+                if candidate != nil, !image, containsLink { deactivatedLinks.insert(label.open) }
+                // Valid images and footnotes are opaque to an enclosing link.
+                let emittedEnd: Int?
+                if let candidate, !image, !containsLink { emittedEnd = candidate.next }
+                else if image && candidate != nil || footnote { emittedEnd = nil }
+                else { emittedEnd = label.firstLinkEnd }
+                if !labels.isEmpty, let emittedEnd {
+                    let parent = labels.count - 1
+                    labels[parent].firstLinkEnd = min(labels[parent].firstLinkEnd ?? emittedEnd, emittedEnd)
+                }
+            }
+            scan += 1
+        }
+        var structured: [MarkdownInline] = []
+        var run = ""
+        var i = 0
+        func append(_ node: MarkdownInline) {
+            run += "\u{E020}\(structured.count)\u{E021}"
+            structured.append(node)
+        }
+        while i < chars.count {
+            let c = chars[i]
+            if c == "\u{E020}" { append(.text(String(c))); i += 1; continue }
+
+            if c == "\\", i + 1 < chars.count, punctuation.contains(chars[i + 1]) {
+                run.append(c); run.append(chars[i + 1]); i += 2; continue
+            }
+
+            if c == "\n" {
+                let slashes = chars[..<i].reversed().prefix { $0 == "\\" }.count
+                let spaces = chars[..<i].reversed().prefix { $0 == " " }.count
+                let hard = !slashes.isMultiple(of: 2) || spaces >= 2
+                if !slashes.isMultiple(of: 2) { run.removeLast() }
+                else { while run.last == " " || run.last == "\t" { run.removeLast() } }
+                append(.lineBreak(hard: hard)); i += 1
+                if !hard { while i < chars.count, chars[i] == " " || chars[i] == "\t" { i += 1 } }
+                continue
+            }
+            if tableCell, c == "<", chars[i...].starts(with: Array("<br>")) {
+                append(.lineBreak(hard: true)); i += 4; continue
+            }
+
+            // Code delimiters match the complete run; content is literal.
+            if c == "`" {
+                if let (close, length) = nextTicks[i] {
+                    var code = String(chars[(i + length)..<close]).replacingOccurrences(of: "\n", with: " ")
+                    if code.hasPrefix(" "), code.hasSuffix(" "), code.contains(where: { $0 != " " }) { code = String(code.dropFirst().dropLast()) }
+                    append(.code(code))
+                    i = close + length
+                } else {
+                    repeat { run.append(chars[i]); i += 1 } while i < chars.count && chars[i] == "`"
+                }
+                continue
+            }
+
+            // Image: ![alt](dest)
+            if c == "!", i + 1 < chars.count, chars[i + 1] == "[",
+               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: labelCloses[i + 1], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth, tableCell: tableCell, metrics: metrics) {
+                append(parsed.node)
+                i = parsed.next
+                continue
+            }
+
+            if c == "[" {
+                // Link: [label](dest)
+                if !deactivatedLinks.contains(i), let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: labelCloses[i], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth, tableCell: tableCell, metrics: metrics) {
+                    append(parsed.node)
+                    i = parsed.next
+                    continue
+                }
+                // Footnote reference: [^id]
+                if i + 1 < chars.count, chars[i + 1] == "^",
+                   let close = footnoteCloser(after: i) {
+                    let id = String(chars[(i + 2)..<close])
+                    if !id.isEmpty {
+                        append(.footnoteReference(id))
+                        i = close + 1
+                        continue
+                    }
+                }
+
+            }
+
+            run.append(c)
+            i += 1
+        }
+        func restore(_ nodes: [MarkdownInline]) -> [MarkdownInline] {
+            nodes.flatMap { node -> [MarkdownInline] in
+                switch node {
+                case .text(let text):
+                    guard text.contains("\u{E020}") else { return [node] }
+                    let ns = text as NSString
+                    var output: [MarkdownInline] = [], offset = 0
+                    for match in structuredRegex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                        if match.range.location > offset { output.append(.text(ns.substring(with: NSRange(location: offset, length: match.range.location - offset)))) }
+                        if let index = Int(ns.substring(with: match.range(at: 1))), structured.indices.contains(index) { output.append(structured[index]) }
+                        else { output.append(.text(ns.substring(with: match.range))) }
+                        offset = NSMaxRange(match.range)
+                    }
+                    if offset < ns.length { output.append(.text(ns.substring(from: offset))) }
+                    return output
+                case .strong(let children): return [.strong(restore(children))]
+                case .emphasis(let children): return [.emphasis(restore(children))]
+                default: return [node]
+                }
+            }
+        }
+        return restore(parseEmphasis(run, structured: structured))
+    }
+
+    /// Decode escapes without allocating delimiter indexes when no active syntax
+    /// remains. A late syntax marker falls back to the structured parser.
+    private static func escapeOnlyText(_ text: String) -> String? {
+        let scalars = text.unicodeScalars
+        let syntax: Set<Unicode.Scalar> = ["`", "[", "*", "_", "\n", "<", "\u{E020}"]
+        let escapable = Set(punctuation.unicodeScalars)
+        var output = "", index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            index = scalars.index(after: index)
+            if scalar == "\\", index < scalars.endIndex, escapable.contains(scalars[index]) {
+                output.unicodeScalars.append(scalars[index])
+                index = scalars.index(after: index)
+            } else {
+                guard !syntax.contains(scalar) else { return nil }
+                output.unicodeScalars.append(scalar)
+            }
+        }
+        return output
+    }
+
+    // MARK: - Link / image
+
+    /// Parses `[label](dest)` or `![alt](dest)` starting at `from` (the `[` for a
+    /// link, the `!` for an image). Supports CommonMark angle-bracket destinations
+    /// `(<url with spaces>)` that `WordConverter` emits. Returns the node and the
+    /// index just past the closing `)`, or nil if the syntax doesn't match.
+    private static func parseLinkOrImage(_ chars: IndexedText, from: Int, isImage: Bool, labelEnd: Int?, parenCloses: [Int: Int], nextAngle: [Int: Int], depth: Int, tableCell: Bool, metrics: ParseMetrics?) -> (node: MarkdownInline, next: Int)? {
+        let bracket = isImage ? from + 1 : from
+        guard bracket < chars.count, chars[bracket] == "[" else { return nil }
+        // Find the label's closing `]`, skipping backslash-escaped delimiters:
+        // `WordConverter` escapes `[`/`]` inside labels and alt text, so a visible
+        // `]` arrives as `\]` and must not terminate the label early.
+        guard let labelEnd else { return nil }
+        guard let destination = linkDestination(chars, labelEnd: labelEnd, parenCloses: parenCloses, nextAngle: nextAngle) else { return nil }
+        let dest = destination.text
+        let labelText = String(chars[(bracket + 1)..<labelEnd])
+        metrics?.copiedLabelBytes += labelText.utf8.count
+        let label = parse(labelText, depth: depth + 1, tableCell: tableCell, metrics: metrics)
+        func containsLink(_ nodes: [MarkdownInline]) -> Bool {
+            nodes.contains { node in
+                switch node {
+                case .link: return true
+                case .strong(let children), .emphasis(let children): return containsLink(children)
+                default: return false
+                }
+            }
+        }
+        // An inner link deactivates the outer opener; the main scan will then
+        // recognize that inner link and retain the outer punctuation literally.
+        guard isImage || !containsLink(label) else { return nil }
+        let visibleLabel = label.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? [MarkdownInline.text(dest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Link" : dest)]
+            : label
+        let node: MarkdownInline = isImage
+            ? .image(alt: label.plainText, source: dest)
+            : .link(label: visibleLabel, destination: dest)
+        return (node, destination.next)   // past the ")"
+    }
+
+    // Destination validation precedes label allocation. The bracket pass uses
+    // the same grammar to deactivate outer links containing a live inner link.
+    private static func linkDestination(_ chars: IndexedText, labelEnd: Int, parenCloses: [Int: Int], nextAngle: [Int: Int]) -> (text: String, next: Int)? {
+        let parenOpen = labelEnd + 1
+        guard parenOpen < chars.count, chars[parenOpen] == "(" else { return nil }
+
+        var cursor = parenOpen + 1
+        while cursor < chars.count, chars[cursor].isWhitespace { cursor += 1 }
+        let destStart = cursor
+        var dest = ""
+        if cursor < chars.count, chars[cursor] == "<" {
+            guard let gt = nextAngle[cursor] else { return nil }
+            dest = unescape(String(chars[(cursor + 1)..<gt]))
+            cursor = gt + 1
+        } else {
+            // Separate the bare URL from its optional title. Balanced URL
+            // parentheses are paired and checked for whitespace by the initial scan.
+            while cursor < chars.count, !chars[cursor].isWhitespace, chars[cursor] != ")" {
+                if chars[cursor] == "\\", cursor + 1 < chars.count, punctuation.contains(chars[cursor + 1]) { cursor += 2 }
+                else if chars[cursor] == "(" {
+                    guard let close = parenCloses[cursor] else { return nil }
+                    cursor = close + 1
+                } else { cursor += 1 }
+            }
+            dest = unescape(String(chars[destStart..<cursor]))
+        }
+        let afterDestination = cursor
+        while cursor < chars.count, chars[cursor].isWhitespace { cursor += 1 }
+        if cursor < chars.count, chars[cursor] != ")" {
+            guard cursor > afterDestination, ["\"", "'", "("].contains(chars[cursor]) else { return nil }
+            let delimiter: Character = chars[cursor] == "(" ? ")" : chars[cursor]
+            cursor += 1
+            while cursor < chars.count, chars[cursor] != delimiter {
+                if chars[cursor] == "\\", cursor + 1 < chars.count { cursor += 2 }
+                else { cursor += 1 }
+            }
+            guard cursor < chars.count else { return nil }
+            cursor += 1
+            while cursor < chars.count, chars[cursor].isWhitespace { cursor += 1 }
+        }
+        guard cursor < chars.count, chars[cursor] == ")" else { return nil }
+        return (dest, cursor + 1)
+    }
+
+    /// Removes backslash escapes (`\x` -> `x`), recovering the literal label/destination
+    /// text that `WordConverter` (and CommonMark authors) escape.
+    static func unescape(_ text: String) -> String {
+        guard text.contains("\\") else { return text }
+        var out = "", index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            if text[index] == "\\", next < text.endIndex, punctuation.contains(text[next]) {
+                out.append(text[next]); index = text.index(after: next)
+            } else { out.append(text[index]); index = next }
+        }
+        return out
+    }
+
+    // MARK: - Emphasis
+
+    static func parseEmphasis(_ text: String, structured: [MarkdownInline] = []) -> [MarkdownInline] {
+        var protected = "", escapes: [String] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            if text[index] == "\u{E010}" {
+                escapes.append(String(text[index]))
+                protected += "\u{E010}\(escapes.count - 1)\u{E011}"
+                index = next
+            } else if text[index] == "\\", next < text.endIndex, punctuation.contains(text[next]) {
+                escapes.append(String(text[next]))
+                protected += "\u{E010}\(escapes.count - 1)\u{E011}"
+                index = text.index(after: next)
+            } else { protected.append(text[index]); index = next }
+        }
+        let nodes = parseEmphasisProtected(protected, structured: structured, escapes: escapes)
+        guard !escapes.isEmpty else { return nodes }
+        func restore(_ text: String) -> String {
+            let ns = text as NSString
+            var result = "", offset = 0
+            for match in escapeRegex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                result += ns.substring(with: NSRange(location: offset, length: match.range.location - offset))
+                if let index = Int(ns.substring(with: match.range(at: 1))), escapes.indices.contains(index) { result += escapes[index] }
+                else { result += ns.substring(with: match.range) }
+                offset = NSMaxRange(match.range)
+            }
+            result += ns.substring(from: offset)
+            return result
+        }
+        func restoreNode(_ node: MarkdownInline) -> MarkdownInline {
+            switch node {
+            case .text(let text): return .text(restore(text))
+            case .strong(let children): return .strong(children.map(restoreNode))
+            case .emphasis(let children): return .emphasis(children.map(restoreNode))
+            default: return node
+            }
+        }
+        return nodes.map(restoreNode)
+    }
+
+    private static let escapeRegex = try! NSRegularExpression(pattern: "\u{E010}([0-9]+)\u{E011}")
+
+    private static func parseEmphasisProtected(_ text: String, structured: [MarkdownInline], escapes: [String]) -> [MarkdownInline] {
+        // Keep unmatched delimiter runs on a stack. A closing run is consumed
+        // from its left edge, so *** can close an inner * and then an outer **.
+        struct Frame {
+            var count: Int
+            let delimiter: Character
+            let canClose: Bool
+            var nodes: [MarkdownInline]
+            var text = ""
+        }
+        let chars = IndexedText(text)
+        // Placeholder boundaries have the source node's punctuation/whitespace
+        // class, never the private-use sentinel's alphanumeric-like class.
+        var boundaries: [Int: Character] = [:]
+        var position = 0
+        while position < chars.count {
+            let start = position
+            let opener = chars[position]
+            guard opener == "\u{E020}" || opener == "\u{E010}" else { position += 1; continue }
+            position += 1
+            let digits = position
+            while position < chars.count, chars[position].isASCII, chars[position].isNumber { position += 1 }
+            let closer: Character = opener == "\u{E020}" ? "\u{E021}" : "\u{E011}"
+            guard position < chars.count, chars[position] == closer,
+                  let item = Int(String(chars[digits..<position])) else { continue }
+            let boundary: Character
+            if opener == "\u{E010}", escapes.indices.contains(item), let value = escapes[item].first { boundary = value }
+            else if opener == "\u{E020}", structured.indices.contains(item) {
+                switch structured[item] {
+                case .lineBreak: boundary = " "
+                case .text(let text): boundary = text.first ?? " "
+                default: boundary = "`"
+                }
+            } else { position += 1; continue }
+            boundaries[start] = boundary; boundaries[position] = boundary
+            position += 1
+        }
+        var frames: [Frame] = [Frame(count: 0, delimiter: "*", canClose: false, nodes: [])]
+        var index = 0
+        func punctuation(_ c: Character?) -> Bool {
+            guard let c else { return false }
+            return c.unicodeScalars.allSatisfy { CharacterSet.punctuationCharacters.union(.symbols).contains($0) }
+        }
+        func appendText(_ value: String) { frames[frames.count - 1].text += value }
+        func flushText() {
+            let last = frames.count - 1
+            if !frames[last].text.isEmpty {
+                frames[last].nodes.append(.text(frames[last].text))
+                frames[last].text = ""
+            }
+        }
+        func appendNode(_ node: MarkdownInline) {
+            if case .text(let text) = node { appendText(text) }
+            else { flushText(); frames[frames.count - 1].nodes.append(node) }
+        }
+        while index < chars.count {
+            guard chars[index] == "*" || chars[index] == "_" else {
+                let start = index
+                while index < chars.count, chars[index] != "*", chars[index] != "_" { index += 1 }
+                appendText(String(chars[start..<index]))
+                continue
+            }
+            let start = index
+            let delimiter = chars[index]
+            while index < chars.count, chars[index] == delimiter { index += 1 }
+            var remaining = index - start
+            let before: Character? = start > 0 ? (boundaries[start - 1] ?? chars[start - 1]) : nil
+            let after: Character? = index < chars.count ? (boundaries[index] ?? chars[index]) : nil
+            let beforeSpace = before?.isWhitespace ?? true
+            let afterSpace = after?.isWhitespace ?? true
+            let leftFlanking = !afterSpace && (!punctuation(after) || beforeSpace || punctuation(before))
+            let rightFlanking = !beforeSpace && (!punctuation(before) || afterSpace || punctuation(after))
+            let opens = leftFlanking && (delimiter == "*" || !rightFlanking || punctuation(before))
+            let closes = rightFlanking && (delimiter == "*" || !leftFlanking || punctuation(after))
+            while closes, remaining > 0, frames.count > 1 {
+                guard let match = frames.indices.reversed().first(where: { candidate in
+                    guard candidate > 0, frames[candidate].delimiter == delimiter else { return false }
+                    return !((opens || frames[candidate].canClose) && (frames[candidate].count + remaining) % 3 == 0
+                        && (frames[candidate].count % 3 != 0 || remaining % 3 != 0))
+                }) else { break }
+                while frames.count - 1 > match {
+                    flushText()
+                    let skipped = frames.removeLast()
+                    appendText(String(repeating: String(skipped.delimiter), count: skipped.count))
+                    for node in skipped.nodes { appendNode(node) }
+                }
+                let top = frames.count - 1
+                let used = frames[top].count >= 2 && remaining >= 2 && !(frames[top].count == 3 && remaining == 3) ? 2 : 1
+                flushText()
+                let children = frames[top].nodes
+                let node: MarkdownInline = used == 2 ? .strong(children) : .emphasis(children)
+                frames[top].count -= used
+                remaining -= used
+                if frames[top].count == 0 {
+                    frames.removeLast()
+                    appendNode(node)
+                } else { frames[top].nodes = [node] }
+            }
+            if remaining > 0 {
+                if opens, frames.count < 128 {
+                    frames.append(Frame(count: remaining, delimiter: delimiter, canClose: closes, nodes: []))
+                } else { appendText(String(repeating: String(delimiter), count: remaining)) }
+            }
+        }
+        while frames.count > 1 {
+            flushText()
+            let frame = frames.removeLast()
+            appendText(String(repeating: String(frame.delimiter), count: frame.count))
+            for node in frame.nodes { appendNode(node) }
+        }
+        flushText()
+        return frames[0].nodes
+    }
+
+    private static func firstIndex(of character: Character, in chars: [Character], from start: Int) -> Int? {
+        var i = start
+        while i < chars.count {
+            if chars[i] == character { return i }
+            i += 1
+        }
+        return nil
+    }
+}
+
+// MARK: - Plain text projection
+
+extension MarkdownInline {
+    /// The node's visible text with all inline formatting removed (links/images
+    /// collapse to their label/alt; footnote references contribute nothing). Useful
+    /// for exporters that need a bare string, e.g. spreadsheet cells.
+    var plainText: String {
+        switch self {
+        case .lineBreak: return "\n"
+        case .text(let s): return s
+        case .code(let s): return s
+        case .strong(let children), .emphasis(let children): return children.plainText
+        case .link(let label, _): return label.plainText
+        case .image(let alt, let source):
+            guard alt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return alt }
+            let basename = (source.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent
+            if !basename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return basename }
+            if !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return source }
+            return "Image"
+        case .footnoteReference(let id): return "[^\(id)]"
+        }
+    }
+}
+
+extension Array where Element == MarkdownInline {
+    var plainText: String { map(\.plainText).joined() }
+}

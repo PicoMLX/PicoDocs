@@ -58,24 +58,40 @@ final class WordListNumbering {
     private(set) var isResolvable = false
 
     private(set) var failure: Error?
+    private(set) var lastParagraphList: (instance: String, level: Int)?
+    private(set) var lastParagraphIsContinuation = false
+    private(set) var lastParagraphIsExportedContinuation = false
+    private var activeMarkerWidths: [Int: Int] = [:]
+    private var activeNumberingInstance: String?
+
 
     init(archive: Archive) {
         do {
-            if let app = try Self.xml(archive, path: "docProps/app.xml") {
+            if let app = try xml(archive, path: "docProps/app.xml") {
                 isLibreOffice = ((try? app.getElementsByTag("Application").text()) ?? "").hasPrefix("LibreOffice")
             }
             let numberingPath = try WordConverter.relationshipTarget(archive, typeSuffix: "/numbering")
                 .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/numbering.xml"
             let stylesPath = try WordConverter.relationshipTarget(archive, typeSuffix: "/styles")
                 .map { WordConverter.resolvePartPath($0, relativeTo: "word") } ?? "word/styles.xml"
-            if let numbering = try Self.xml(archive, path: numberingPath) {
+            if let numbering = try xml(archive, path: numberingPath) {
                 isResolvable = true
                 parseNumbering(numbering)
             }
-            if let styles = try Self.xml(archive, path: stylesPath) {
+            if let styles = try xml(archive, path: stylesPath) {
                 parseStyles(styles)
             }
         } catch { failure = error }
+    }
+
+    /// The heading preview consumes counters, but never changes definitions.
+    /// Reuse the parsed dictionaries and restart only the mutable render state.
+    func resetRenderingState() {
+        counters.removeAll(); markerWidths.removeAll(); lastInstance.removeAll()
+        renderedInstances.removeAll(); activeMarkerWidths.removeAll()
+        resumeAlias = nil; activeNumberingInstance = nil; listRestartIndent = nil
+        lastParagraphList = nil; lastParagraphIsContinuation = false
+        lastParagraphIsExportedContinuation = false
     }
 
     /// The Markdown prefix (indent + marker) for a paragraph, or nil when it isn't
@@ -83,14 +99,20 @@ final class WordListNumbering {
     /// `w:pStyle`, whose (inherited) numbering applies when the paragraph has none.
     func prefix(numPr: Element?, style: String?, visibleMarker: Bool = true, paragraphProperties: Element? = nil) -> String? {
         listRestartIndent = nil
+        lastParagraphList = nil
+        lastParagraphIsContinuation = false
+        lastParagraphIsExportedContinuation = style == "PicoListContinuation"
         var numID = numPr.flatMap { Self.child(of: $0, named: "w:numid") }.flatMap { try? $0.attr("w:val") }
         var level = numPr.flatMap { Self.child(of: $0, named: "w:ilvl") }.flatMap { try? $0.attr("w:val") }.flatMap { Int($0) }
         if numID == nil || level == nil, let inherited = styleNumbering(style) {
             numID = numID ?? inherited.numID
             level = level ?? inherited.level
         }
-        guard let numID = Self.canonicalID(numID), numID != "0" else { return nil }   // numId 0: numbering removed
+        guard let numID = Self.canonicalID(numID), numID != "0" else { activeMarkerWidths.removeAll(); activeNumberingInstance = nil; return nil }   // numId 0: numbering removed
 
+        if activeNumberingInstance != numID, style != "PicoListItem", !lastParagraphIsExportedContinuation { activeMarkerWidths.removeAll() }
+        if !lastParagraphIsExportedContinuation { activeNumberingInstance = numID }
+        lastParagraphList = (numID, min(max(level ?? 0, 0), 8))
         guard isResolvable, let number = numbers[numID] else {
             if visibleMarker { recordRenderedInstance(numID, level: 0, indent: 0) }
             return "- "   // Resolved membership survives a missing definition, including styles.
@@ -106,6 +128,7 @@ final class WordListNumbering {
             }
         }
         let ilvl = min(max(level ?? 0, 0), 8)
+        lastParagraphList = (numID, ilvl)
         let abstract = number.abstract
         let definition = effectiveLevel(numID: numID, level: ilvl)
         var resumedInstance: String?
@@ -145,7 +168,10 @@ final class WordListNumbering {
         var marker: String
         switch definition?.format ?? "bullet" {
         case "none":
-            return nil
+            guard lastParagraphIsExportedContinuation || ilvl > 0 else { return nil }
+            lastParagraphIsContinuation = true
+            let indent = (0..<(lastParagraphIsExportedContinuation ? ilvl + 1 : ilvl)).reduce(0) { $0 + (activeMarkerWidths[$1] ?? markerWidths[numID]?[$1] ?? 2) }
+            return String(repeating: " ", count: indent)
         case "bullet":
             if suffix.isEmpty {
                 let label = definition?.text ?? "•"
@@ -165,7 +191,11 @@ final class WordListNumbering {
                 marker = "- " + escaped + suffix
             }
         }
-        let indent = (0..<ilvl).reduce(0) { $0 + (markerWidths[numID]?[$1] ?? 0) }
+        let indent = (0..<ilvl).reduce(0) { $0 + (style == "PicoListItem" ? activeMarkerWidths[$1] ?? markerWidths[numID]?[$1] ?? 2 : markerWidths[numID]?[$1] ?? 0) }
+        if style == "PicoListItem" {
+            activeMarkerWidths = activeMarkerWidths.filter { $0.key < ilvl }
+            activeMarkerWidths[ilvl] = Self.displayWidth(marker, startingAt: indent) - indent
+        }
         if visibleMarker {
             markerWidths[numID, default: [:]][ilvl] = marker.hasPrefix("- ") ? 2 : Self.displayWidth(marker, startingAt: indent) - indent
             recordRenderedInstance(numID, level: ilvl, indent: indent, resuming: resumedInstance)
@@ -428,9 +458,12 @@ final class WordListNumbering {
         return trimmed.isEmpty ? "0" : String(trimmed)
     }
 
-    private static func xml(_ archive: Archive, path: String) throws -> Document? {
-        guard let data = try WordConverter.readEntry(archive, path: path),
-              let text = WordConverter.decodeText(data) else { return nil }
+    private func xml(_ archive: Archive, path: String) throws -> Document? {
+        guard archive[path] != nil else { return nil }
+        // Three optional parts at most: this caps their aggregate decoded input
+        // at 24 MiB, independent of compression ratio or declared ZIP sizes.
+        guard let data = try WordConverter.readEntry(archive, path: path, maxBytes: 8 * 1024 * 1024),
+              let text = WordConverter.decodeText(data) else { failure = PicoDocsError.fileCorrupted; return nil }
         return try? SwiftSoup.parse(text, "", SwiftSoup.Parser.xmlParser())
     }
 
