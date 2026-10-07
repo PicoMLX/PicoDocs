@@ -234,15 +234,15 @@ struct PowerPointConverterTests {
         let result = try await PicoDocsEngine.convert(data: deck, filename: "deck.pptx")
         #expect(result.title == "Board Deck")
         #expect(result.author == "Ada")
-        #expect(result.sections.map(\.slideNumber) == [2])
+        #expect(result.sections.map(\.slideNumber) == [1, 2])
     }
 
-    @Test("A deck with no text is an empty document")
+    @Test("A blank native slide retains its provenance")
     func emptyDeck() async throws {
         let deck = Self.deck(slides: [.init(file: "slide1.xml", shapes: "")])
-        await #expect(throws: PicoDocsError.self) {
-            try await PicoDocsEngine.convert(data: deck, filename: "empty.pptx")
-        }
+        let result = try await PicoDocsEngine.convert(data: deck, filename: "empty.pptx")
+        #expect(result.sections.map(\.slideNumber) == [1])
+        #expect(result.markdown().isEmpty)
     }
 
     // MARK: - Builders

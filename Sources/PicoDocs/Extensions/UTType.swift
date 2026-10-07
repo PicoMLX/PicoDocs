@@ -31,6 +31,9 @@ public extension UTType {
     // Apple Keynote (iWork '13+): package or flat single-file form.
     static let keynote = UTType(importedAs: "com.apple.iwork.keynote.key", conformingTo: .zip)
     static let keynoteSingleFile = UTType(importedAs: "com.apple.iwork.keynote.sffkey", conformingTo: .zip)
+    // Apple Numbers (iWork '13+): package or flat single-file form.
+    static let numbers = UTType(importedAs: "com.apple.iwork.numbers.numbers", conformingTo: .zip)
+    static let numbersSingleFile = UTType(importedAs: "com.apple.iwork.numbers.sffnumbers", conformingTo: .zip)
 
     /// Array of all supported documents
     static let supportedDocumentTypes: [UTType] = {
@@ -40,7 +43,7 @@ public extension UTType {
             .doc, .docx, .xlsx, .pptx,
             .epub, .pages, .pagesSingleFile, .keynote, .keynoteSingleFile,
             .pdf, .rtf, .rtfd, .text, .flatRTFD, .plainText, .utf8PlainText, .xml,
-            .spreadsheet, .commaSeparatedText,
+            .spreadsheet, .commaSeparatedText, .numbers, .numbersSingleFile,
             .internetLocation, .internetShortcut, .url, .urlBookmarkData, .html, .xhtml,
             .sourceCode, .json, .objectiveCSource, .phpScript, .perlScript, .shellScript, .script, .javaScript, .pythonScript, .assemblyLanguageSource,
             .emailMessage, .spreadsheet,
@@ -65,6 +68,6 @@ public extension UTType {
         // `importedAs` declaration, so the previous `contains(self)` identity
         // check could miss it. Conformance also lets a concrete subtype match
         // its declared supertype (e.g. a specific source-code UTI vs `.sourceCode`).
-        Self.supportedDocumentTypes.contains { self.conforms(to: $0) }
+        return Self.supportedDocumentTypes.contains { self.conforms(to: $0) }
     }
 }
