@@ -56,15 +56,22 @@ public struct PPTXExporter: DocumentExporter {
             try packageBudget.admitXML(path, xml)
             try pkg.addXML(path, xml)
         }
+        let hasNotes = !noteSlideIDs.isEmpty
         try addXML("[Content_Types].xml", OOXMLPackageWriter.withCoreContentType(Self.contentTypes(slideCount: count, noteSlideIDs: noteSlideIDs)))
         try addXML("_rels/.rels", OOXMLPackageWriter.withCoreRelationship(Self.rootRels))
-        try addXML("ppt/presentation.xml", Self.presentationXML(slideCount: count))
-        try addXML("ppt/_rels/presentation.xml.rels", Self.presentationRels(slideCount: count))
+        try addXML("ppt/presentation.xml", Self.presentationXML(slideCount: count, notesMaster: hasNotes))
+        try addXML("ppt/_rels/presentation.xml.rels", Self.presentationRels(slideCount: count, notesMaster: hasNotes))
         try addXML("ppt/slideMasters/slideMaster1.xml", PPTXTemplates.slideMaster)
         try addXML("ppt/slideMasters/_rels/slideMaster1.xml.rels", PPTXTemplates.slideMasterRels)
         try addXML("ppt/slideLayouts/slideLayout1.xml", PPTXTemplates.slideLayout)
         try addXML("ppt/slideLayouts/_rels/slideLayout1.xml.rels", PPTXTemplates.slideLayoutRels)
         try addXML("ppt/theme/theme1.xml", PPTXTemplates.theme)
+        if hasNotes {
+            // PowerPoint expects a notes master whenever notes slides exist.
+            try addXML("ppt/notesMasters/notesMaster1.xml", PPTXTemplates.notesMaster)
+            try addXML("ppt/notesMasters/_rels/notesMaster1.xml.rels", PPTXTemplates.notesMasterRels)
+            try addXML("ppt/theme/theme2.xml", PPTXTemplates.theme)
+        }
         for (i, slide) in effectiveSlides.enumerated() {
             try Task.checkCancellation()
             var relationships = SlideRelationships(packageBudget: packageBudget)
@@ -75,7 +82,8 @@ public struct PPTXExporter: DocumentExporter {
                 let number = i + 1
                 try addXML("ppt/notesSlides/notesSlide\(number).xml", try Self.notesXML(notes, fragmentSlides: fragmentSlides, relationships: &noteRelationships))
                 let backlink = "<Relationship Id=\"slide\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"../slides/slide\(number).xml\"/>"
-                let noteRels = OOXMLPackageWriter.xmlDeclaration + "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" + backlink + noteRelationships.xml + "</Relationships>"
+                let master = "<Relationship Id=\"notesMaster\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster\" Target=\"../notesMasters/notesMaster1.xml\"/>"
+                let noteRels = OOXMLPackageWriter.xmlDeclaration + "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" + backlink + master + noteRelationships.xml + "</Relationships>"
                 try addXML("ppt/notesSlides/_rels/notesSlide\(number).xml.rels", noteRels)
                 extraRels += "<Relationship Id=\"notes\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide\" Target=\"../notesSlides/notesSlide\(number).xml\"/>"
             }
@@ -102,7 +110,7 @@ public struct PPTXExporter: DocumentExporter {
         /// same allowance; manifests and relationship XML have independent parses.
         func admitXML(_ path: String, _ xml: String) throws {
             try Task.checkCancellation()
-            let shared = !path.contains("/_rels/") && ["ppt/slides/", "ppt/notesSlides/", "ppt/slideLayouts/", "ppt/slideMasters/", "ppt/theme/"].contains { path.hasPrefix($0) }
+            let shared = !path.contains("/_rels/") && ["ppt/slides/", "ppt/notesSlides/", "ppt/slideLayouts/", "ppt/slideMasters/", "ppt/notesMasters/", "ppt/theme/"].contains { path.hasPrefix($0) }
             let allowance = shared ? xmlBudget : (path == "[Content_Types].xml" ? .init(nodes: 16_385, attributes: 32_768, bytes: 8 * 1024 * 1024) : .init())
             guard PowerPointXML.normalize(Data(xml.utf8), budget: allowance) != nil else {
                 try Task.checkCancellation()
@@ -110,8 +118,10 @@ public struct PPTXExporter: DocumentExporter {
             }
         }
         func admitStructure(slides: Int, noteSlideIDs: Set<Int>) throws {
-            guard slides > 0, maximumParts >= 10, slides <= (maximumParts - 10) / 2,
-                  noteSlideIDs.count <= (maximumParts - 10 - slides * 2) / 2,
+            // Ten fixed parts, plus the notes master, its relationships and its theme.
+            let fixedParts = noteSlideIDs.isEmpty ? 10 : 13
+            guard slides > 0, maximumParts >= fixedParts, slides <= (maximumParts - fixedParts) / 2,
+                  noteSlideIDs.count <= (maximumParts - fixedParts - slides * 2) / 2,
                   noteSlideIDs.allSatisfy({ (1...slides).contains($0) }) else {
                 throw ExporterError.serializationFailed("PPTX parts exceed the reader's package-entry limit")
             }
@@ -122,6 +132,11 @@ public struct PPTXExporter: DocumentExporter {
             try reserveRelationship(id: "rId1", suffix: "slideLayout", target: "../slideLayouts/slideLayout1.xml")
             try reserveRelationship(id: "rId2", suffix: "theme", target: "../theme/theme1.xml")
             try reserveRelationship(id: "rId1", suffix: "slideMaster", target: "../slideMasters/slideMaster1.xml")
+            if !noteSlideIDs.isEmpty {
+                for part in ["ppt/notesMasters/notesMaster1.xml", "ppt/theme/theme2.xml"] { try reserveMap(part) }
+                try reserveRelationship(id: "notesMaster", suffix: "notesMaster", target: "notesMasters/notesMaster1.xml")
+                try reserveRelationship(id: "rId1", suffix: "theme", target: "../theme/theme2.xml")
+            }
             for number in 1...slides {
                 try Task.checkCancellation()
                 try reserveMap("ppt/slides/slide\(number).xml")
@@ -131,6 +146,7 @@ public struct PPTXExporter: DocumentExporter {
                     try reserveMap("ppt/notesSlides/notesSlide\(number).xml")
                     try reserveRelationship(id: "notes", suffix: "notesSlide", target: "../notesSlides/notesSlide\(number).xml")
                     try reserveRelationship(id: "slide", suffix: "slide", target: "../slides/slide\(number).xml")
+                    try reserveRelationship(id: "notesMaster", suffix: "notesMaster", target: "../notesMasters/notesMaster1.xml")
                 }
             }
         }
@@ -530,6 +546,10 @@ public struct PPTXExporter: DocumentExporter {
         <Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>\
         <Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
         """
+        if !noteSlideIDs.isEmpty {
+            overrides += "<Override PartName=\"/ppt/notesMasters/notesMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml\"/>"
+            overrides += "<Override PartName=\"/ppt/theme/theme2.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>"
+        }
         for i in 1...slideCount {
             overrides += "<Override PartName=\"/ppt/slides/slide\(i).xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"
         }
@@ -543,8 +563,10 @@ public struct PPTXExporter: DocumentExporter {
         """
     }
 
-    private static func presentationXML(slideCount: Int) -> String {
+    private static func presentationXML(slideCount: Int, notesMaster: Bool) -> String {
         // sldMasterIdLst uses rId1; slides use rId2... (see presentationRels).
+        // The notes master list must follow sldMasterIdLst and precede sldIdLst.
+        let notesMasters = notesMaster ? "<p:notesMasterIdLst><p:notesMasterId r:id=\"notesMaster\"/></p:notesMasterIdLst>" : ""
         var sldIds = ""
         for i in 1...slideCount {
             sldIds += "<p:sldId id=\"\(255 + i)\" r:id=\"rId\(i + 1)\"/>"
@@ -553,15 +575,18 @@ public struct PPTXExporter: DocumentExporter {
         <p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" \
         xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" \
         xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">\
-        <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>\
+        <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>\(notesMasters)\
         <p:sldIdLst>\(sldIds)</p:sldIdLst>\
         <p:sldSz cx="9144000" cy="6858000" type="screen4x3"/>\
         <p:notesSz cx="6858000" cy="9144000"/></p:presentation>
         """
     }
 
-    private static func presentationRels(slideCount: Int) -> String {
+    private static func presentationRels(slideCount: Int, notesMaster: Bool) -> String {
         var rels = "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster\" Target=\"slideMasters/slideMaster1.xml\"/>"
+        if notesMaster {
+            rels += "<Relationship Id=\"notesMaster\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster\" Target=\"notesMasters/notesMaster1.xml\"/>"
+        }
         for i in 1...slideCount {
             rels += "<Relationship Id=\"rId\(i + 1)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide\(i).xml\"/>"
         }

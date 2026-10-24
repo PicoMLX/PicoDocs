@@ -47,16 +47,20 @@ struct OfficeFifthStackReviewTests {
         ])
         let data = try PicoDocsEngine.write(result, to: .pptx)
         let archive = try Archive(data: data, accessMode: .read)
-        #expect(Array(archive).count == 16) // ten fixed, four slide parts, two notes parts
-        try PPTXExporter.PackageBudget(maximumParts: 16).admitStructure(slides: 2, noteSlideIDs: [1])
-        #expect(throws: ExporterError.self) { try PPTXExporter.PackageBudget(maximumParts: 15).admitStructure(slides: 2, noteSlideIDs: [1]) }
+        // Ten fixed, four slide parts, two notes parts, and the notes master,
+        // its relationships and its theme.
+        #expect(Array(archive).count == 19)
+        try PPTXExporter.PackageBudget(maximumParts: 19).admitStructure(slides: 2, noteSlideIDs: [1])
+        #expect(throws: ExporterError.self) { try PPTXExporter.PackageBudget(maximumParts: 18).admitStructure(slides: 2, noteSlideIDs: [1]) }
         try PPTXExporter.PackageBudget().admitStructure(slides: 8187, noteSlideIDs: [])
         #expect(throws: ExporterError.self) { try PPTXExporter.PackageBudget().admitStructure(slides: 8188, noteSlideIDs: []) }
-        #expect(throws: ExporterError.self) { try PPTXExporter.PackageBudget(maximumParts: 16).admitStructure(slides: 2, noteSlideIDs: [3]) }
+        try PPTXExporter.PackageBudget().admitStructure(slides: 8184, noteSlideIDs: [1])
+        #expect(throws: ExporterError.self) { try PPTXExporter.PackageBudget().admitStructure(slides: 8185, noteSlideIDs: [1]) }
+        #expect(throws: ExporterError.self) { try PPTXExporter.PackageBudget(maximumParts: 19).admitStructure(slides: 2, noteSlideIDs: [3]) }
     }
     @Test func relationshipsShareOneCountAcrossSlidesAndNotes() throws {
-        // The generated two-slide graph with one notes part owns 12 fixed relationships.
-        let budget = PPTXExporter.PackageBudget(maximumRelationships: 14)
+        // The generated two-slide graph with one notes part owns 15 fixed relationships.
+        let budget = PPTXExporter.PackageBudget(maximumRelationships: 17)
         try budget.admitStructure(slides: 2, noteSlideIDs: [1])
         var first = PPTXExporter.SlideRelationships(packageBudget: budget)
         var second = PPTXExporter.SlideRelationships(packageBudget: budget)
@@ -65,7 +69,7 @@ struct OfficeFifthStackReviewTests {
         #expect(try first.add(target: "https://example.com/one", jump: false) == id)
         _ = try second.add(target: "https://example.com/two", jump: false)
         #expect(throws: ExporterError.self) { _ = try notes.add(target: "https://example.com/notes", jump: false) }
-        #expect(throws: ExporterError.self) { try PPTXExporter.PackageBudget(maximumRelationships: 11).admitStructure(slides: 2, noteSlideIDs: [1]) }
+        #expect(throws: ExporterError.self) { try PPTXExporter.PackageBudget(maximumRelationships: 14).admitStructure(slides: 2, noteSlideIDs: [1]) }
     }
     @Test func relationshipsShareOneByteAllowanceBeforeFragmentConstruction() throws {
         let target = "https://example.com/one"
