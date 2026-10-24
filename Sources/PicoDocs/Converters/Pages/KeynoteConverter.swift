@@ -215,23 +215,39 @@ public struct KeynoteConverter: DocumentConverter {
     private typealias Component = (name: String, bytes: [UInt8])
 
     /// Reads the `.iwa` component streams from loose `Index/*.iwa` entries, or —
-    /// failing that — from a nested `Index.zip` (the common Keynote layout).
+    /// failing that — from a nested `Index.zip` (the common Keynote layout), at
+    /// the archive root or else inside the single folder every entry shares (a
+    /// package zipped as a folder, e.g. `Talk.key/Index.zip`).
     private func iwaComponents(in archive: Archive) throws -> [Component] {
         var components: [Component] = []
         var componentBudget = IWAComponentBudget()
         var indexEntry: Entry?
-        for entry in archive {
-            try componentBudget.scan(entry.path)
-            if entry.path == "Index.zip", indexEntry == nil { indexEntry = entry }
-            guard entry.type == .file, entry.path.hasPrefix("Index/"), entry.path.hasSuffix(".iwa") else { continue }
-            try componentBudget.retainComponent(entry.path)
+        func gather(_ entry: Entry, root: String) throws {
+            guard entry.path.hasPrefix(root) else { return }
+            let path = String(entry.path.dropFirst(root.count))
+            if path == "Index.zip", indexEntry == nil { indexEntry = entry }
+            guard entry.type == .file, path.hasPrefix("Index/"), path.hasSuffix(".iwa") else { return }
+            try componentBudget.retainComponent(path)
             guard let data = try ZIPEntryReader.read(archive, entry: entry) else {
                 // A present-but-unreadable slide is corruption (primary content);
                 // auxiliary components are skipped leniently.
-                if Self.isSlide(entry.path) { throw PicoDocsError.fileCorrupted }
-                continue
+                if Self.isSlide(path) { throw PicoDocsError.fileCorrupted }
+                return
             }
-            components.append((entry.path, [UInt8](data)))
+            components.append((path, [UInt8](data)))
+        }
+        var folder = IWAPackageFolder()
+        for entry in archive {
+            try componentBudget.scan(entry.path)
+            folder.observe(entry.path)
+            try gather(entry, root: "")
+        }
+        // The walk above already charged every entry to the scan budget.
+        if components.isEmpty, indexEntry == nil, let root = folder.root {
+            for entry in archive {
+                try Task.checkCancellation()
+                try gather(entry, root: root)
+            }
         }
         if !components.isEmpty { return components }
 

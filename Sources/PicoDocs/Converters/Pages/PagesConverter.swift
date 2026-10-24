@@ -142,9 +142,10 @@ public struct PagesConverter: DocumentConverter {
     }
 
     /// Reads the `.iwa` component streams from loose `Index/*.iwa` entries, or —
-    /// failing that — from a nested `Index.zip`. A present-but-unreadable main
-    /// story (`Document.iwa`) is treated as corruption; auxiliary entries that
-    /// fail to extract are skipped leniently.
+    /// failing that — from a nested `Index.zip`, at the archive root or else
+    /// inside the single folder every entry shares (a package zipped as a
+    /// folder). A present-but-unreadable main story (`Document.iwa`) is treated
+    /// as corruption; auxiliary entries that fail to extract are skipped leniently.
     ///
     /// `maximumEntryBytes` and `maximumTotalBytes` bound the IWA streams. A nested
     /// `Index.zip` is a container, not a stream: its streams take those budgets as
@@ -169,18 +170,34 @@ public struct PagesConverter: DocumentConverter {
             return data
         }
         // Loose layout is `Index/*.iwa`; scope the scan to that path so a stray
-        // outer `.iwa` can't shadow the nested `Index.zip` body below.
+        // outer `.iwa` can't shadow the nested `Index.zip` body below. Paths are
+        // relative to the package root: the archive root, or the one folder a
+        // package zipped as a folder sits in.
         var indexEntry: Entry?
+        func gather(_ entry: Entry, root: String) throws {
+            guard entry.path.hasPrefix(root) else { return }
+            let path = String(entry.path.dropFirst(root.count))
+            if path == "Index.zip", indexEntry == nil { indexEntry = entry }
+            guard entry.type == .file, path.hasPrefix("Index/"), path.hasSuffix(".iwa") else { return }
+            try componentBudget.retainComponent(path)
+            guard let data = try readBounded(archive, entry: entry) else {
+                if path == "Index/Document.iwa" { throw PicoDocsError.fileCorrupted }
+                return
+            }
+            components.append(Component(name: path, bytes: [UInt8](data), isDocument: path == "Index/Document.iwa"))
+        }
+        var folder = IWAPackageFolder()
         for entry in archive {
             try componentBudget.scan(entry.path)
-            if entry.path == "Index.zip", indexEntry == nil { indexEntry = entry }
-            guard entry.type == .file, entry.path.hasPrefix("Index/"), entry.path.hasSuffix(".iwa") else { continue }
-            try componentBudget.retainComponent(entry.path)
-            guard let data = try readBounded(archive, entry: entry) else {
-                if entry.path == "Index/Document.iwa" { throw PicoDocsError.fileCorrupted }
-                continue
+            folder.observe(entry.path)
+            try gather(entry, root: "")
+        }
+        // The walk above already charged every entry to the scan budget.
+        if components.isEmpty, indexEntry == nil, let root = folder.root {
+            for entry in archive {
+                try Task.checkCancellation()
+                try gather(entry, root: root)
             }
-            components.append(Component(name: entry.path, bytes: [UInt8](data), isDocument: entry.path == "Index/Document.iwa"))
         }
         if !components.isEmpty { return components }
 
@@ -201,11 +218,14 @@ public struct PagesConverter: DocumentConverter {
                 try componentBudget.scan(entry.path)
                 guard entry.type == .file, entry.path.hasSuffix(".iwa") else { continue }
                 try componentBudget.retainComponent(entry.path)
+                // The streams sit at the container's root or, as iWork for
+                // iCloud writes it, under `Index/`.
+                let isDocument = entry.path == "Document.iwa" || entry.path == "Index/Document.iwa"
                 guard let data = try readBounded(inner, entry: entry) else {
-                    if entry.path == "Document.iwa" { throw PicoDocsError.fileCorrupted }
+                    if isDocument { throw PicoDocsError.fileCorrupted }
                     continue
                 }
-                components.append(Component(name: entry.path, bytes: [UInt8](data), isDocument: entry.path == "Document.iwa"))
+                components.append(Component(name: entry.path, bytes: [UInt8](data), isDocument: isDocument))
             }
         }
         return components

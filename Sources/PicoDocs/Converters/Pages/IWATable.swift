@@ -19,6 +19,8 @@
 //      array (field 7). A cell record begins `05 <value-type>`; the value-type
 //      byte selects how to read offset +12: rich text key (0x09), inline text
 //      key (0x03), or a date as a double in seconds since 2001-01-01 (0x05).
+//      Tiles last saved before BNC storage (Numbers 3.x) hold `04 <value-type>`
+//      records in a pre-BNC buffer and offsets (fields 3/4) instead.
 //    • TST.DataList (type 6005) — the cell-value store, two flavors keyed by
 //      `list_type` (field 1): rich text (`8`) maps a key (entry field 1) to a
 //      RichTextPayload (entry field 9 → 6218 → 2001 TSWP.StorageArchive); inline
@@ -1400,20 +1402,28 @@ enum IWATable {
     /// One TileRowInfo: uint16 offsets (field 7) into the cell buffer (field 6);
     /// 0xFFFF marks an absent cell. With `has_wide_offsets` (field 8) the offsets
     /// count 4-byte units, as numbers-parser and recent Numbers versions write.
+    /// A row saved before Numbers' BNC storage (Numbers 3.x) has only the pre-BNC
+    /// buffer and offsets (fields 3/4), read the same way when fields 6/7 are absent.
     private static func cellTexts(inRow rowBytes: [UInt8],
                                   rich: [UInt32: String], inline: [UInt32: String], formats: [UInt32: NumberFormat], budget: IWAOutputBudget?, objectBudget: IWAObjectBudget, preserveCellWhitespace: Bool) -> [String?] {
-        var buffer: [UInt8] = []
-        var offsets: [UInt8] = []
+        var bncBuffer: [UInt8] = []
+        var bncOffsets: [UInt8]?
+        var preBNCBuffer: [UInt8] = []
+        var preBNCOffsets: [UInt8] = []
         var wideOffsets = false
         var reader = ProtobufReader(rowBytes, objectBudget: objectBudget)
         while let field = reader.next() {
             switch (field.number, field.value) {
-            case (6, .length(let bytes)): buffer = bytes
-            case (7, .length(let bytes)): offsets = bytes
+            case (3, .length(let bytes)): preBNCBuffer = bytes
+            case (4, .length(let bytes)): preBNCOffsets = bytes
+            case (6, .length(let bytes)): bncBuffer = bytes
+            case (7, .length(let bytes)): bncOffsets = bytes
             case (8, .varint(let flag)): wideOffsets = flag != 0
             default: continue
             }
         }
+        let buffer = bncOffsets == nil ? preBNCBuffer : bncBuffer
+        let offsets = bncOffsets ?? preBNCOffsets
         var cells: [String?] = []
         var i = 0
         while i + 1 < offsets.count {
@@ -1430,21 +1440,20 @@ enum IWATable {
     /// the string maps (key is a little-endian uint32 at +12), or a date (double,
     /// seconds since 2001-01-01, at +12), or a number / currency value (decimal128
     /// at +12, in its decimal, currency or percentage format), a Boolean double, or an explicit error state. Duration cells aren't decoded yet. Returns "" (a present-but-empty
-    /// cell) on any unhandled type or out-of-bounds read.
+    /// cell) on any unhandled type or out-of-bounds read. Pre-BNC records
+    /// (`04 <type> …`) are read by `preBNCCellText`.
     private static func cellText(in buffer: [UInt8], at offset: Int,
                                  rich: [UInt32: String], inline: [UInt32: String], formats: [UInt32: NumberFormat], budget: IWAOutputBudget?, preserveCellWhitespace: Bool) -> String {
-        guard offset >= 0, offset + 2 <= buffer.count, buffer[offset] == 0x05 else { return "" }
+        guard offset >= 0, offset + 2 <= buffer.count else { return "" }
+        if buffer[offset] == 0x04 {
+            return preBNCCellText(in: buffer, at: offset, rich: rich, inline: inline, budget: budget, preserveCellWhitespace: preserveCellWhitespace)
+        }
+        guard buffer[offset] == 0x05 else { return "" }
         switch buffer[offset + 1] {
         case richTextCell:
-            guard let key = readUInt32(buffer, at: offset + 12) else { return "" }
-            let text = rich[key] ?? ""
-            guard budget?.reserve(text.utf8.count, copies: 6) != false else { return "" }
-            return cleanCell(text, preservingBoundaryWhitespace: preserveCellWhitespace, budget: budget)
+            return keyedText(readUInt32(buffer, at: offset + 12), in: rich, budget: budget, preserveCellWhitespace: preserveCellWhitespace)
         case inlineTextCell:
-            guard let key = readUInt32(buffer, at: offset + 12) else { return "" }
-            let text = inline[key] ?? ""
-            guard budget?.reserve(text.utf8.count, copies: 6) != false else { return "" }
-            return cleanCell(text, preservingBoundaryWhitespace: preserveCellWhitespace, budget: budget)
+            return keyedText(readUInt32(buffer, at: offset + 12), in: inline, budget: budget, preserveCellWhitespace: preserveCellWhitespace)
         case dateCell:
             guard let seconds = readDouble(buffer, at: offset + 12) else { return "" }
             return isoDate(seconds)
@@ -1465,6 +1474,63 @@ enum IWATable {
         default:
             return ""
         }
+    }
+
+    /// A version-4 cell record, the layout Numbers wrote before BNC storage
+    /// (`04 <type> 00 00 <flags> …`). The uint32 flags at +4 say which fields
+    /// follow the 12-byte header: a 4-byte id for each bit in 0x0D8E (styles and
+    /// the like), the rich-text key (0x200), an id for each bit in 0x3000, then
+    /// the text key (0x10), a double value (0x20) and a date in seconds since
+    /// 2001-01-01 (0x40). Values are doubles rather than decimal128, and the
+    /// number-format ids aren't located, so numbers render unformatted.
+    private static func preBNCCellText(in buffer: [UInt8], at offset: Int,
+                                       rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?, preserveCellWhitespace: Bool) -> String {
+        guard let flags = readUInt32(buffer, at: offset + 4) else { return "" }
+        var position = offset + 12 + (flags & 0x0D8E).nonzeroBitCount * 4
+        var richKey: UInt32?, textKey: UInt32?, value: Double?, seconds: Double?
+        if flags & 0x200 != 0 { richKey = readUInt32(buffer, at: position); position += 4 }
+        position += (flags & 0x3000).nonzeroBitCount * 4
+        if flags & 0x10 != 0 { textKey = readUInt32(buffer, at: position); position += 4 }
+        if flags & 0x20 != 0 { value = readDouble(buffer, at: position); position += 8 }
+        if flags & 0x40 != 0 { seconds = readDouble(buffer, at: position) }
+        switch buffer[offset + 1] {
+        case richTextCell:
+            return keyedText(richKey, in: rich, budget: budget, preserveCellWhitespace: preserveCellWhitespace)
+        case inlineTextCell:
+            return keyedText(textKey, in: inline, budget: budget, preserveCellWhitespace: preserveCellWhitespace)
+        case dateCell:
+            return seconds.map(isoDate) ?? ""
+        case booleanCell:
+            guard let value, value.isFinite else { return "" }
+            return value > 0 ? "true" : "false"
+        case errorCell:
+            return "#ERROR!"
+        case numberCell, currencyCell:
+            return value.map(doubleString) ?? ""
+        default:
+            return ""
+        }
+    }
+
+    /// A text cell's string from its DataList by key, cleaned for a table cell.
+    private static func keyedText(_ key: UInt32?, in map: [UInt32: String], budget: IWAOutputBudget?, preserveCellWhitespace: Bool) -> String {
+        guard let key else { return "" }
+        let text = map[key] ?? ""
+        guard budget?.reserve(text.utf8.count, copies: 6) != false else { return "" }
+        return cleanCell(text, preservingBoundaryWhitespace: preserveCellWhitespace, budget: budget)
+    }
+
+    /// A double as `formatDecimal` presents decimal128 values, from its shortest
+    /// round-trip digits: 4650.0 → "4650", -872.4 → "-872.4", 1e-200 → "1E-200".
+    private static func doubleString(_ value: Double) -> String {
+        guard value.isFinite else { return "" }
+        let parts = "\(value.magnitude)".split(separator: "e")   // "872.4", "1.5e+21"
+        guard let mantissa = parts.first, let exponent = parts.count > 1 ? Int(parts[1]) : 0 else { return "" }
+        let pieces = mantissa.split(separator: ".", omittingEmptySubsequences: false)
+        let fraction = pieces.count > 1 ? pieces[1] : ""
+        let digits = String((pieces[0] + fraction).drop { $0 == "0" })
+        guard !digits.isEmpty else { return "0" }
+        return formatDecimal(negative: value.sign == .minus, digits: digits, exponent: exponent - fraction.count)
     }
 
     /// A number or formula-result cell stores its value as an IEEE-754 decimal128

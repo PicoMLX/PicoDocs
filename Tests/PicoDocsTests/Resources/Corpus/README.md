@@ -25,7 +25,10 @@ a crash, a hang, or lost/garbled content, plus representative complex files.
 | `tika/testRTFWordPadCzechCharacters.rtf` | Apache Tika `tika-parser-microsoft-module` test documents | Czech via `\fcharset238` (WordPad) |
 | `tika/testRTFJapanese.rtf` | Apache Tika `tika-parser-microsoft-module` test documents | Shift-JIS via `\fcharset128` (double-byte) |
 | `tika/testEPUB.epub` | Apache Tika `tika-parser-miscoffice-module` test documents | EPUB spine, headings, lists |
+| `tika/testNumbers2013.numbers` | Apache Tika `tika-parser-apple-module` test documents | Numbers tiles saved before BNC storage (version-4 cell records only) |
+| `tika/testKeynote2018.key` | Apache Tika `tika-parser-apple-module` test documents | Keynote package zipped as a folder (`Presentation.key/Index.zip`) |
 | `numbers-parser/format-1.numbers`, `format-1.csv` | numbers-parser `tests/data` | Tile rows with wide cell offsets; the CSV it was built from |
+| `numbers-parser/issue-32.numbers` | numbers-parser `tests/data` | Numbers package zipped as a folder (`mac.numbers/`), its `Index.zip` streams under `Index/` |
 | `python-pptx/tbl-cell.pptx` | python-pptx `features/steps/test_files` | Slide tables with merged cells |
 | `csv-spectrum/*.csv`, `*.json` | csv-spectrum `csvs/`, `json/` | CSV edge cases with expected records |
 | `readability/dev418.html` | Mozilla Readability `test/test-pages/dev418/source.html` | Article extraction, block whitespace |

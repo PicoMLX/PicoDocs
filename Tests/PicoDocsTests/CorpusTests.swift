@@ -167,6 +167,62 @@ struct CorpusTests {
         }
     }
 
+    @Test("Numbers tiles saved before BNC storage render their version-4 cell records")
+    func numbersPreBNCStorage() async throws {
+        // Numbers 3.x wrote only the pre-BNC cell buffer and offsets (TileRowInfo
+        // fields 3/4): text keys, doubles and dates behind a flags word at +4.
+        let result = try await Self.convert("tika/testNumbers2013.numbers")
+        #expect(result.sections.compactMap(\.sheetName) == ["Checking", "Second sheet"])
+        let md = result.markdown()
+        #expect(md.contains("| Type | Date | Description | Category | Amount | Balance |"))
+        #expect(md.contains("| Debit Card | 2009-10-22 | Groceries | 3 | -101 | 3601.6 |"))
+        #expect(md.contains("| DEP | 2009-10-30 | Paycheck | 1 | 1525 | 5101.6 |"))
+        #expect(md.contains("| Home | -872.4 |"))
+        #expect(md.contains("| Total | -2575.9 |"))
+        #expect(md.contains("|  |  | 0.5 | 0.1 |"))
+    }
+
+    @Test("A Numbers package zipped as a folder converts, with its Index.zip streams under Index/")
+    func numbersZippedPackageFolder() async throws {
+        // `mac.numbers/Index.zip` holding `Index/Document.iwa`; numbers-parser's
+        // test_issue_32 expects A3 "Foo" and D4 3.
+        let result = try await Self.convert("numbers-parser/issue-32.numbers")
+        #expect(result.sections.compactMap(\.sheetName) == ["Sheet 1"])
+        let md = result.markdown()
+        #expect(md.contains("| First name | Last Name | Email | Registration Number | Vote Weight |"))
+        #expect(md.contains("| Foo | bar | ccc@example.com | 2 | 1 |"))
+        #expect(md.contains("| Foo | Z | asd@example.com | 3 | 1 |"))
+    }
+
+    // MARK: - Keynote
+
+    @Test("A Keynote package zipped as a folder converts its slides in order")
+    func keynoteZippedPackageFolder() async throws {
+        let result = try await Self.convert("tika/testKeynote2018.key")
+        #expect(result.sections.filter { $0.kind == .slide }.map(\.markdown) == [
+            "Libreoffice 6.2\n\n19 February 2019",
+            "Test running...\n\nI save in Apple Key App as default .key\nOpen in Libreoffice 6.2\nWindows 10 x86",
+        ])
+    }
+
+    @Test("Only one folder shared by every entry is taken as the package root", arguments: [
+        ("__MACOSX/Presentation.key/._Index.zip", true),   // Finder's resource-fork sibling
+        ("Notes/readme.txt", false),                       // a second folder: not one package
+    ])
+    func keynoteFolderRoot(_ extra: String, converts: Bool) async throws {
+        let archive = try #require(ZIPEntryReader.archive(try Fixture.corpusData("tika/testKeynote2018.key")))
+        let index = try #require(try ZIPEntryReader.read(archive, path: "Presentation.key/Index.zip"))
+        let data = PagesConverterTests.makeZip([("Presentation.key/Index.zip", Array(index)), (extra, [0])])
+        if converts {
+            let result = try await PicoDocsEngine.convert(data: data, filename: "talk.key")
+            #expect(result.sections.filter { $0.kind == .slide }.count == 2)
+        } else {
+            await #expect(throws: PicoDocsError.documentTypeNotSupported) {
+                _ = try await PicoDocsEngine.convert(data: data, filename: "talk.key")
+            }
+        }
+    }
+
     // MARK: - CSV
 
     @Test("CSV parsing matches csv-spectrum's expected records", arguments: [
