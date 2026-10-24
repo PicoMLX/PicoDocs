@@ -162,8 +162,8 @@ struct KeynoteConverterTests {
         let tables = result.sections.filter { $0.kind == .table }
         #expect(tables.count == 2)
         #expect(tables.contains { $0.markdown.contains("| R1C1 | R1C2 | R1C3 | R1C4 |") })
-        #expect(tables.contains { $0.markdown.contains("| Item 1 | 2026-06-18 | 3 | 4.66 |") })
-        #expect(tables.contains { $0.markdown.contains("| Item 4 |  | 12 | 43.56 |") })
+        #expect(tables.contains { $0.markdown.contains("| Item 1 | 2026-06-18 | 3 | €4.66 |") })
+        #expect(tables.contains { $0.markdown.contains("| Item 4 |  | 12 | €43.56 |") })
 
         // Each table is placed with the slide that owns it (slides 4 and 5),
         // carrying that slide's number — and interleaved, not appended at the end

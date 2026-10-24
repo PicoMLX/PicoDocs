@@ -596,12 +596,13 @@ struct PagesConverterTests {
         })
 
         // Table 3: inline-text header (the "Date" column), decoded date cells, and
-        // decimal128 number/formula cells — the Total row sums each column
-        // (12+8=20, 4.2+275.92=280.12), which validates the numeric decode.
+        // decimal128 number/formula cells in their currency format — the Total
+        // row sums each column (12+8=20, 4.2+275.92=280.12), which validates the
+        // numeric decode.
         #expect(tables.contains { $0.markdown.contains("| Column A | Date | Column B | Column C | Column D |") })
-        #expect(tables.contains { $0.markdown.contains("| Item 1 | 2026-06-18 | 12 | 0.35 | 4.2 |") })
-        #expect(tables.contains { $0.markdown.contains("| Items 2 | 2026-06-15 | 8 | 34.49 | 275.92 |") })
-        #expect(tables.contains { $0.markdown.contains("| Total |  | 20 |  | 280.12 |") })
+        #expect(tables.contains { $0.markdown.contains("| Item 1 | 2026-06-18 | 12 | $0.35 | $4.20 |") })
+        #expect(tables.contains { $0.markdown.contains("| Items 2 | 2026-06-15 | 8 | $34.49 | $275.92 |") })
+        #expect(tables.contains { $0.markdown.contains("| Total |  | 20 |  | $280.12 |") })
 
         // GitHub-flavored separator row for the four-column table.
         #expect(tables.contains { $0.markdown.contains("| --- | --- | --- | --- |") })

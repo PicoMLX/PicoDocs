@@ -57,13 +57,21 @@ struct NumbersTypedCellReviewTests {
         #expect(markdown.contains("| divide\\_by\\_zero | #ERROR! | #DIV/0! |"))
         #expect(markdown.contains("| bad\\_value | #ERROR! | #VALUE! |"))
     }
-    @Test func numericValuesRemainSeparateFromDisplayFormats() async throws {
+    @Test func numericValuesUseTheirDisplayFormatsWithoutRounding() async throws {
         let result = try await NumbersConverter().convert(Fixture.data("sample", "numbers"), info: StreamInfo(detectedFormat: .numbers))
         let locale = try #require(result.sections.first { $0.sheetName == "Locale_Unicode" })
-        #expect(locale.markdown.contains("| currency\\_usd | 1234.56 | number | numeric value, USD format | $#,##0.00 |"))
-        #expect(locale.markdown.contains("format is not value"))
+        #expect(locale.markdown.contains("| currency\\_usd | $1,234.56 | number | numeric value, USD format | $#,##0.00 |"))
         let rows = try #require(result.sections.first { $0.sheetName == "Data_Rows" })
         #expect(rows.markdown.contains("| Hourly Rate | Budget | Completion % |"))
-        #expect(rows.markdown.contains("| 165 | 19800 | 0.62 | true |"))
+        // Automatic formats keep the stored value; fixed places and percentages apply.
+        #expect(rows.markdown.contains("| 2026-02-01 | 18.50 | 20.00 | 175 | 3237.5 | 100% | true |"))
+        #expect(rows.markdown.contains("| 165 | 19800 | 62% | true |"))
+        #expect(rows.markdown.contains("| -5.00 | 2.00 | 200 | -1000 | 20% | true |"))
+        let markdown = result.markdown()
+        #expect(markdown.contains("| Total budget | $54,037.50 |"))
+        #expect(markdown.contains("| Average completion | 50.4545454545455% |"))
+        // Zero fixed places don't round 54037.5 or the average either.
+        #expect(markdown.contains("| Total budget | 54037.5 | Sum of formula budget column |"))
+        #expect(markdown.contains("| Average completion | 0.504545454545455 | fraction/percentage |"))
     }
 }
