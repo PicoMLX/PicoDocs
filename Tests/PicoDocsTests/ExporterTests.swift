@@ -179,7 +179,7 @@ struct ExporterTests {
         #expect(recovered.sections.contains { $0.kind == .image })
     }
 
-    // MARK: - XLSX round-trip (via SpreadsheetConverter / CoreXLSX)
+    // MARK: - XLSX round-trip (via SpreadsheetConverter)
 
     @Test("XLSX round-trips table cells through SpreadsheetConverter")
     func xlsxRoundTrip() async throws {

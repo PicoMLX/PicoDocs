@@ -2,14 +2,14 @@
 //  SpreadsheetConverter.swift
 //  PicoDocs
 //
-//  Converts XLSX workbooks to Markdown tables via CoreXLSX — one structured
-//  section per worksheet. Lifts the proven logic from the old ExcelParser into
-//  the converter shape. (The xlsx failure in issue #2 was content-type
-//  detection, fixed in Phase 0, not the spreadsheet parsing itself.)
+//  Converts XLSX workbooks to Markdown tables — one structured section per
+//  worksheet, read by the streaming `SpreadsheetMLPackage` reader. Lifts the
+//  proven logic from the old ExcelParser into the converter shape. (The xlsx
+//  failure in issue #2 was content-type detection, fixed in Phase 0, not the
+//  spreadsheet parsing itself.)
 //
 
 import Foundation
-import CoreXLSX
 import ZIPFoundation
 
 public struct SpreadsheetConverter: DocumentConverter {
@@ -22,38 +22,33 @@ public struct SpreadsheetConverter: DocumentConverter {
 
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
         try Task.checkCancellation()
-        // CoreXLSX opens its own (private) archive over the same bytes, so the
-        // structural pre-flight must pass before it sees them.
         guard let archive = ZIPEntryReader.archive(data) else { throw PicoDocsError.fileCorrupted }
-        let file = try XLSXFile(data: data)
         // A metadata-only handle reuses the same root relationship, XML
         // admission, CRC and cancellation policy as DOCX.
         let properties = try WordConverter.coreProperties(archive)
+        let package = try SpreadsheetMLPackage(archive: archive)
+        let workbook = try package.workbook()
         // A workbook may have no shared-strings part (e.g. numbers-only, or
         // inline strings); don't fail the whole conversion when it's absent.
-        let sharedStrings = try? file.parseSharedStrings()
+        let sharedStrings = try package.sharedStrings(at: workbook.sharedStringsPath)
 
         var sections: [DocumentSection] = []
         var sheetNames: [String] = []
         var projectionBudget = SpreadsheetProjectionBudget()
 
-        for workbook in try file.parseWorkbooks() {
-            for (name, path) in try file.parseWorksheetPathsAndNames(workbook: workbook) {
-                try Task.checkCancellation()
-                let worksheet = try file.parseWorksheet(at: path)
-                let rows = worksheet.data?.rows ?? []
+        for sheet in workbook.sheets {
+            try Task.checkCancellation()
+            let rows = try package.rows(ofWorksheetAt: sheet.path)
+            let table = try Self.markdownTable(rows: rows, sharedStrings: sharedStrings, sheetName: sheet.name, projectionBudget: &projectionBudget)
 
-                let table = try Self.markdownTable(rows: rows, sharedStrings: sharedStrings, sheetName: name, projectionBudget: &projectionBudget)
-
-                if let name { sheetNames.append(name) }
-                sections.append(DocumentSection(
-                    title: name,
-                    kind: .sheet,
-                    markdown: table.markdown,
-                    sheetName: name,
-                    metadata: ["csv": table.csv]
-                ))
-            }
+            if let name = sheet.name { sheetNames.append(name) }
+            sections.append(DocumentSection(
+                title: sheet.name,
+                kind: .sheet,
+                markdown: table.markdown,
+                sheetName: sheet.name,
+                metadata: ["csv": table.csv]
+            ))
         }
 
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
@@ -63,31 +58,29 @@ public struct SpreadsheetConverter: DocumentConverter {
 
     // MARK: - Markdown table
 
-    static func markdownTable(rows: [Row], sharedStrings: SharedStrings?, sheetName: String?, projectionBudget: inout SpreadsheetProjectionBudget, isCancelled: () -> Bool = { Task.isCancelled }) throws -> (markdown: String, csv: String) {
-        let origin = ColumnReference("A")!
+    static func markdownTable(rows: [SpreadsheetRow], sharedStrings: [String], sheetName: String?, projectionBudget: inout SpreadsheetProjectionBudget, isCancelled: () -> Bool = { Task.isCancelled }) throws -> (markdown: String, csv: String) {
         var columnCount = 0, rowCount = 0
         var valueColumnCount = 0, valueRowCount = 0
         try projectionBudget.reservePhysicalRows(rows.count)
         // Both passes below visit every admitted row and cell (up to a million)
         // before `materializeGrid` checks cancellation, so poll as they go.
         var visits = 0
-        var seenRows: Set<UInt> = []
+        var seenRows: Set<Int> = []
         for row in rows {
             try checkpoint(&visits, isCancelled)
-            guard row.reference > 0, row.reference <= 1_048_576, seenRows.insert(row.reference).inserted else { throw PicoDocsError.fileCorrupted }
-            rowCount = max(rowCount, Int(clamping: row.reference))
+            guard row.index > 0, row.index <= 1_048_576, seenRows.insert(row.index).inserted else { throw PicoDocsError.fileCorrupted }
+            rowCount = max(rowCount, row.index)
             var seenColumns: Set<Int> = []
             for cell in row.cells {
                 try checkpoint(&visits, isCancelled)
-                guard cell.reference.row == row.reference else { throw PicoDocsError.fileCorrupted }
-                let column = origin.distance(to: cell.reference.column)
+                let column = cell.column
                 // Bound the set before insertion and reject physical duplicates,
                 // including empty cells that consume no decoded-value budget.
                 guard column >= 0, column < 16_384 else { throw PicoDocsError.parsingError }
                 guard seenColumns.insert(column).inserted else { throw PicoDocsError.fileCorrupted }
                 columnCount = max(columnCount, column + 1)
-                if hasValue(cell) {
-                    valueRowCount = max(valueRowCount, Int(clamping: row.reference))
+                if cell.hasValue {
+                    valueRowCount = max(valueRowCount, row.index)
                     valueColumnCount = max(valueColumnCount, column + 1)
                 }
             }
@@ -116,15 +109,15 @@ public struct SpreadsheetConverter: DocumentConverter {
         var grid: [Int: [String]] = [:]
         for row in rows {
             try checkpoint(&visits, isCancelled)
-            let rowIndex = Int(clamping: row.reference)
+            let rowIndex = row.index
             guard rowIndex > 0 else { throw PicoDocsError.fileCorrupted }
             guard rowIndex <= rowCount else { continue }
             var values = grid[rowIndex] ?? Array(repeating: "", count: columnCount)
             for cell in row.cells {
                 try checkpoint(&visits, isCancelled)
                 // Cells outside a value-sized grid are empty.
-                guard hasValue(cell) else { continue }
-                let column = origin.distance(to: cell.reference.column)
+                guard cell.hasValue else { continue }
+                let column = cell.column
                 guard column >= 0, column < columnCount else { throw PicoDocsError.fileCorrupted }
                 let value = cellText(cell, sharedStrings: sharedStrings)
                 try projectionBudget.reserveValue(value)
@@ -149,38 +142,42 @@ public struct SpreadsheetConverter: DocumentConverter {
         for index in 1...rowCount {
             if index % 64 == 0 { try Task.checkCancellation() }
             let values = grid[index] ?? Array(repeating: "", count: columnCount)
-            csvRows.append(values.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: ","))
+            csvRows.append(values.map(csvField).joined(separator: ","))
             out += "| " + values.map(markdownCell).joined(separator: " | ") + " |\n"
             if index == 1 { out += "| " + Array(repeating: "---", count: columnCount).joined(separator: " | ") + " |\n" }
         }
         return (out, csvRows.joined(separator: "\n"))
     }
 
-    /// Whether a cell carries content (a value or an inline string), as
-    /// opposed to formatting alone.
-    private static func hasValue(_ cell: Cell) -> Bool {
-        cell.value != nil || cell.inlineString != nil
+    private static func cellText(_ cell: SpreadsheetCell, sharedStrings: [String]) -> String {
+        switch cell.content {
+        case .empty:
+            return ""
+        case .sharedString(let index):
+            // Bounds-checked: pre-release Office 2007 files index past the table.
+            guard sharedStrings.indices.contains(index) else { return "" }
+            return SpreadsheetMLText.decode(sharedStrings[index])
+        case .text(let raw):
+            return SpreadsheetMLText.decode(raw)
+        }
     }
 
-    private static func cellText(_ cell: Cell, sharedStrings: SharedStrings?) -> String {
-        let raw: String
-        if cell.type == .sharedString, let index = cell.value.flatMap({ Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }) {
-            // Resolved here rather than via CoreXLSX's `stringValue`, which
-            // indexes the table unchecked (an out-of-range index traps) and
-            // returns nil for rich-text items (runs with no plain `<t>`).
-            guard let items = sharedStrings?.items, items.indices.contains(index) else { return "" }
-            raw = items[index].text ?? items[index].richText.compactMap(\.text).joined()
-        } else if let inlineString = cell.inlineString?.text {
-            raw = inlineString
-        } else if let value = cell.value {
-            raw = value
-        } else {
-            raw = ""
-        }
-        return SpreadsheetMLText.decode(raw)
+    private static func csvField(_ value: String) -> String {
+        guard value.utf8.contains(UInt8(ascii: "\"")) else { return "\"" + value + "\"" }
+        return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
 
     private static func markdownCell(_ raw: String) -> String {
+        guard !raw.isEmpty else { return "" }
+        // Most cells hold no Markdown punctuation, line break or edge whitespace,
+        // and one byte scan returns them unchanged: the escaped punctuation is
+        // ASCII, and space and tab are the only ASCII members of `.whitespaces`.
+        let utf8 = raw.utf8
+        if let first = utf8.first, let last = utf8.last,
+           first < 0x80, first != 0x20, first != 0x09, last < 0x80, last != 0x20, last != 0x09,
+           !utf8.contains(where: needsMarkdownCellRewrite) {
+            return raw
+        }
         // Markdown table cells are single-line; escape pipes and flatten newlines
         // (including Windows CRLF and bare CR, common in Excel-on-Windows files).
         let canonical = MarkdownLiteral.escapePunctuation(raw, characters: #"\`*_{}[]<>|"#)
@@ -189,5 +186,15 @@ public struct SpreadsheetConverter: DocumentConverter {
             .replacingOccurrences(of: "\r", with: " ")
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func needsMarkdownCellRewrite(_ byte: UInt8) -> Bool {
+        switch byte {
+        case 0x0A, 0x0D, UInt8(ascii: "\\"), UInt8(ascii: "`"), UInt8(ascii: "*"), UInt8(ascii: "_"), UInt8(ascii: "{"),
+             UInt8(ascii: "}"), UInt8(ascii: "["), UInt8(ascii: "]"), UInt8(ascii: "<"), UInt8(ascii: ">"), UInt8(ascii: "|"):
+            return true
+        default:
+            return false
+        }
     }
 }

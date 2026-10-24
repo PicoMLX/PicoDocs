@@ -124,6 +124,62 @@ struct CorpusTests {
         #expect(md.split(separator: "\n").count < 20)
     }
 
+    @Test("XLSX with macro, XML-map, metadata, revision and signature relationships converts", arguments: [
+        ("poi/SimpleMacro.xlsm", ["Sheet1", "Sheet2", "Sheet3"], "| This is a macro workbook |"),        // vbaProject
+        ("poi/CustomXMLMappings.xlsx", ["Foglio1", "Foglio2", "Foglio3"], "| jerhwkj | lkcnkln | msdnakjd |"), // xmlMaps
+        ("poi/xlookup.xlsx", ["Sheet1", "Sheet2", "Sheet3"], "|  | 8389 | Dianne Pugh | Finance |"),     // sheetMetadata
+        ("poi/workbookProtection_workbook_revision_protected.xlsx", ["Sheet1", "Sheet2", "Sheet3"], ""), // usernames
+        ("poi/xlmmacro.xlsm", ["Sheet1", "Sheet2"], ""),                                                 // xlMacrosheet
+        ("tika/testEXCEL_signed.xlsx", ["Sheet1"], "| test doc |"),                                      // digital signature
+    ])
+    func xlsxUnknownRelationshipTypes(_ path: String, sheets: [String], expected: String) async throws {
+        // Unknown types are ignored, not fatal; the Excel 4.0 macro sheet
+        // (`Macro1` in xlmmacro.xlsm) isn't a worksheet and is skipped.
+        let result = try await Self.convert(path)
+        #expect(result.sections.compactMap(\.sheetName) == sheets)
+        #expect(result.markdown().contains(expected))
+    }
+
+    @Test("Strict OOXML workbooks resolve their purl.oclc.org relationships")
+    func xlsxStrict() async throws {
+        let tika = try await Self.convert("tika/testEXCEL.strict.xlsx")
+        #expect(tika.sections.compactMap(\.sheetName) == ["First Sheet", "Sheet Number 2", "Sheet3"])
+        #expect(tika.markdown().contains("| 2nd row | 2nd row 2nd column |"))
+        #expect(tika.markdown().contains("| cb=1 | cb=10 | cb=2 | cb=sum |\n| 1 | 10 | 2 | 13 |"))
+        let poi = try await Self.markdown("poi/SimpleStrict.xlsx")
+        #expect(poi.contains("| test |  | 1 |"))
+        // Strict stores dates as ISO 8601 text rather than serial numbers.
+        #expect(poi.contains("| 1990-01-01 |  |  |  |  |  |"))
+    }
+
+    @Test("XLSX package-absolute relationship targets resolve")
+    func xlsxAbsoluteTargets() async throws {
+        let md = try await Self.markdown("poi/xlsx-jdbc.xlsx")
+        #expect(md.contains("| Column\\_1 | Column\\_2\\_Extended | Column\\_3 |"))
+        #expect(md.contains("| A Very large string in column 1 AAAAAAAAAAAAAAAAAAAAA | foo | bar |"))
+    }
+
+    @Test("XLSX rows and cells without `r` take the next position")
+    func xlsxCellsWithoutReferences() async throws {
+        // Neither rows nor cells carry `r`, markup is `x:`-prefixed and targets
+        // are absolute; the outline's nested rows start one column further in.
+        let outline = try await Self.markdown("poi/59746_NoRowNums.xlsx")
+        #expect(outline.contains("| Checked | Ion | Charge | Molecular Weight | m/z |"))
+        #expect(outline.contains("\n|  | 1 | 644.24221 | 8.346 | 0.177 | 3 | 2 | 263061.998633582 | F1 |  |  |\n"))
+        let rates = try await Self.convert("poi/56278.xlsx")
+        #expect(rates.sections.count == 10)
+        #expect(rates.markdown().contains("| Prime | 0.032500 |  |"))
+    }
+
+    @Test("XLSX rich inline strings keep every run")
+    func xlsxRichInlineStrings() async throws {
+        let emoji = try await Self.markdown("poi/InlineString.xlsx")
+        #expect(emoji.contains("| 😜more text |"))
+        let balance = try await Self.markdown("poi/52348.xlsx")
+        #expect(balance.contains("|  |  | Category |  | Account | Balance |"))
+        #expect(balance.contains("|  |  | Totals |  | - |  | - |  | - |  |  | 600.25 |"))
+    }
+
     // MARK: - RTF
 
     @Test("RTF `\\*` inside a group (not at its start) doesn't hide the group's text")

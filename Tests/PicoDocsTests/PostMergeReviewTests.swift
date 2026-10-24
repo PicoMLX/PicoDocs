@@ -1,6 +1,5 @@
 import Foundation
 import Testing
-import CoreXLSX
 @testable import PicoDocs
 
 /// Regressions for the review of the merged Numbers/Office stack.
@@ -30,11 +29,7 @@ struct PostMergeReviewTests {
     @Test func worksheetScansPollCancellationInBothPasses() throws {
         let rowsXML = (1...200).map { "<row r=\"\($0)\"><c r=\"A\($0)\"><v>\($0)</v></c></row>" }.joined()
         let sheet = #"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>"# + rowsXML + "</sheetData></worksheet>"
-        let file = try XLSXFile(data: ConverterTests.xlsx(sheetXML: sheet))
-        let paths = try file.parseWorksheetPaths()
-        let path = try #require(paths.first)
-        let worksheet = try file.parseWorksheet(at: path)
-        let rows = try #require(worksheet.data?.rows)
+        let rows = try SpreadsheetMLPackage.worksheetRows(Data(sheet.utf8))
         #expect(rows.count == 200)
         // 200 rows of one cell are 400 visits per pass, polled every 64 visits:
         // polls 1–6 fall in the validation pass and 7–12 in the materializing pass.
@@ -42,13 +37,13 @@ struct PostMergeReviewTests {
             var polls = 0
             var budget = SpreadsheetProjectionBudget()
             #expect(throws: CancellationError.self) {
-                _ = try SpreadsheetConverter.markdownTable(rows: rows, sharedStrings: nil, sheetName: nil, projectionBudget: &budget, isCancelled: { polls += 1; return polls >= cancelAt })
+                _ = try SpreadsheetConverter.markdownTable(rows: rows, sharedStrings: [], sheetName: nil, projectionBudget: &budget, isCancelled: { polls += 1; return polls >= cancelAt })
             }
             #expect(polls == cancelAt)
         }
         var polls = 0
         var budget = SpreadsheetProjectionBudget()
-        let table = try SpreadsheetConverter.markdownTable(rows: rows, sharedStrings: nil, sheetName: nil, projectionBudget: &budget, isCancelled: { polls += 1; return false })
+        let table = try SpreadsheetConverter.markdownTable(rows: rows, sharedStrings: [], sheetName: nil, projectionBudget: &budget, isCancelled: { polls += 1; return false })
         #expect(polls == 12)
         #expect(table.markdown.contains("| 200 |"))
     }

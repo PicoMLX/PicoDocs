@@ -42,8 +42,19 @@ enum SpreadsheetMLText {
         return bytes
     }
 
+    /// A byte scan for `_x`, which starts every escape (and is followed by an
+    /// ASCII hex digit, so byte and character matching agree).
+    private static func mayContainEscape(_ text: String) -> Bool {
+        var previous: UInt8 = 0
+        for byte in text.utf8 {
+            if previous == UInt8(ascii: "_"), byte == UInt8(ascii: "x") { return true }
+            previous = byte
+        }
+        return false
+    }
+
     static func decode(_ text: String) -> String {
-        guard text.contains("_x") else { return text }
+        guard mayContainEscape(text) else { return text }
         let input = text.utf16
         var index = input.startIndex, output = ""
         var highSurrogate: UInt16?

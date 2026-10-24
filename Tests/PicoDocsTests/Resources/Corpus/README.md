@@ -20,11 +20,24 @@ a crash, a hang, or lost/garbled content, plus representative complex files.
 | `poi/60384.xlsx` | Apache POI `test-data/spreadsheet` | LibreOffice export with an empty formatted row 1048576 |
 | `poi/bug69769.xlsx` | Apache POI `test-data/spreadsheet` | Shared-string index with trailing whitespace (`<v>2 </v>`) |
 | `poi/56511.xlsx` | Apache POI `test-data/spreadsheet` | Rich-text (multi-run) shared strings |
+| `poi/SimpleMacro.xlsm` | Apache POI `test-data/spreadsheet` | `vbaProject` relationship (macro-enabled workbook) |
+| `poi/CustomXMLMappings.xlsx` | Apache POI `test-data/spreadsheet` | `xmlMaps` relationship |
+| `poi/xlookup.xlsx` | Apache POI `test-data/spreadsheet` | `sheetMetadata` relationship |
+| `poi/workbookProtection_workbook_revision_protected.xlsx` | Apache POI `test-data/spreadsheet` | `usernames` relationship (shared-workbook revisions) |
+| `poi/xlmmacro.xlsm` | Apache POI `test-data/spreadsheet` | `xlMacrosheet` relationship (Excel 4.0 macro sheet) |
+| `poi/SimpleStrict.xlsx` | Apache POI `test-data/spreadsheet` | Strict OOXML (`purl.oclc.org` relationships, ISO dates) |
+| `poi/xlsx-jdbc.xlsx` | Apache POI `test-data/spreadsheet` | Package-absolute relationship targets (`/xl/workbook.xml`) |
+| `poi/59746_NoRowNums.xlsx` | Apache POI `test-data/spreadsheet` | Rows and cells without `r`, `x:`-prefixed markup |
+| `poi/56278.xlsx` | Apache POI `test-data/spreadsheet` | Rows and cells without `r` |
+| `poi/InlineString.xlsx` | Apache POI `test-data/spreadsheet` | Rich (multi-run) inline string with an astral character |
+| `poi/52348.xlsx` | Apache POI `test-data/spreadsheet` | Rich (multi-run) inline strings |
 | `tika/testRTFIgnoredControlWord.rtf` | Apache Tika `tika-parser-microsoft-module` test documents | `\*` in the middle of a group |
 | `tika/testFontAfterBufferedText.rtf` | Apache Tika `tika-parser-microsoft-module` test documents | Cyrillic via `\fcharset204` in an `\ansicpg1252` file |
 | `tika/testRTFWordPadCzechCharacters.rtf` | Apache Tika `tika-parser-microsoft-module` test documents | Czech via `\fcharset238` (WordPad) |
 | `tika/testRTFJapanese.rtf` | Apache Tika `tika-parser-microsoft-module` test documents | Shift-JIS via `\fcharset128` (double-byte) |
 | `tika/testEPUB.epub` | Apache Tika `tika-parser-miscoffice-module` test documents | EPUB spine, headings, lists |
+| `tika/testEXCEL_signed.xlsx` | Apache Tika `tika-parser-microsoft-module` test documents | Digital-signature relationships |
+| `tika/testEXCEL.strict.xlsx` | Apache Tika `tika-parser-microsoft-module` test documents | Strict OOXML workbook |
 | `numbers-parser/format-1.numbers`, `format-1.csv` | numbers-parser `tests/data` | Tile rows with wide cell offsets; the CSV it was built from |
 | `python-pptx/tbl-cell.pptx` | python-pptx `features/steps/test_files` | Slide tables with merged cells |
 | `csv-spectrum/*.csv`, `*.json` | csv-spectrum `csvs/`, `json/` | CSV edge cases with expected records |

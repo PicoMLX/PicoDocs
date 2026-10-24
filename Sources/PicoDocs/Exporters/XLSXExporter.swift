@@ -2,13 +2,13 @@
 //  XLSXExporter.swift
 //  PicoDocs
 //
-//  Hand-rolled SpreadsheetML (XLSX) writer — CoreXLSX (the read dependency) cannot
-//  write, so this builds the package directly on `OOXMLPackageWriter`. One sheet per
-//  document section: a section's lossless `metadata["csv"]` is used when present,
-//  otherwise its Markdown is flattened to rows (tables become rows; prose/list/code
-//  lines become single-cell rows, mirroring `DocumentRenderer.renderCSV` so nothing
-//  is dropped). Cells are emitted as inline strings so values round-trip exactly
-//  through `SpreadsheetConverter`; numeric typing is a later refinement.
+//  Hand-rolled SpreadsheetML (XLSX) writer, built directly on `OOXMLPackageWriter`.
+//  One sheet per document section: a section's lossless `metadata["csv"]` is used
+//  when present, otherwise its Markdown is flattened to rows (tables become rows;
+//  prose/list/code lines become single-cell rows, mirroring
+//  `DocumentRenderer.renderCSV` so nothing is dropped). Cells are emitted as inline
+//  strings so values round-trip exactly through `SpreadsheetConverter`; numeric
+//  typing is a later refinement.
 //
 
 import Foundation
