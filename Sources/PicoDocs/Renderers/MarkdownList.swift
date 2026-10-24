@@ -1,7 +1,7 @@
 import Foundation
 
 /// A list retains source markers and the reading order of text and child lists.
-struct MarkdownList {
+struct MarkdownList: Equatable {
     static func escapeBareMarkerText(_ text: String) -> String {
         guard !text.contains("\n") else { return text }
         let trimmed = text.trimmingCharacters(in: .whitespaces)
@@ -20,11 +20,11 @@ struct MarkdownList {
         return MarkdownTableCell.restoreBreakSentinels(try inline(protected).replacingOccurrences(of: "\n", with: " "), breakText: breakText, html: breakText == "<br>")
     }
 
-    struct Item {
+    struct Item: Equatable {
         let number: Int?
         let padding: String
         let delimiter: Character
-        enum Content {
+        enum Content: Equatable {
             case text(String)
             case list(MarkdownList)
         }
@@ -162,5 +162,52 @@ struct MarkdownList {
             case .list(let child): return child.texts
             }
         } }
+    }
+    struct Paragraph {
+        let level: Int
+        let ordered: Bool
+        let number: Int?
+        let text: String
+        let continuation: Bool
+    }
+    func paragraphs(level: Int = 0) -> [Paragraph] {
+        items.flatMap { item in item.content.enumerated().flatMap { index, content -> [Paragraph] in
+            switch content {
+            case .text(let text): return [Paragraph(level: level, ordered: ordered, number: item.number, text: text, continuation: index > 0)]
+            case .list(let child): return child.paragraphs(level: level + 1)
+            }
+        } }
+    }
+
+    func structured(depth: Int) -> MarkdownList {
+        var result = self
+        for index in result.items.indices {
+            let raw = result.items[index].content.compactMap { if case .text(let text) = $0 { return text }; return nil }.joined(separator: "\n")
+            let blocks = MarkdownBlockParser.parse(raw, depth: depth)
+            var content: [Item.Content] = []
+            for block in blocks {
+                switch block {
+                case .paragraph(let text): content.append(.text(text))
+                case .list(let child): content.append(.list(child))
+                // These were already retained as text by the export list model.
+                case .heading(let level, let text): content.append(.text(String(repeating: "#", count: level) + " " + text))
+                case .code(let text):
+                    var longest = 0, run = 0
+                    for character in text {
+                        run = character == "`" ? run + 1 : 0
+                        longest = max(longest, run)
+                    }
+                    let fence = String(repeating: "`", count: max(3, longest + 1))
+                    content.append(.text(fence + "\n" + text + "\n" + fence))
+                case .blockquote(let lines): content.append(.text(lines.map { "> " + $0 }.joined(separator: "\n")))
+                case .rule: content.append(.text("---"))
+                case .table(let rows): content.append(.text(rows.map { "| " + $0.joined(separator: " | ") + " |" }.joined(separator: "\n")))
+                }
+            }
+            if content.isEmpty { content = [.text("")] }
+            if case .list? = content.first { content.insert(.text(""), at: 0) }
+            result.items[index].content = content
+        }
+        return result
     }
 }

@@ -18,7 +18,8 @@ enum MarkdownLiteral {
     /// Verbatim converters predate canonical Markdown escaping. Protect their
     /// literal backslashes before the renderer decodes generated escapes.
     static func escapeBackslashes(_ text: String, paragraphEndLines: Set<Int> = [], structuralText: String? = nil) -> String {
-        var inFence = false
+        var openingFence: (character: Character, length: Int)?
+        var inFence: Bool { openingFence != nil }
         var fenceList: (base: Int, content: Int)?
         var inNote = false
         var lists: [(base: Int, content: Int)] = []
@@ -46,8 +47,8 @@ enum MarkdownLiteral {
             let structure = structuralLines[index]
             let blank = structure.trimmingCharacters(in: .whitespaces).isEmpty
             if inFence, let container = fenceList, !blank,
-               !DocumentRenderer.literalListContains(structure, base: container.base, content: container.content, afterBlank: followsBlank) {
-                inFence = false; fenceList = nil
+               !MarkdownBlockParser.literalListContains(structure, base: container.base, content: container.content, afterBlank: followsBlank) {
+                openingFence = nil; fenceList = nil
             }
             // Footnote extraction joins continued paragraphs into one inline value.
             if !inFence, inNote, structure.hasPrefix("    ") || structure.hasPrefix("\t") || (blank && followedByNoteContinuation[index]) {
@@ -59,18 +60,20 @@ enum MarkdownLiteral {
                 if inNote, !structure.hasPrefix("    "), !structure.hasPrefix("\t") {
                     flushProse(); inNote = false
                 }
-                if DocumentRenderer.literalFootnoteDefinition(structure) { inNote = true }
+                if MarkdownBlockParser.literalFootnoteDefinition(structure) { inNote = true }
                 var exitedList = false
-                while let last = lists.last, !DocumentRenderer.literalListContains(structure, base: last.base, content: last.content, afterBlank: followsBlank) {
+                while let last = lists.last, !MarkdownBlockParser.literalListContains(structure, base: last.base, content: last.content, afterBlank: followsBlank) {
                     lists.removeLast(); exitedList = true
                 }
                 if exitedList { flushProse() }
-                if let item = DocumentRenderer.literalListIndent(structuralLines, index: index) { lists.append(item) }
+                if let item = MarkdownBlockParser.literalListIndent(structuralLines, index: index) { lists.append(item) }
             }
             followsBlank = blank
-            if structure.trimmingCharacters(in: .whitespaces).hasPrefix("```") || (!inFence && DocumentRenderer.literalListFenceStart(structure)) {
+            if let candidate = MarkdownBlockParser.fence(structure.trimmingCharacters(in: .whitespaces)) ?? (!inFence ? MarkdownBlockParser.listFence(structure) : nil) {
                 flushProse()
-                inFence.toggle()
+                if let opening = openingFence {
+                    if MarkdownBlockParser.closesFence(structure, opening: opening) { openingFence = nil }
+                } else { openingFence = candidate }
                 fenceList = inFence ? lists.last : nil
                 output += line
                 if index < lines.count - 1 { output += "\n" }
@@ -103,8 +106,8 @@ enum MarkdownLiteral {
                 flushCell()
                 if index < lines.count - 1 { output += "\n" }
             } else {
-                let boundary = DocumentRenderer.literalBlockBoundary(structure)
-                if boundary.starts || DocumentRenderer.literalListIndent(structuralLines, index: index) != nil { flushProse() }
+                let boundary = MarkdownBlockParser.literalBlockBoundary(structure)
+                if boundary.starts || MarkdownBlockParser.literalListIndent(structuralLines, index: index) != nil { flushProse() }
                 prose += line
                 if index < lines.count - 1 { prose += "\n" }
                 if boundary.ends || paragraphEndLines.contains(index) { flushProse() }
@@ -209,10 +212,11 @@ enum MarkdownLiteral {
     static func escapeBlockStart(_ line: String) -> String {
         let content = line.drop { $0 == " " || $0 == "\t" }
         let lead = String(line[..<content.startIndex])
-        if DocumentRenderer.literalFootnoteDefinition(String(content)) || content == listRestartBoundary { return lead + "\\" + content }
+        if MarkdownBlockParser.literalFootnoteDefinition(String(content)) || content == listRestartBoundary { return lead + "\\" + content }
         if content.hasPrefix("```") {
             return lead + content.replacingOccurrences(of: "`", with: "\\`")
         }
+        if content.hasPrefix("~~~") { return lead + "\\" + content }
         if let first = content.first, "#>|".contains(first) { return lead + "\\" + content }
         let compact = content.filter { !$0.isWhitespace }
         if compact.count >= 3, let first = compact.first, "-*_".contains(first), compact.allSatisfy({ $0 == first }) {

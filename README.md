@@ -40,6 +40,7 @@ There are two main steps: fetching and parsing.
 - Pages and Keynote (iWork '13+)
 - TXT
 - RTF
+- Numbers (one section per sheet, tables as Markdown grids)
 - MD
 - Webloc
 - Images (PNG, JPEG, HEIC, …) via OCR
@@ -63,6 +64,31 @@ try await doc.fetch()
 try await doc.parse()
 print(doc.exportedContent)
 ```
+
+## Exporting (Markdown / LLM output → office files)
+
+PicoDocs can also go the other way: turn LLM Markdown output (or a structured
+`ConverterResult`) into a real office file via `PicoDocsEngine.write(...)`.
+
+```swift
+// From a Markdown string (e.g. an LLM response):
+let docx = try PicoDocsEngine.write(markdown: markdown, to: .docx)
+let xlsx = try PicoDocsEngine.write(markdown: markdown, to: .xlsx)
+let pptx = try PicoDocsEngine.write(markdown: markdown, to: .pptx)
+let rtf  = try PicoDocsEngine.write(markdown: markdown, to: .rtf)   // Apple platforms
+
+// From a structured result (e.g. round-tripping an imported document):
+let data = try PicoDocsEngine.write(result, to: .docx)
+```
+
+Notes:
+- **DOCX/XLSX/PPTX** are written as OOXML (ZIP + XML) on all platforms. **RTF** uses
+  `NSAttributedString` and is available on Apple platforms.
+- **Pages/Keynote** are intentionally not implemented — writing valid iWork files
+  third-party is unsupported (`ExportableFileType.isImplemented == false`); export to
+  DOCX/PPTX and let Pages/Keynote import it instead.
+- Custom or additional writers can be registered via `DocumentExporterRegistry`,
+  mirroring `DocumentConverterRegistry` on the import side.
 
 ## Setup for Apps
 
@@ -88,7 +114,7 @@ Create a PR to include your app here.
 
 ## Known Limitations
 
-- **iWork tables**: Tables are reconstructed as Markdown grids — placed inline at their original position in Pages, and with the slide that contains them in Keynote. Text, date, number, and formula-result cells are decoded; duration cells currently render as empty.
+- **iWork tables**: Tables are reconstructed as Markdown grids — placed inline at their original position in Pages, and with the slide that contains them in Keynote. Text, date/time, Boolean, number, and formula-result cells are decoded. Numbers and cached numeric results retain their stored values; currency, percentage, and other display formats are not applied. Formula-error cells without decoded error details render as `#ERROR!`; duration cells currently render as empty.
 
 ## License
 

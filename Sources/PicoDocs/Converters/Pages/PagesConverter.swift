@@ -35,7 +35,9 @@ import ZIPFoundation
 
 public struct PagesConverter: DocumentConverter {
 
-    public init() {}
+    private let objectBudgetBytes: Int
+    public init() { objectBudgetBytes = 64 * 1024 * 1024 }
+    init(objectBudgetBytes: Int) { self.objectBudgetBytes = max(0, objectBudgetBytes) }
 
     public func accepts(_ info: StreamInfo) -> Bool {
         info.detectedFormat == .pages
@@ -48,7 +50,7 @@ public struct PagesConverter: DocumentConverter {
 
         // Gather the IWA component streams. Two common on-disk layouts: loose
         // `Index/*.iwa` entries, or a nested `Index.zip` containing them.
-        let components = try iwaComponents(in: archive)
+        let components = try Self.iwaComponents(in: archive)
         guard !components.isEmpty else {
             // Likely a legacy iWork '09 package (index.xml[.gz]) or an unexpected
             // layout — not supported yet.
@@ -68,21 +70,25 @@ public struct PagesConverter: DocumentConverter {
             try Task.checkCancellation()
             do {
                 let stream = try Snappy.decompressIWA(component.bytes)
-                if component.name.hasSuffix("Document.iwa") { documentStream = stream }
+                if component.isDocument { documentStream = stream }
                 streams.append((name: component.name, stream: stream))
+            } catch let error as CancellationError {
+                throw error
             } catch {
-                if component.name.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
+                if component.isDocument { throw PicoDocsError.fileCorrupted }
             }
         }
 
+        let objectBudget = IWAObjectBudget(bytes: objectBudgetBytes)
         let allStreams = streams.map(\.stream)
         var sections: [DocumentSection] = []
+        let prepared = try IWATable.PreparedDocument(documentStream: documentStream, streams: allStreams, objectBudget: objectBudget)
 
         // Prefer inline layout: tables placed at their ￼ attachment points, in
         // reading order. Falls back to body text + tables appended after it when
         // the attachments can't be mapped 1:1 (so a table is never dropped).
         if let documentStream,
-           let blocks = try IWATable.inlineBlocks(documentStream: documentStream, in: allStreams) {
+           let blocks = try IWATable.inlineBlocks(documentStream: documentStream, in: allStreams, objectBudget: objectBudget, prepared: prepared) {
             for block in blocks {
                 switch block {
                 case .text(let raw):
@@ -101,12 +107,12 @@ public struct PagesConverter: DocumentConverter {
             if let documentStream {
                 // Render headings even on the fallback path; degrade to plain text
                 // extraction only if the style-aware renderer yields nothing.
-                let rendered = try IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams)
-                bodyText = rendered.isEmpty ? MarkdownLiteral.escapeBackslashes(Self.normalize(IWAArchive.text(in: documentStream))) : rendered
+                let rendered = try IWATable.bodyMarkdown(documentStream: documentStream, in: allStreams, objectBudget: objectBudget, prepared: prepared)
+                bodyText = rendered.isEmpty ? MarkdownLiteral.escapeBackslashes(Self.normalize(IWAArchive.text(from: prepared.bodyObjects))) : rendered
             } else {
                 var firstText = ""
-                for entry in streams.sorted(by: { $0.name < $1.name }) {
-                    let extracted = IWAArchive.text(in: entry.stream)
+                for entry in streams.enumerated().sorted(by: { $0.element.name < $1.element.name }) {
+                    let extracted = IWAArchive.text(from: prepared.streamObjects[entry.offset])
                     if !extracted.isEmpty { firstText = MarkdownLiteral.escapeBackslashes(Self.normalize(extracted)); break }
                 }
                 bodyText = firstText
@@ -115,11 +121,13 @@ public struct PagesConverter: DocumentConverter {
             if !cleaned.isEmpty {
                 sections.append(DocumentSection(kind: .body, markdown: cleaned, sourcePath: "Index/Document.iwa"))
             }
-            for markdown in IWATable.markdownTables(from: allStreams) {
+            for markdown in IWATable.markdownTables(from: allStreams, objectBudget: objectBudget, prepared: prepared) {
                 sections.append(DocumentSection(kind: .table, markdown: markdown, sourcePath: "Index/Tables"))
             }
         }
 
+        try Task.checkCancellation()
+        try objectBudget.check()
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
         let title = (info.filename?.isEmpty == false) ? info.filename : nil
         return ConverterResult(title: title, sections: sections)
@@ -127,43 +135,67 @@ public struct PagesConverter: DocumentConverter {
 
     // MARK: - IWA gathering
 
-    private struct Component {
+    struct Component {
         let name: String
         let bytes: [UInt8]
+        let isDocument: Bool
     }
 
     /// Reads the `.iwa` component streams from loose `Index/*.iwa` entries, or —
     /// failing that — from a nested `Index.zip`. A present-but-unreadable main
     /// story (`Document.iwa`) is treated as corruption; auxiliary entries that
     /// fail to extract are skipped leniently.
-    private func iwaComponents(in archive: Archive) throws -> [Component] {
+    static func iwaComponents(in archive: Archive, maximumEntryBytes: Int = Int.max, maximumTotalBytes: Int = Int.max,
+                              maximumArchiveEntries: Int = 16_384, maximumComponents: Int = 16_384, maximumMetadataBytes: Int = 8 * 1024 * 1024) throws -> [Component] {
         var components: [Component] = []
+        var remaining = maximumTotalBytes
+        var componentBudget = IWAComponentBudget(entries: maximumArchiveEntries, components: maximumComponents, bytes: maximumMetadataBytes)
+        func readBounded(_ archive: Archive, entry: Entry) throws -> Data? {
+            try Task.checkCancellation()
+            let limit = min(maximumEntryBytes, remaining)
+            guard limit >= 0, entry.uncompressedSize <= UInt64(limit) else { throw PicoDocsError.fileCorrupted }
+            var exceeded = false
+            let data = try ZIPEntryReader.read(archive, entry: entry, maxBytes: limit) { count in
+                guard count <= remaining else { exceeded = true; throw PicoDocsError.fileCorrupted }
+                remaining -= count
+            }
+            try Task.checkCancellation()
+            guard !exceeded else { throw PicoDocsError.fileCorrupted }
+            return data
+        }
         // Loose layout is `Index/*.iwa`; scope the scan to that path so a stray
         // outer `.iwa` can't shadow the nested `Index.zip` body below.
-        for entry in archive where entry.type == .file
-            && entry.path.hasPrefix("Index/") && entry.path.hasSuffix(".iwa") {
-            guard let data = Self.readEntry(archive, path: entry.path) else {
-                if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
+        var indexEntry: Entry?
+        for entry in archive {
+            try componentBudget.scan(entry.path)
+            if entry.path == "Index.zip", indexEntry == nil { indexEntry = entry }
+            guard entry.type == .file, entry.path.hasPrefix("Index/"), entry.path.hasSuffix(".iwa") else { continue }
+            try componentBudget.retainComponent(entry.path)
+            guard let data = try readBounded(archive, entry: entry) else {
+                if entry.path == "Index/Document.iwa" { throw PicoDocsError.fileCorrupted }
                 continue
             }
-            components.append(Component(name: entry.path, bytes: [UInt8](data)))
+            components.append(Component(name: entry.path, bytes: [UInt8](data), isDocument: entry.path == "Index/Document.iwa"))
         }
         if !components.isEmpty { return components }
 
         // Nested layout: the IWA streams live inside Index.zip. If that container
         // is present but can't be read/opened, the file is corrupt — not an
         // unsupported layout — so surface that distinctly.
-        if archive["Index.zip"] != nil {
-            guard let indexZip = Self.readEntry(archive, path: "Index.zip"),
+        if let indexEntry {
+            guard let indexZip = try readBounded(archive, entry: indexEntry),
                   let inner = Archive(data: indexZip, accessMode: .read) else {
                 throw PicoDocsError.fileCorrupted
             }
-            for entry in inner where entry.type == .file && entry.path.hasSuffix(".iwa") {
-                guard let data = Self.readEntry(inner, path: entry.path) else {
-                    if entry.path.hasSuffix("Document.iwa") { throw PicoDocsError.fileCorrupted }
+            for entry in inner {
+                try componentBudget.scan(entry.path)
+                guard entry.type == .file, entry.path.hasSuffix(".iwa") else { continue }
+                try componentBudget.retainComponent(entry.path)
+                guard let data = try readBounded(inner, entry: entry) else {
+                    if entry.path == "Document.iwa" { throw PicoDocsError.fileCorrupted }
                     continue
                 }
-                components.append(Component(name: entry.path, bytes: [UInt8](data)))
+                components.append(Component(name: entry.path, bytes: [UInt8](data), isDocument: entry.path == "Document.iwa"))
             }
         }
         return components
@@ -223,7 +255,7 @@ public struct PagesConverter: DocumentConverter {
 
     // MARK: - ZIP helper
 
-    static func readEntry(_ archive: Archive, path: String) -> Data? {
-        ZIPEntryReader.read(archive, path: path)
+    static func readEntry(_ archive: Archive, path: String) throws -> Data? {
+        try ZIPEntryReader.read(archive, path: path)
     }
 }

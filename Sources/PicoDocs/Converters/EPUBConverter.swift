@@ -26,14 +26,14 @@ public struct EPUBConverter: DocumentConverter {
         }
 
         // 1. META-INF/container.xml -> path to the OPF package document.
-        guard let containerData = Self.readEntry(archive, path: "META-INF/container.xml"),
+        guard let containerData = try Self.readEntry(archive, path: "META-INF/container.xml"),
               let containerXML = Self.decodeText(containerData),
               let opfPath = try Self.opfPath(fromContainer: containerXML) else {
             throw PicoDocsError.fileCorrupted
         }
 
         // 2. Parse the OPF: metadata, manifest (id -> href), spine (order).
-        guard let opfData = Self.readEntry(archive, path: opfPath),
+        guard let opfData = try Self.readEntry(archive, path: opfPath),
               let opfXML = Self.decodeText(opfData) else {
             throw PicoDocsError.fileCorrupted
         }
@@ -61,7 +61,7 @@ public struct EPUBConverter: DocumentConverter {
             if (try? itemref.attr("linear"))?.lowercased() == "no" { continue }
             guard let idref = try? itemref.attr("idref"), let href = manifest[idref] else { continue }
             let entryPath = Self.resolve(path: href, relativeTo: opfDir)
-            guard let chapterData = Self.readEntry(archive, path: entryPath),
+            guard let chapterData = try Self.readEntry(archive, path: entryPath),
                   let chapterHTML = Self.decodeText(chapterData) else { continue }
             guard let (chapterTitle, markdown) = try? HTMLToMarkdown.convert(html: chapterHTML) else { continue }
             let trimmed = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -77,7 +77,7 @@ public struct EPUBConverter: DocumentConverter {
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
 
         let resolvedTitle = (title?.isEmpty == false) ? title : info.filename
-        let cover = Self.coverData(archive: archive, opf: opf, manifest: manifest, opfDir: opfDir)
+        let cover = try Self.coverData(archive: archive, opf: opf, manifest: manifest, opfDir: opfDir)
         return ConverterResult(
             title: resolvedTitle,
             author: (author?.isEmpty == false) ? author : nil,
@@ -88,8 +88,8 @@ public struct EPUBConverter: DocumentConverter {
 
     // MARK: - Archive / OPF helpers
 
-    static func readEntry(_ archive: Archive, path: String) -> Data? {
-        ZIPEntryReader.read(archive, path: path)
+    static func readEntry(_ archive: Archive, path: String) throws -> Data? {
+        try ZIPEntryReader.read(archive, path: path)
     }
 
     /// Decodes text trying UTF-8, then UTF-16 (BOM-aware), then ISO Latin-1 as a
@@ -134,16 +134,16 @@ public struct EPUBConverter: DocumentConverter {
 
     /// Best-effort cover image lookup (EPUB3 `properties="cover-image"`, then
     /// EPUB2 `<meta name="cover">`). Returns nil if not found.
-    static func coverData(archive: Archive, opf: Document, manifest: [String: String], opfDir: String) -> Data? {
+    static func coverData(archive: Archive, opf: Document, manifest: [String: String], opfDir: String) throws -> Data? {
         let items = (try? opf.getElementsByTag("item").array()) ?? []
         if let item = items.first(where: { ((try? $0.attr("properties")) ?? "").contains("cover-image") }),
            let href = try? item.attr("href") {
-            return readEntry(archive, path: resolve(path: href, relativeTo: opfDir))
+            return try readEntry(archive, path: resolve(path: href, relativeTo: opfDir))
         }
         let metas = (try? opf.getElementsByTag("meta").array()) ?? []
         if let meta = metas.first(where: { (try? $0.attr("name")) == "cover" }),
            let coverId = try? meta.attr("content"), let href = manifest[coverId] {
-            return readEntry(archive, path: resolve(path: href, relativeTo: opfDir))
+            return try readEntry(archive, path: resolve(path: href, relativeTo: opfDir))
         }
         return nil
     }

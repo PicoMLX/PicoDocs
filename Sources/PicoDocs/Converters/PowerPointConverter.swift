@@ -141,7 +141,7 @@ public struct PowerPointConverter: DocumentConverter {
             if !slideText.isEmpty { blocks.append(slideText) }
             if let notes { blocks.append(renderBudget.join(["### Notes\n\n", notes])) }
             try archive.check()
-            guard !blocks.isEmpty else { continue }   // empty slide: keep its number, emit nothing
+            // Empty slides still carry native deck structure for Office round trips.
 
             let section = DocumentSection(
                 title: context.plainTitle,
@@ -574,7 +574,19 @@ public struct PowerPointConverter: DocumentConverter {
     private static func hyperlink(_ click: Element?, context: SlideContext) -> String? {
         guard let id = try? click?.attr("r:id"), !id.isEmpty else { return nil }
         guard let relation = context.relationships[id] else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
-        guard relation.external else { return nil }
+        if !relation.external {
+            // Preserve the canonical fragment attached to a generated native
+            // slide jump, without treating other internal relationships as URLs.
+            guard (relation.isType("/slide") || relation.isType("/hyperlink")), (try? click?.attr("action")) == "ppaction://hlinksldjump",
+                  let click, let extensions = selectedChild(of: click, named: "a:extlst"),
+                  let item = selectedChildren(in: extensions).first(where: { (try? $0.attr("uri")) == "https://picomlx.github.io/picodocs/markdown/slideFragment" }),
+                  let marker = selectedChild(of: item, named: "pd:slidefragment"),
+                  let fragment = try? marker.attr("val"), fragment.hasPrefix("#"),
+                  isValidTarget(fragment, isImage: false) else { return nil }
+            let target = Self.resolvePartPath(relation.target, relativeTo: directory(of: context.partPath))
+            guard context.archive.entry(target) != nil else { context.archive.fail(PicoDocsError.fileCorrupted); return nil }
+            return fragment
+        }
         guard relation.isType("/hyperlink") else {
             context.archive.fail(PicoDocsError.fileCorrupted)
             return nil
@@ -1026,6 +1038,18 @@ public struct PowerPointConverter: DocumentConverter {
                 continue
             }
 
+            if case .plain = mode, let properties,
+               let extensions = selectedChild(of: properties, named: "a:extlst"),
+               let entry = selectedChildren(in: extensions).first(where: {
+                   $0.tagName().lowercased() == "a:ext" && (try? $0.attr("uri")) == "https://picomlx.github.io/picodocs/markdown/heading"
+               }), let heading = entry.children().first(), heading.tagName().lowercased() == "pd:heading",
+               let headingLevel = integerValue(try? heading.attr("level")), (1...6).contains(headingLevel) {
+                flushList()
+                let prefix = String(repeating: "#", count: headingLevel) + " "
+                appendBlock(paragraphBudget?.join([prefix, text]) ?? (prefix + text))
+                continue
+            }
+
             let marker: String?
             switch mode {
             case .plain:
@@ -1052,6 +1076,17 @@ public struct PowerPointConverter: DocumentConverter {
             }
 
             guard let marker else {
+                let continuation = properties.flatMap { selectedChild(of: $0, named: "a:extlst") }?.children().first { ext in
+                    ext.tagName().lowercased() == "a:ext" && (try? ext.attr("uri")) == "https://picomlx.github.io/picodocs/markdown/listContinuation"
+                        && ext.children().contains { $0.tagName().lowercased() == "pd:listcontinuation" }
+                } != nil
+                let depth = level - baseLevel
+                if continuation, !listLines.isEmpty, depth >= 0, depth < markerWidths.count {
+                    let indent = String(repeating: " ", count: markerWidths.prefix(depth + 1).reduce(0, +))
+                    let continued = paragraphBudget?.replaceNewlines(text, with: "  \n" + indent) ?? text.replacingOccurrences(of: "\n", with: "  \n" + indent)
+                    appendListLine(paragraphBudget?.join(["\n", indent, continued]) ?? ("\n" + indent + continued))
+                    continue
+                }
                 flushList()
                 appendBlock(paragraphBudget?.replaceNewlines(text, with: "  \n") ?? text.replacingOccurrences(of: "\n", with: "  \n"))
                 continue
@@ -1822,7 +1857,18 @@ public struct PowerPointConverter: DocumentConverter {
     }
 
     static func resolvePartPath(_ target: String, relativeTo baseDirectory: String) -> String {
-        PowerPointPackage.canonicalPartPath(WordConverter.resolvePartPath(target, relativeTo: baseDirectory))
+        // PPTX part identities retain encoded octets. The Word resolver decodes
+        // package URIs for its exporter, which would erase this spelling before
+        // the PPTX package index can match equivalent percent-triplet case.
+        let target = PowerPointPackage.canonicalPartPath(target)
+        let combined = target.hasPrefix("/") ? String(target.dropFirst())
+            : baseDirectory.isEmpty ? target : baseDirectory + "/" + target
+        var segments: [Substring] = []
+        for segment in combined.split(separator: "/", omittingEmptySubsequences: true) {
+            if segment == ".." { if !segments.isEmpty { segments.removeLast() } }
+            else if segment != "." { segments.append(segment) }
+        }
+        return segments.joined(separator: "/")
     }
 
     private static func directory(of part: String) -> String {

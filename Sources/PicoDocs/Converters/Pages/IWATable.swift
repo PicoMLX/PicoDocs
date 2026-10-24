@@ -12,7 +12,7 @@
 //  object graph (`MessageInfo.object_references`):
 //
 //    • TST.TableModelArchive (type 6001 / 6316) — the table itself; its
-//      references point at exactly one Tile and the DataLists backing its
+//      references point at one or more Tiles and the DataLists backing its
 //      columns (one per aspect: strings, formats, styles, …).
 //    • TST.Tile (type 6002) — the cell grid: `repeated TileRowInfo` (field 5),
 //      each row carrying a packed cell buffer (field 6) and a uint16 offset
@@ -26,7 +26,7 @@
 //
 //  Confirmed against real `.pages` and `.key` fixtures (text + date cells).
 //
-//  Scope: text, date, number, and formula-result cells; duration cells aren't
+//  Scope: text, date/time, Boolean, number, and formula-result/error cells; duration cells aren't
 //  decoded yet and render empty. For Pages, tables are placed inline at their
 //  attachment point (see PagesConverter); for Keynote, with the slide that owns
 //  them (see KeynoteConverter).
@@ -51,6 +51,8 @@ enum IWATable {
     private static let richTextCell: UInt8 = 0x09
     private static let inlineTextCell: UInt8 = 0x03
     private static let dateCell: UInt8 = 0x05
+    private static let booleanCell: UInt8 = 0x06
+    private static let errorCell: UInt8 = 0x08
     private static let numberCell: UInt8 = 0x02
     private static let formulaCell: UInt8 = 0x0a
 
@@ -61,13 +63,36 @@ enum IWATable {
         case table(String)
     }
 
+    struct PreparedDocument {
+        let objects: [UInt64: IWAArchive.Object]
+        let bodyObjects: [IWAArchive.Object]
+        let streamObjects: [[IWAArchive.Object]]
+        let tableMarkdown: [UInt64: String]
+        init(documentStream: [UInt8]?, streams: [[UInt8]], objectBudget: IWAObjectBudget, outputBudget: IWAOutputBudget? = nil, preserveCellWhitespace: Bool = false) throws {
+            guard objectBudget.reserve(streams.count * 32) else { try objectBudget.check(); throw PicoDocsError.fileCorrupted }
+            let documentIndex = documentStream.flatMap { streams.firstIndex(of: $0) }
+            var streamObjects = Array(repeating: [IWAArchive.Object](), count: streams.count)
+            var bodyObjects: [IWAArchive.Object] = []
+            objects = buildObjects(streams, objectBudget: objectBudget) { index, decoded in
+                streamObjects[index] = decoded
+                if index == documentIndex { bodyObjects = decoded }
+            }
+            try objectBudget.check()
+            self.bodyObjects = bodyObjects
+            self.streamObjects = streamObjects
+            tableMarkdown = reconstructTables(objects, budget: outputBudget, objectBudget: objectBudget, preserveCellWhitespace: preserveCellWhitespace)
+            try objectBudget.check()
+        }
+    }
+
     /// Every text table across the given decompressed IWA streams, rendered as
     /// Markdown and ordered by tile identifier (a stable proxy for document
     /// order). This is the appended-table fallback; `inlineBlocks` instead places
     /// tables at their attachment points. Best-effort: a document with no tables
     /// yields `[]`.
-    static func markdownTables(from streams: [[UInt8]]) -> [String] {
-        let byTile = reconstructTables(buildObjects(streams))
+    static func markdownTables(from streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil, prepared: PreparedDocument? = nil) -> [String] {
+        let parseBudget = objectBudget ?? IWAObjectBudget()
+        let byTile = prepared?.tableMarkdown ?? reconstructTables(buildObjects(streams, objectBudget: parseBudget), objectBudget: parseBudget)
         return byTile.keys.sorted().compactMap { byTile[$0] }
     }
 
@@ -79,49 +104,96 @@ enum IWATable {
     /// attributed to the first slide, in the given order, that reaches it. Lets
     /// Keynote place each table with its slide instead of appending all at the end.
     static func tablesBySlide(slideIDs: [UInt64], in streams: [[UInt8]],
-                              excludingSubgraphs blocked: Set<UInt64>) -> [UInt64: [String]] {
-        let objects = buildObjects(streams)
-        let tableMarkdown = reconstructTables(objects)
-        guard !tableMarkdown.isEmpty else { return [:] }
+                              excludingSubgraphs blocked: Set<UInt64>, objectBudget: IWAObjectBudget? = nil, prepared: PreparedDocument? = nil) -> [UInt64: [String]] {
+        attributedTables(rootIDs: slideIDs, in: streams, excludingSubgraphs: blocked, objectBudget: objectBudget, prepared: prepared).byRoot
+    }
+
+    /// Preserve unclaimed tile identities as well as attributed ones. Identical
+    /// rendered tables can belong to different physical table objects.
+    static func attributedTables(rootIDs slideIDs: [UInt64], in streams: [[UInt8]],
+                                 excludingSubgraphs blocked: Set<UInt64>, budget: IWAOutputBudget? = nil, objectBudget: IWAObjectBudget? = nil, drawableOrder: Bool = false, prepared: PreparedDocument? = nil) -> (byRoot: [UInt64: [String]], unclaimed: [String]) {
+        let parseBudget = objectBudget ?? IWAObjectBudget()
+        let objects = prepared?.objects ?? buildObjects(streams, objectBudget: parseBudget)
+        let tableMarkdown = prepared?.tableMarkdown ?? reconstructTables(objects, budget: budget, objectBudget: parseBudget)
+        guard !Task.isCancelled, budget?.active != false, !tableMarkdown.isEmpty else { return ([:], []) }
         let tiles = Set(tableMarkdown.keys)
 
         var result: [UInt64: [String]] = [:]
         var claimed = Set<UInt64>()
         for slideID in slideIDs {
+            if claimed.count == tiles.count { break }
+            guard parseBudget.active, budget?.active != false else { return ([:], []) }
             var markdowns: [String] = []
-            for tile in reachableTiles(from: slideID, objects: objects, tiles: tiles, blocked: blocked)
+            for tile in reachableTiles(from: slideID, objects: objects, tiles: tiles, blocked: blocked, objectBudget: parseBudget, drawableOrder: drawableOrder)
             where claimed.insert(tile).inserted {
                 if let markdown = tableMarkdown[tile] { markdowns.append(markdown) }
             }
+            guard parseBudget.active else { return ([:], []) }
             if !markdowns.isEmpty { result[slideID] = markdowns }
         }
-        return result
+        return (result, tableMarkdown.keys.sorted().filter { !claimed.contains($0) }.compactMap { tableMarkdown[$0] })
     }
 
-    /// Bounded breadth-first walk from a root object collecting every
-    /// reconstructed table's tile reachable from it (a slide → its drawables →
-    /// TableInfo → model → tile), in discovery order. References in `blocked`
-    /// (master/template objects) are not traversed, so a slide can't reach its
-    /// template's tables. Depth-bounded so the walk stays within a slide's own
-    /// content subgraph rather than fanning out through shared objects.
-    private static func reachableTiles(from root: UInt64, objects: [UInt64: IWAArchive.Object],
-                                       tiles: Set<UInt64>, blocked: Set<UInt64>) -> [UInt64] {
-        var frontier = [root]
-        var visited: Set<UInt64> = [root]
-        var found: [UInt64] = []
-        for _ in 0 ..< 12 {
-            var next: [UInt64] = []
-            for id in frontier {
+    /// Walk each Numbers drawable's containment subtree before the next one.
+    /// Other iWork callers retain breadth-first discovery. Both routes share a
+    /// cumulative edge/node allowance across roots and admit queued work first.
+    static func reachableTiles(from root: UInt64, objects: [UInt64: IWAArchive.Object],
+                               tiles: Set<UInt64>, blocked: Set<UInt64>, objectBudget: IWAObjectBudget? = nil,
+                               drawableOrder: Bool = false) -> [UInt64] {
+        let work = objectBudget ?? IWAObjectBudget()
+        var found: [UInt64] = [], foundIDs: Set<UInt64> = []
+        if drawableOrder {
+            var pending: [UInt64] = [root]
+            var visited: Set<UInt64> = []
+            while let id = pending.popLast() {
+                guard work.reserveVisit() else { return [] }
+                guard visited.insert(id).inserted else { continue }
+                if tiles.contains(id), foundIDs.insert(id).inserted { found.append(id) }
                 guard let object = objects[id] else { continue }
-                for reference in object.references where !blocked.contains(reference) {
-                    if tiles.contains(reference), !found.contains(reference) { found.append(reference) }
-                    if visited.insert(reference).inserted { next.append(reference) }
+                let ordered = orderedDrawables(object, objectBudget: work) ?? object.references
+                for id in ordered.reversed() {
+                    guard work.reserveVisit() else { return [] }
+                    if !blocked.contains(id) { pending.append(id) }
                 }
             }
-            if next.isEmpty { break }
-            frontier = next
+        } else {
+            var frontier = [root], visited: Set<UInt64> = [root]
+            for _ in 0..<12 {
+                var next: [UInt64] = []
+                for id in frontier {
+                    guard work.reserveVisit() else { return [] }
+                    guard let object = objects[id] else { continue }
+                    for reference in object.references {
+                        guard work.reserveVisit() else { return [] }
+                        if blocked.contains(reference) { continue }
+                        if tiles.contains(reference), foundIDs.insert(reference).inserted { found.append(reference) }
+                        if visited.insert(reference).inserted { next.append(reference) }
+                    }
+                }
+                if next.isEmpty { break }
+                frontier = next
+            }
         }
-        return found
+        return work.active ? found : []
+    }
+
+    private static func orderedDrawables(_ object: IWAArchive.Object, objectBudget: IWAObjectBudget) -> [UInt64]? {
+        guard object.type == 2 || object.type == 3008 else { return nil } // TN.Sheet / TSD.Group
+        var reader = ProtobufReader(object.payload, objectBudget: objectBudget), ids: [UInt64] = []
+        var partial = false
+        while let field = reader.next() {
+            if field.number == 2 {
+                guard case .length(let bytes) = field.value,
+                      let id = referencedID(in: bytes, objectBudget: objectBudget) else { partial = true; continue }
+                guard objectBudget.reserve(16) else { return [] }
+                ids.append(id)
+            }
+        }
+        // A partial native order must not hide still-valid envelope references.
+        // The existing fallback uses that complete available order and the same
+        // bounded DFS/visited identities as an undecodable drawable list.
+        if partial || reader.malformed { return nil }
+        return ids.isEmpty ? nil : ids
     }
 
     /// Splits the document body into ordered text/table blocks: body text is
@@ -132,16 +204,21 @@ enum IWATable {
     /// appended tables — only when the ￼ markers can't be matched 1:1 to attachment
     /// runs, so a table is never dropped. Offsets are UTF-16 code units, the index
     /// space iWork's run/attachment character indices use.
-    static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]]) throws -> [Block]? {
-        let objects = buildObjects(streams)
-        let tableMarkdown = reconstructTables(objects)
+    static func inlineBlocks(documentStream: [UInt8], in streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil, prepared: PreparedDocument? = nil) throws -> [Block]? {
+        try Task.checkCancellation()
+        let prepared = try prepared ?? PreparedDocument(documentStream: documentStream, streams: streams, objectBudget: objectBudget ?? IWAObjectBudget())
+        let objects = prepared.objects
+        let tableMarkdown = prepared.tableMarkdown
+        try objectBudget?.check()
+        try Task.checkCancellation()
         let tiles = Set(tableMarkdown.keys)
 
         var blocks: [Block] = []
         var placed = Set<UInt64>()
         // Body storages in document (stream) order; each carries its own text and
         // run tables (paragraph/character styles, smart fields) and attachments.
-        for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
+        for storage in prepared.bodyObjects where storage.type == storageType {
+            try Task.checkCancellation()
             guard let body = bodyStorage(storage, objects: objects, inlineTableTiles: tiles) else { continue }   // kind 0 only
             let attachments = attachmentRuns(in: storage)
             let markers = body.units.indices.filter { body.units[$0] == 0xFFFC }
@@ -175,6 +252,7 @@ enum IWATable {
             if !tail.isEmpty { blocks.append(.text(tail)) }
         }
         // Commit to inline layout only if every reconstructed table found a home.
+        try Task.checkCancellation()
         return placed == tiles ? blocks : nil
     }
 
@@ -183,10 +261,11 @@ enum IWATable {
     /// placement) so styles still produce Markdown while the tables are appended
     /// separately; attachment marks are dropped. Empty when there is no body text,
     /// so the caller can degrade to plain extraction.
-    static func bodyMarkdown(documentStream: [UInt8], in streams: [[UInt8]]) throws -> String {
-        let objects = buildObjects(streams)
+    static func bodyMarkdown(documentStream: [UInt8], in streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil, prepared: PreparedDocument? = nil) throws -> String {
+        let objects = prepared?.objects ?? buildObjects(streams, objectBudget: objectBudget)
+        try objectBudget?.check()
         var parts: [String] = []
-        for storage in IWAArchive.objects(in: documentStream) where storage.type == storageType {
+        for storage in prepared?.bodyObjects ?? IWAArchive.objects(in: documentStream, objectBudget: objectBudget) where storage.type == storageType {
             guard let body = bodyStorage(storage, objects: objects) else { continue }
             var lists = ListState()
             let rendered = try renderParagraphs(body, 0 ..< body.units.count, objects: objects,
@@ -952,12 +1031,20 @@ enum IWATable {
 
     // MARK: - Object graph
 
-    private static func buildObjects(_ streams: [[UInt8]]) -> [UInt64: IWAArchive.Object] {
+    private static func buildObjects(_ streams: [[UInt8]], objectBudget: IWAObjectBudget? = nil, decoded: ((Int, [IWAArchive.Object]) -> Void)? = nil) -> [UInt64: IWAArchive.Object] {
+        let budget = objectBudget ?? IWAObjectBudget()
         var objects: [UInt64: IWAArchive.Object] = [:]
-        for stream in streams {
-            for object in IWAArchive.objects(in: stream) { objects[object.identifier] = object }
+        for (index, stream) in streams.enumerated() {
+            guard !Task.isCancelled else { return [:] }
+            let parsed = IWAArchive.objects(in: stream, objectBudget: budget)
+            decoded?(index, parsed)
+            for object in parsed {
+                guard !Task.isCancelled else { return [:] }
+                guard budget.reserve(256) else { return [:] }
+                objects[object.identifier] = object
+            }
         }
-        return objects
+        return budget.active ? objects : [:]
     }
 
     /// Maps each content table's tile id to its rendered Markdown. A table model
@@ -965,38 +1052,94 @@ enum IWATable {
     /// rich-text list (`f1==8`, via RichTextPayload → Storage) and/or an
     /// inline-text list (`f1==1`, text stored directly in the entry). Cells choose
     /// between them by value type; dates live in the cell record itself.
-    private static func reconstructTables(_ objects: [UInt64: IWAArchive.Object]) -> [UInt64: String] {
-        let tileIDs = Set(objects.values.filter { $0.type == tileType }.map(\.identifier))
+    private static func reconstructTables(_ objects: [UInt64: IWAArchive.Object], budget: IWAOutputBudget? = nil, objectBudget: IWAObjectBudget? = nil, preserveCellWhitespace: Bool = false) -> [UInt64: String] {
+        let copies = objectBudget ?? IWAObjectBudget()
+        let output = budget ?? IWAOutputBudget()
+        // The implicit allowance is checked through the caller's shared object
+        // budget, including early exits during data-list reconstruction.
+        defer { if !output.active { copies.fail() } }
+        var tileIDs: Set<UInt64> = []
+        for object in objects.values {
+            guard copies.active, output.active else { return [:] }
+            if object.type == tileType { tileIDs.insert(object.identifier) }
+        }
         guard !tileIDs.isEmpty else { return [:] }
 
+        var storageCache: [UInt64: String] = [:]
         var richMaps: [UInt64: [UInt32: String]] = [:]
         var inlineMaps: [UInt64: [UInt32: String]] = [:]
         for object in objects.values where object.type == dataListType {
+            guard copies.active, output.active else { return [:] }
             // Dispatch on list_type (field 1) so each datalist's entries are fully
             // parsed at most once — rich and inline text are mutually exclusive.
             var listType: UInt64?
-            var reader = ProtobufReader(object.payload)
+            var reader = ProtobufReader(object.payload, objectBudget: copies)
             while let field = reader.next() {
                 if field.number == 1, case .varint(let type) = field.value { listType = type; break }
             }
             if listType == stringListType {
-                if let map = richTextMap(object, objects: objects) { richMaps[object.identifier] = map }
+                if let map = richTextMap(object, objects: objects, cache: &storageCache, budget: output, objectBudget: copies) { richMaps[object.identifier] = map }
             } else if listType == inlineListType {
-                if let map = inlineTextMap(object) { inlineMaps[object.identifier] = map }
+                if let map = inlineTextMap(object, budget: output, objectBudget: copies) { inlineMaps[object.identifier] = map }
             }
         }
 
         var byTile: [UInt64: String] = [:]
         for object in objects.values where tableModelTypes.contains(object.type) {
-            guard let tile = object.references.first(where: { tileIDs.contains($0) }), byTile[tile] == nil,
-                  let tileObject = objects[tile] else { continue }
-            let rich = object.references.compactMap { richMaps[$0] }.first ?? [:]
-            let inline = object.references.compactMap { inlineMaps[$0] }.first ?? [:]
-            if let markdown = render(grid: cellGrid(tileObject, rich: rich, inline: inline)) {
-                byTile[tile] = markdown
+            guard copies.active, output.active else { return [:] }
+            let positions = tableTiles(object, available: tileIDs, objectBudget: copies)
+            guard let first = positions.first, byTile[first.id] == nil else { continue }
+            let rich = object.references.lazy.compactMap { richMaps[$0] }.first ?? [:]
+            let inline = object.references.lazy.compactMap { inlineMaps[$0] }.first ?? [:]
+            var grid: [[String?]] = []
+            for position in positions {
+                guard copies.active, output.active, let tile = objects[position.id] else { continue }
+                mergeTile(tile, rowOffset: position.offset ?? grid.count, rich: rich, inline: inline,
+                          grid: &grid, budget: output, objectBudget: copies, preserveCellWhitespace: preserveCellWhitespace)
+            }
+            if let markdown = render(grid: grid, budget: output) { byTile[first.id] = markdown }
+        }
+        guard copies.active, output.active else { return [:] }
+
+        return byTile
+    }
+
+    private static func tableTiles(_ model: IWAArchive.Object, available: Set<UInt64>, objectBudget: IWAObjectBudget) -> [(id: UInt64, offset: Int?)] {
+        var result: [(id: UInt64, offset: Int?)] = [], seen: Set<UInt64> = []
+        var modelReader = ProtobufReader(model.payload, objectBudget: objectBudget)
+        while let field = modelReader.next() {
+            guard field.number == 4, case .length(let store) = field.value else { continue }
+            var storeReader = ProtobufReader(store, objectBudget: objectBudget)
+            while let field = storeReader.next() {
+                guard field.number == 3, case .length(let storage) = field.value else { continue }
+                var reader = ProtobufReader(storage, objectBudget: objectBudget)
+                var positions: [(UInt64, UInt64)] = [], size: UInt64 = 256
+                while let field = reader.next() {
+                    if field.number == 2, case .varint(let value) = field.value { size = value }
+                    if field.number == 1, case .length(let bytes) = field.value {
+                        var entry = ProtobufReader(bytes, objectBudget: objectBudget), index: UInt64?, id: UInt64?
+                        while let value = entry.next() {
+                            if value.number == 1, case .varint(let number) = value.value { index = number }
+                            if value.number == 2, case .length(let ref) = value.value { id = referencedID(in: ref, objectBudget: objectBudget) }
+                        }
+                        if let index, let id, available.contains(id) {
+                            guard objectBudget.reserve(32) else { return [] }
+                            positions.append((index, id))
+                        }
+                    }
+                }
+                guard size > 0, size <= 1_000_000 else { objectBudget.fail(); return [] }
+                for (index, id) in positions.sorted(by: { $0.0 < $1.0 }) where seen.insert(id).inserted {
+                    guard index <= 999_999 / size else { objectBudget.fail(); return [] }
+                    result.append((id, Int(index * size)))
+                }
             }
         }
-        return byTile
+        for id in model.references where available.contains(id) && seen.insert(id).inserted {
+            guard objectBudget.reserve(32) else { return [] }
+            result.append((id, nil))
+        }
+        return result
     }
 
     // MARK: - Inline attachments
@@ -1076,16 +1219,17 @@ enum IWATable {
     /// TSWP.StorageArchive (2001). Returns nil for other list types or no text.
     /// Field-order independent.
     private static func richTextMap(_ object: IWAArchive.Object,
-                                    objects: [UInt64: IWAArchive.Object]) -> [UInt32: String]? {
+                                    objects: [UInt64: IWAArchive.Object], cache: inout [UInt64: String], budget: IWAOutputBudget?, objectBudget: IWAObjectBudget) -> [UInt32: String]? {
         var listType: UInt64?
         var entries: [(key: UInt32, payload: UInt64)] = []
-        var reader = ProtobufReader(object.payload)
+        var reader = ProtobufReader(object.payload, objectBudget: objectBudget)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (1, .varint(let type)):
                 listType = type
             case (3, .length(let entryBytes)):
-                if let entry = dataListEntry(entryBytes) { entries.append(entry) }
+                guard budget?.reserve(48) != false else { return nil }
+                if let entry = dataListEntry(entryBytes, objectBudget: objectBudget) { entries.append(entry) }
             default:
                 continue
             }
@@ -1094,10 +1238,17 @@ enum IWATable {
 
         var map: [UInt32: String] = [:]
         for entry in entries {
+            guard !Task.isCancelled, budget?.reserve(64) != false else { return nil }
             guard let richText = objects[entry.payload], richText.type == richTextPayloadType,
-                  let storageID = referencedID(in: richText.payload),
+                  let storageID = referencedID(in: richText.payload, objectBudget: objectBudget),
                   let storage = objects[storageID], storage.type == storageType else { continue }
-            map[entry.key] = storageText(storage.payload)
+            if let text = cache[storageID] { map[entry.key] = text }
+            else {
+                let text = storageText(storage.payload, budget: budget, objectBudget: objectBudget)
+                guard budget?.active != false else { return nil }
+                cache[storageID] = text
+                map[entry.key] = text
+            }
         }
         return map.isEmpty ? nil : map
     }
@@ -1105,10 +1256,10 @@ enum IWATable {
     /// Resolves an inline-text DataList (`list_type == 1`): entry key → text stored
     /// directly in the entry (field 3). Keynote tables (and some Pages cells) use
     /// this instead of the rich-text list. Returns nil for other types or no text.
-    private static func inlineTextMap(_ object: IWAArchive.Object) -> [UInt32: String]? {
+    private static func inlineTextMap(_ object: IWAArchive.Object, budget: IWAOutputBudget?, objectBudget: IWAObjectBudget) -> [UInt32: String]? {
         var listType: UInt64?
         var map: [UInt32: String] = [:]
-        var reader = ProtobufReader(object.payload)
+        var reader = ProtobufReader(object.payload, objectBudget: objectBudget)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (1, .varint(let type)):
@@ -1116,15 +1267,20 @@ enum IWATable {
             case (3, .length(let entryBytes)):
                 var key: UInt32?
                 var text: String?
-                var entryReader = ProtobufReader(entryBytes)
+                var entryReader = ProtobufReader(entryBytes, objectBudget: objectBudget)
                 while let entryField = entryReader.next() {
                     switch (entryField.number, entryField.value) {
                     case (1, .varint(let k)): key = UInt32(truncatingIfNeeded: k)
-                    case (3, .length(let bytes)): text = String(bytes: bytes, encoding: .utf8)
+                    case (3, .length(let bytes)):
+                        guard budget?.reserve(bytes.count) != false else { return nil }
+                        text = String(bytes: bytes, encoding: .utf8)
                     default: continue
                     }
                 }
-                if let key, let text { map[key] = text }
+                if let key, let text {
+                    guard budget?.reserve(64) != false else { return nil }
+                    map[key] = text
+                }
             default:
                 continue
             }
@@ -1134,16 +1290,16 @@ enum IWATable {
     }
 
     /// One DataList entry: key (field 1) + RichTextPayload id (field 9 → field 1).
-    private static func dataListEntry(_ bytes: [UInt8]) -> (key: UInt32, payload: UInt64)? {
+    private static func dataListEntry(_ bytes: [UInt8], objectBudget: IWAObjectBudget) -> (key: UInt32, payload: UInt64)? {
         var key: UInt32?
         var payload: UInt64?
-        var reader = ProtobufReader(bytes)
+        var reader = ProtobufReader(bytes, objectBudget: objectBudget)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (1, .varint(let k)):
                 key = UInt32(truncatingIfNeeded: k)
             case (9, .length(let sub)):
-                payload = referencedID(in: sub)
+                payload = referencedID(in: sub, objectBudget: objectBudget)
             default:
                 continue
             }
@@ -1155,58 +1311,80 @@ enum IWATable {
     /// Reads a referenced object id out of field 1 — either a bare varint id or a
     /// TSP.Reference sub-message whose field 1 is the id. Used for both the
     /// DataList entry → RichTextPayload and RichTextPayload → Storage hops.
-    private static func referencedID(in bytes: [UInt8]) -> UInt64? {
-        var reader = ProtobufReader(bytes)
-        while let field = reader.next() {
+    static func referencedID(in bytes: [UInt8], objectBudget: IWAObjectBudget? = nil) -> UInt64? {
+        let copies = objectBudget ?? IWAObjectBudget()
+        var readers = [ProtobufReader(bytes, objectBudget: copies)]
+        while !readers.isEmpty {
+            guard copies.active else { return nil }
+            guard let field = readers[readers.count - 1].next() else { readers.removeLast(); continue }
             guard field.number == 1 else { continue }
             switch field.value {
-            case .varint(let id):
-                return id
+            case .varint(let id): return id
             case .length(let sub):
-                if let id = referencedID(in: sub) { return id }
-            default:
-                continue
+                guard readers.count < 64, copies.reserve(64) else { copies.fail(); return nil }
+                readers.append(ProtobufReader(sub, objectBudget: copies))
+            default: continue
             }
         }
         return nil
     }
 
     /// TSWP.StorageArchive text: the concatenated `repeated string text` (field 3).
-    private static func storageText(_ payload: [UInt8]) -> String {
+    private static func storageText(_ payload: [UInt8], budget: IWAOutputBudget?, objectBudget: IWAObjectBudget) -> String {
         var runs: [String] = []
-        var reader = ProtobufReader(payload)
+        var byteCount = 0
+        var reader = ProtobufReader(payload, objectBudget: objectBudget)
         while let field = reader.next() {
-            if field.number == 3, case .length(let bytes) = field.value,
-               let run = String(bytes: bytes, encoding: .utf8) {
-                runs.append(run)
+            if field.number == 3, case .length(let bytes) = field.value {
+                guard budget?.reserve(bytes.count, copies: 2) != false,
+                      budget?.reserve(32) != false else { return "" }
+                if let run = String(bytes: bytes, encoding: .utf8) {
+                    byteCount += run.utf8.count
+                    runs.append(run)
+                }
             }
         }
+        guard !Task.isCancelled, budget?.reserve(byteCount) != false else { return "" }
         return runs.joined()
     }
 
     // MARK: - Tile (cell grid)
 
-    /// Decodes a Tile into a grid of rendered cell strings (nil = absent cell).
-    /// Trailing absent columns are trimmed per row.
-    private static func cellGrid(_ tile: IWAArchive.Object,
-                                 rich: [UInt32: String], inline: [UInt32: String]) -> [[String?]] {
-        var rows: [[String?]] = []
-        var reader = ProtobufReader(tile.payload)
+    /// Place tile-local row indexes in the model's native tile range. Missing
+    /// rows stay absent, and sparse placement is admitted before padding.
+    private static func mergeTile(_ tile: IWAArchive.Object, rowOffset: Int,
+                                  rich: [UInt32: String], inline: [UInt32: String], grid: inout [[String?]],
+                                  budget: IWAOutputBudget, objectBudget: IWAObjectBudget, preserveCellWhitespace: Bool) {
+        var reader = ProtobufReader(tile.payload, objectBudget: objectBudget), ordinal = 0
         while let field = reader.next() {
             if field.number == 5, case .length(let rowBytes) = field.value {
-                rows.append(cellTexts(inRow: rowBytes, rich: rich, inline: inline))
+                var rowReader = ProtobufReader(rowBytes, objectBudget: objectBudget)
+                var local = UInt64(ordinal)
+                while let row = rowReader.next() {
+                    if row.number == 1, case .varint(let index) = row.value { local = index; break }
+                }
+                guard rowOffset >= 0, rowOffset < 1_000_000, local < UInt64(1_000_000 - rowOffset) else {
+                    objectBudget.fail(); return
+                }
+                let index = rowOffset + Int(local)
+                if index >= grid.count {
+                    let count = index - grid.count + 1
+                    guard budget.reserve(count, copies: 32) else { return }
+                    grid += Array(repeating: [], count: count)
+                }
+                grid[index] = cellTexts(inRow: rowBytes, rich: rich, inline: inline, budget: budget, objectBudget: objectBudget, preserveCellWhitespace: preserveCellWhitespace)
+                ordinal += 1
             }
         }
-        return rows
     }
 
     /// One TileRowInfo: uint16 offsets (field 7) into the cell buffer (field 6);
     /// 0xFFFF marks an absent cell.
     private static func cellTexts(inRow rowBytes: [UInt8],
-                                  rich: [UInt32: String], inline: [UInt32: String]) -> [String?] {
+                                  rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?, objectBudget: IWAObjectBudget, preserveCellWhitespace: Bool) -> [String?] {
         var buffer: [UInt8] = []
         var offsets: [UInt8] = []
-        var reader = ProtobufReader(rowBytes)
+        var reader = ProtobufReader(rowBytes, objectBudget: objectBudget)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (6, .length(let bytes)): buffer = bytes
@@ -1217,9 +1395,10 @@ enum IWATable {
         var cells: [String?] = []
         var i = 0
         while i + 1 < offsets.count {
+            guard !Task.isCancelled, budget?.reserveCell() != false else { return [] }
             let offset = Int(offsets[i]) | (Int(offsets[i + 1]) << 8)
             i += 2
-            cells.append(offset == 0xFFFF ? nil : cellText(in: buffer, at: offset, rich: rich, inline: inline))
+            cells.append(offset == 0xFFFF ? nil : cellText(in: buffer, at: offset, rich: rich, inline: inline, budget: budget, preserveCellWhitespace: preserveCellWhitespace))
         }
         while let last = cells.last, last == nil { cells.removeLast() }   // trim trailing absent cells
         return cells
@@ -1228,21 +1407,33 @@ enum IWATable {
     /// The rendered text of a cell record (`05 <type> …`): rich or inline text via
     /// the string maps (key is a little-endian uint32 at +12), or a date (double,
     /// seconds since 2001-01-01, at +12), or a number / formula result (decimal128
-    /// at +12). Duration cells aren't decoded yet. Returns "" (a present-but-empty
+    /// at +12), a Boolean double, or an explicit error state. Duration cells aren't decoded yet. Returns "" (a present-but-empty
     /// cell) on any unhandled type or out-of-bounds read.
     private static func cellText(in buffer: [UInt8], at offset: Int,
-                                 rich: [UInt32: String], inline: [UInt32: String]) -> String {
+                                 rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?, preserveCellWhitespace: Bool) -> String {
         guard offset >= 0, offset + 2 <= buffer.count, buffer[offset] == 0x05 else { return "" }
         switch buffer[offset + 1] {
         case richTextCell:
             guard let key = readUInt32(buffer, at: offset + 12) else { return "" }
-            return cleanCell(rich[key] ?? "")
+            let text = rich[key] ?? ""
+            guard budget?.reserve(text.utf8.count, copies: 6) != false else { return "" }
+            return cleanCell(text, preservingBoundaryWhitespace: preserveCellWhitespace, budget: budget)
         case inlineTextCell:
             guard let key = readUInt32(buffer, at: offset + 12) else { return "" }
-            return cleanCell(inline[key] ?? "")
+            let text = inline[key] ?? ""
+            guard budget?.reserve(text.utf8.count, copies: 6) != false else { return "" }
+            return cleanCell(text, preservingBoundaryWhitespace: preserveCellWhitespace, budget: budget)
         case dateCell:
             guard let seconds = readDouble(buffer, at: offset + 12) else { return "" }
             return isoDate(seconds)
+        case booleanCell:
+            guard let value = readDouble(buffer, at: offset + 12), value.isFinite else { return "" }
+            return value > 0 ? "true" : "false"
+        case errorCell:
+            // The bytes after the header are flagged style/formula/error-table
+            // IDs, not an inline error enum. Some native files have no error
+            // table detail; retain the error state without inventing its kind.
+            return "#ERROR!"
         case numberCell, formulaCell:
             return decimalString(in: buffer, at: offset + 12)
         default:
@@ -1334,14 +1525,23 @@ enum IWATable {
         return Double(bitPattern: bits)
     }
 
-    /// Formats seconds-since-2001 (iWork's reference date) as `yyyy-MM-dd`.
+    /// Formats iWork's reference date as a date, retaining a non-midnight time.
     /// Computed arithmetically — no `DateFormatter`, which is allocation-free and
     /// avoids a shared static formatter (not `Sendable` under Swift 6). Implausible
     /// magnitudes return "".
     private static func isoDate(_ secondsSinceReference: Double) -> String {
         guard secondsSinceReference.isFinite, abs(secondsSinceReference) < 4e11 else { return "" }
         // Days since 1970-01-01 (2001-01-01 is 11_323 days after 1970-01-01).
-        let days = Int((secondsSinceReference / 86_400).rounded(.down)) + 11_323
+        // Keep only decimal precision supported by the stored Double. Rounding
+        // integer units within a day avoids exposing subtraction artifacts and
+        // carries a rounded final fraction into the following second/day.
+        let digits = min(9, max(0, Int(floor(-log10(secondsSinceReference.ulp)))))
+        let scale = Int64(pow(10.0, Double(digits)))
+        var referenceDays = floor(secondsSinceReference / 86_400)
+        let daySeconds = secondsSinceReference - referenceDays * 86_400
+        var units = Int64((daySeconds * Double(scale)).rounded())
+        if units >= 86_400 * scale { referenceDays += 1; units = 0 }
+        let days = Int(referenceDays) + 11_323
         // Howard Hinnant's civil-from-days algorithm.
         let z = days + 719_468
         let era = (z >= 0 ? z : z - 146_096) / 146_097
@@ -1357,7 +1557,17 @@ enum IWATable {
             while string.count < width { string = "0" + string }
             return string
         }
-        return "\(pad(year, 4))-\(pad(month, 2))-\(pad(day, 2))"
+        let date = "\(pad(year, 4))-\(pad(month, 2))-\(pad(day, 2))"
+        guard units != 0 else { return date }
+        let whole = Int(units / scale)
+        var time = "\(pad(whole / 3600, 2)):\(pad((whole / 60) % 60, 2)):\(pad(whole % 60, 2))"
+        let fraction = units % scale
+        if fraction != 0 {
+            var fractionalDigits = pad(Int(fraction), digits)
+            while fractionalDigits.hasSuffix("0") { fractionalDigits.removeLast() }
+            time += "." + fractionalDigits
+        }
+        return date + "T" + time
     }
 
     // MARK: - Markdown rendering
@@ -1365,19 +1575,35 @@ enum IWATable {
     /// Renders a grid of cell strings as a GitHub-flavored Markdown table (first
     /// row is the header). Returns nil if there are no columns or no non-empty
     /// cell, so empty/placeholder tables are skipped.
-    private static func render(grid: [[String?]]) -> String? {
-        let rows: [[String]] = grid.map { row in row.map { $0 ?? "" } }
-        let columnCount = rows.map(\.count).max() ?? 0
+    private static func render(grid: [[String?]], budget: IWAOutputBudget?) -> String? {
+        guard !Task.isCancelled, budget?.active != false else { return nil }
+        let columnCount = grid.map(\.count).max() ?? 0
         guard columnCount > 0,
-              rows.contains(where: { $0.contains { !$0.isEmpty } }) else { return nil }
-
+              grid.contains(where: { $0.contains { $0?.isEmpty == false } }) else { return nil }
+        // Admit dense row padding, line fragments, and the final joined string
+        // before allocating any of them. Two copies cover line + joined output.
+        if let budget {
+            guard budget.reserveGrid(rows: grid.count, columns: columnCount),
+                  budget.reserve(columnCount, copies: 12), budget.reserve(2) else { return nil }
+            for row in grid {
+                guard budget.reserve(columnCount, copies: 6), budget.reserve(4) else { return nil }
+                for cell in row {
+                    guard budget.reserve(cell?.utf8.count ?? 0, copies: 2) else { return nil }
+                }
+            }
+        }
+        let rows: [[String]] = grid.map { row in row.map { $0 ?? "" } }
         func line(_ row: [String]) -> String {
             let padded = row + Array(repeating: "", count: max(0, columnCount - row.count))
             return "| " + padded.joined(separator: " | ") + " |"
         }
         var lines = [line(rows[0])]
         lines.append("| " + Array(repeating: "---", count: columnCount).joined(separator: " | ") + " |")
-        for row in rows.dropFirst() { lines.append(line(row)) }
+        for row in rows.dropFirst() {
+            guard !Task.isCancelled else { return nil }
+            lines.append(line(row))
+        }
+        guard !Task.isCancelled else { return nil }
         return lines.joined(separator: "\n")
     }
 
@@ -1391,21 +1617,56 @@ enum IWATable {
     ///    placeholder-only cell becomes empty (and an all-placeholder table is
     ///    skipped) rather than rendering as visible garbage;
     ///  • escapes backslash and pipe so the text can't break the table; and
-    ///  • trims surrounding whitespace.
-    static func cleanCell(_ text: String) -> String {
-        var folded = text
-        for separator in ["\r\n", "\r", "\n", "\u{2028}", "\u{2029}", "\u{000B}", "\u{000C}"] {
-            folded = folded.replacingOccurrences(of: separator, with: " ")
-        }
-        var scalars = folded.unicodeScalars
-        scalars.removeAll { scalar in
+    ///  • trims surrounding whitespace unless the producer owns its preservation.
+    static func cleanCell(_ text: String, preservingBoundaryWhitespace: Bool = false, budget: IWAOutputBudget? = nil) -> String {
+        var escaped = ""
+        var previousCR = false
+        let punctuation = #"\`*_{}[]<>|&~"#.unicodeScalars
+        for (index, scalar) in text.unicodeScalars.enumerated() {
+            if index.isMultiple(of: 1024), Task.isCancelled { return "" }
+            if scalar == "\n", previousCR { previousCR = false; continue }
+            previousCR = scalar == "\r"
             let value = scalar.value
-            guard value != 0x09 else { return false }        // keep tab
-            return value <= 0x1F                              // C0 controls
-                || (0x7F...0x9F).contains(value)             // DEL + C1 controls
-                || value == 0xFFFC                           // object-replacement placeholder
+            if [0x0A, 0x0D, 0x2028, 0x2029, 0x0B, 0x0C].contains(value) {
+                escaped += " "
+            } else if value == 0x09 || (value > 0x1F && !(0x7F...0x9F).contains(value) && value != 0xFFFC) {
+                if punctuation.contains(scalar) { escaped += "\\" }
+                escaped.unicodeScalars.append(scalar)
+            }
         }
-        let escaped = MarkdownLiteral.escapePunctuation(String(scalars), characters: #"\`*_{}[]<>|"#)
-        return escaped.trimmingCharacters(in: .whitespaces)
+        guard preservingBoundaryWhitespace else { return escaped.trimmingCharacters(in: .whitespaces) }
+        let scalars = escaped.unicodeScalars
+        var firstContent: Int?, lastContent = -1, count = 0
+        for (index, scalar) in scalars.enumerated() {
+            if index.isMultiple(of: 1024), Task.isCancelled { return "" }
+            if !CharacterSet.whitespaces.contains(scalar) {
+                if firstContent == nil { firstContent = index }
+                lastContent = index
+            }
+            count += 1
+        }
+        let first = firstContent ?? count
+        func encoded(_ index: Int, _ scalar: UnicodeScalar) -> Bool {
+            index < first || index > lastContent || scalar == "\t"
+        }
+        var growth = 0
+        for (index, scalar) in scalars.enumerated() {
+            if index.isMultiple(of: 1024), Task.isCancelled { return "" }
+            guard encoded(index, scalar) else { continue }
+            var value = scalar.value, digits = 1
+            while value >= 10 { digits += 1; value /= 10 }
+            growth += 3 + digits - scalar.utf8.count
+        }
+        // Existing cleaning copies are already admitted by cellText; debit the
+        // exact additional entity bytes before constructing the expanded result.
+        guard budget?.reserve(growth, copies: 2) != false else { return "" }
+        var preserved = ""
+        preserved.reserveCapacity(escaped.utf8.count + growth)
+        for (index, scalar) in scalars.enumerated() {
+            if index.isMultiple(of: 1024), Task.isCancelled { return "" }
+            if encoded(index, scalar) { preserved += "&#\(scalar.value);" }
+            else { preserved.unicodeScalars.append(scalar) }
+        }
+        return preserved
     }
 }

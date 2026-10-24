@@ -620,10 +620,10 @@ struct PowerPointFollowupTests {
         let xml = #"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>first</w:t><w:br/><w:t>second</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
         let result = try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip([("word/document.xml", Array(xml.utf8))]), filename: "break.docx")
         let html = try DocumentRenderer.render(result, to: .html)
-        #expect(html.contains("<strong>first  <br>second</strong>"))
+        #expect(html.contains("<strong>first<br>second</strong>"))
         for format in [ExportFileType.plaintext, .csv] {
             let text = try DocumentRenderer.render(result, to: format)
-            #expect(text.contains("first  \nsecond")); #expect(!text.contains("**"))
+            #expect(text.contains("first\nsecond")); #expect(!text.contains("**"))
         }
         let literal = ConverterResult(sections: [.init(markdown: "| **first<br>second** | `a<br>b` | \\<br> | \u{E042} |\n| --- | --- | --- | --- |")])
         let output = try DocumentRenderer.render(literal, to: .html)
@@ -1627,7 +1627,9 @@ struct PowerPointFollowupTests {
             await #expect(throws: PicoDocsError.fileCorrupted) { try await PicoDocsEngine.convert(data: PagesConverterTests.makeZip(entries), filename: "bad-tree.pptx") }
         }
         let valid = try await PicoDocsEngine.convert(data: data, filename: "empty-slide.pptx")
-        #expect(valid.sections.count == 1)
+        #expect(valid.sections.count == 2)
+        #expect(valid.sections.last?.slideNumber == 2)
+        #expect(valid.sections.last?.markdown.isEmpty == true)
     }
 
     @Test func cellsAndOtherPlaceholdersInheritTheirOwnListStyles() async throws {

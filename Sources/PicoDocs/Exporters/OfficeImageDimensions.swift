@@ -1,0 +1,144 @@
+import Foundation
+#if canImport(FoundationXML)
+import FoundationXML
+#endif
+
+/// Dimensions for vector carriers that ImageIO may not decode, plus common
+/// raster headers. Reads bounds without rendering or resolving external assets.
+enum OfficeImageDimensions {
+    static func read(_ data: Data) -> (Double, Double)? {
+        let bytes = data.prefix(64)
+        func unsigned(_ offset: Int, _ count: Int, littleEndian: Bool = true) -> UInt32? {
+            guard offset >= 0, count <= 4, offset + count <= bytes.count else { return nil }
+            let slice = bytes.dropFirst(offset).prefix(count)
+            return (littleEndian ? Array(slice.reversed()) : Array(slice)).reduce(0) { ($0 << 8) | UInt32($1) }
+        }
+        func signed(_ offset: Int, _ count: Int) -> Double? {
+            guard let value = unsigned(offset, count) else { return nil }
+            return count == 2 ? Double(Int16(bitPattern: UInt16(value))) : Double(Int32(bitPattern: value))
+        }
+        func rect(_ offset: Int, _ count: Int) -> (Double, Double)? {
+            guard let left = signed(offset, count), let top = signed(offset + count, count),
+                  let right = signed(offset + 2 * count, count), let bottom = signed(offset + 3 * count, count) else { return nil }
+            return valid(right - left, bottom - top)
+        }
+        if bytes.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]), let width = unsigned(16, 4, littleEndian: false), let height = unsigned(20, 4, littleEndian: false) {
+            return valid(Double(width), Double(height))
+        }
+        if bytes.starts(with: Array("GIF87a".utf8)) || bytes.starts(with: Array("GIF89a".utf8)),
+           let width = unsigned(6, 2), let height = unsigned(8, 2) { return valid(Double(width), Double(height)) }
+        if bytes.starts(with: Array("BM".utf8)), let header = unsigned(14, 4) {
+            if header == 12, let width = unsigned(18, 2), let height = unsigned(20, 2) { return valid(Double(width), Double(height)) }
+            if header >= 40, let width = signed(18, 4), let height = signed(22, 4) { return valid(width, abs(height)) }
+        }
+        // EMR_HEADER: the physical frame is in .01 mm and avoids device-pixel
+        // aspect assumptions. Placeable WMF supplies logical bounding coordinates.
+        if unsigned(0, 4) == 1, unsigned(40, 4) == 0x464D4520 { return rect(24, 4) ?? rect(8, 4) }
+        if unsigned(0, 4) == 0x9AC6CDD7 { return rect(6, 2) }
+        if bytes.starts(with: [0xFF, 0xD8]) {
+            // JPEG metadata segments can precede SOF by many kilobytes. Walk
+            // their declared lengths without copying the compressed image.
+            func byte(_ offset: Int) -> UInt8 { data[data.startIndex + offset] }
+            var offset = 2
+            while offset < data.count {
+                guard byte(offset) == 0xFF else { return nil }
+                while offset < data.count, byte(offset) == 0xFF { offset += 1 }
+                guard offset < data.count else { return nil }
+                let marker = byte(offset); offset += 1
+                if marker == 0xD9 || marker == 0xDA { return nil }
+                if marker == 0x01 || (0xD0...0xD8).contains(marker) { continue }
+                guard offset + 2 <= data.count else { return nil }
+                let length = Int(byte(offset)) * 256 + Int(byte(offset + 1))
+                guard length >= 2, length <= data.count - offset else { return nil }
+                if (0xC0...0xCF).contains(marker), ![0xC4, 0xC8, 0xCC].contains(marker) {
+                    guard length >= 8 else { return nil }
+                    let height = Int(byte(offset + 3)) * 256 + Int(byte(offset + 4))
+                    let width = Int(byte(offset + 5)) * 256 + Int(byte(offset + 6))
+                    return valid(Double(width), Double(height))
+                }
+                offset += length
+            }
+            return nil
+        }
+        if bytes.starts(with: [0x49, 0x49, 42, 0]) || bytes.starts(with: [0x4D, 0x4D, 0, 42]) {
+            let little = bytes.first == 0x49
+            guard let offset = unsigned(4, 4, littleEndian: little) else { return nil }
+            func read(_ offset: Int, _ count: Int) -> UInt32? {
+                guard offset >= 0, offset <= data.count, count <= data.count - offset else { return nil }
+                let slice = data.dropFirst(offset).prefix(count)
+                return (little ? Array(slice.reversed()) : Array(slice)).reduce(0) { ($0 << 8) | UInt32($1) }
+            }
+            let start = Int(offset)
+            guard let count = read(start, 2), count <= 4096,
+                  start + 2 <= data.count, Int(count) <= (data.count - start - 2) / 12 else { return nil }
+            var width: UInt32?, height: UInt32?
+            for index in 0..<Int(count) {
+                let entry = start + 2 + index * 12
+                guard let tag = read(entry, 2), tag == 256 || tag == 257,
+                      let type = read(entry + 2, 2), type == 3 || type == 4,
+                      read(entry + 4, 4) == 1, let value = read(entry + 8, type == 3 ? 2 : 4) else { continue }
+                if tag == 256 { width = value } else { height = value }
+            }
+            guard let width, let height else { return nil }
+            return valid(Double(width), Double(height))
+        }
+        if bytes.starts(with: Array("RIFF".utf8)), bytes.dropFirst(8).starts(with: Array("WEBP".utf8)) {
+            guard let length = unsigned(4, 4), Int(length) + 8 <= data.count, length >= 4 else { return nil }
+            let end = Int(length) + 8
+            var offset = 12
+            func read(_ offset: Int, _ count: Int) -> UInt32? {
+                guard offset >= 0, offset <= end, count <= end - offset else { return nil }
+                return data.dropFirst(offset).prefix(count).reversed().reduce(0) { ($0 << 8) | UInt32($1) }
+            }
+            while offset + 8 <= end {
+                guard let size = read(offset + 4, 4), Int(size) <= end - offset - 8 else { return nil }
+                let kind = String(decoding: data.dropFirst(offset).prefix(4), as: UTF8.self)
+                let payload = offset + 8
+                if kind == "VP8X", size >= 10, let width = read(payload + 4, 3), let height = read(payload + 7, 3) {
+                    return valid(Double(width) + 1, Double(height) + 1)
+                }
+                if kind == "VP8L", size >= 5, read(payload, 1) == 0x2F, let packed = read(payload + 1, 4) {
+                    return valid(Double(packed & 0x3FFF) + 1, Double((packed >> 14) & 0x3FFF) + 1)
+                }
+                if kind == "VP8 ", size >= 10, read(payload + 3, 3) == 0x2A019D,
+                   let width = read(payload + 6, 2), let height = read(payload + 8, 2) {
+                    return valid(Double(width & 0x3FFF), Double(height & 0x3FFF))
+                }
+                offset = payload + Int(size) + Int(size % 2)
+            }
+            return nil
+        }
+        let reader = SVGSizeReader()
+        let parser = XMLParser(data: data.prefix(65_536))
+        parser.shouldResolveExternalEntities = false
+        parser.delegate = reader
+        _ = parser.parse()
+        return reader.size
+    }
+
+    static func valid(_ width: Double, _ height: Double) -> (Double, Double)? {
+        width.isFinite && height.isFinite && width > 0 && height > 0 ? (width, height) : nil
+    }
+
+    private final class SVGSizeReader: NSObject, XMLParserDelegate {
+        var size: (Double, Double)?
+        func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) { parser.abortParsing() }
+        func parser(_ parser: XMLParser, foundExternalEntityDeclarationWithName name: String, publicID: String?, systemID: String?) { parser.abortParsing() }
+        func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes: [String: String]) {
+            defer { parser.abortParsing() }
+            guard elementName == "svg" || elementName.hasSuffix(":svg") else { return }
+            func length(_ source: String?) -> Double? {
+                guard let source else { return nil }
+                let text = source.trimmingCharacters(in: .whitespacesAndNewlines)
+                let units: [(String, Double)] = [("px", 1), ("in", 96), ("cm", 96 / 2.54), ("mm", 96 / 25.4), ("pt", 96 / 72), ("pc", 16), ("Q", 96 / 101.6)]
+                for (unit, factor) in units where text.hasSuffix(unit) {
+                    return Double(text.dropLast(unit.count)).map { $0 * factor }
+                }
+                return Double(text)
+            }
+            if let width = length(attributes["width"]), let height = length(attributes["height"]), let valid = OfficeImageDimensions.valid(width, height) { size = valid; return }
+            let box = attributes["viewBox"]?.split { $0.isWhitespace || $0 == "," }.compactMap { Double($0) } ?? []
+            if box.count == 4 { size = OfficeImageDimensions.valid(box[2], box[3]) }
+        }
+    }
+}

@@ -37,12 +37,12 @@ struct ZIPEntryReaderTests {
         let content = Array("hello".utf8)
         let honest = PagesConverterTests.makeZip([(name: "a.txt", data: content)])
         let honestArchive = try #require(Archive(data: honest, accessMode: .read))
-        #expect(ZIPEntryReader.read(honestArchive, path: "/a.txt") == Data(content))
-        #expect(ZIPEntryReader.read(honestArchive, path: "missing.txt") == nil)
+        #expect(try ZIPEntryReader.read(honestArchive, path: "/a.txt") == Data(content))
+        #expect(try ZIPEntryReader.read(honestArchive, path: "missing.txt") == nil)
 
         let hostile = Self.zip(name: "a.txt", content: content, declaredSize: UInt64(Int64.max))
         let hostileArchive = try #require(Archive(data: hostile, accessMode: .read))
-        #expect(ZIPEntryReader.read(hostileArchive, path: "a.txt") == nil)
+        #expect(try ZIPEntryReader.read(hostileArchive, path: "a.txt") == nil)
     }
 
     // MARK: - Builder

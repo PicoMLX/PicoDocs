@@ -28,7 +28,9 @@ import ZIPFoundation
 
 public struct KeynoteConverter: DocumentConverter {
 
-    public init() {}
+    private let objectBudgetBytes: Int
+    public init() { objectBudgetBytes = 64 * 1024 * 1024 }
+    init(objectBudgetBytes: Int) { self.objectBudgetBytes = objectBudgetBytes }
 
     public func accepts(_ info: StreamInfo) -> Bool {
         info.detectedFormat == .keynote
@@ -51,6 +53,8 @@ public struct KeynoteConverter: DocumentConverter {
             try Task.checkCancellation()
             do {
                 streams.append((component.name, try Snappy.decompressIWA(component.bytes)))
+            } catch let error as CancellationError {
+                throw error
             } catch {
                 if Self.isSlide(component.name) { throw PicoDocsError.fileCorrupted }
             }
@@ -59,18 +63,19 @@ public struct KeynoteConverter: DocumentConverter {
         // Per-slide KN.SlideArchive id (to resolve deck order from the document's
         // slide tree) and body text (kind == 0; presenter notes are kind 4 and so
         // already excluded).
+        let objectBudget = IWAObjectBudget(bytes: objectBudgetBytes)
+        let documentStream = streams.first { $0.name.hasSuffix("Document.iwa") }?.stream
+        let prepared = try IWATable.PreparedDocument(documentStream: documentStream, streams: streams.map(\.stream), objectBudget: objectBudget)
         var slides: [(name: String, id: UInt64, text: String)] = []
-        for entry in streams where Self.isSlide(entry.name) {
+        for (entry, objects) in zip(streams, prepared.streamObjects) where Self.isSlide(entry.name) {
             try Task.checkCancellation()
-            let objects = IWAArchive.objects(in: entry.stream)
             let slideID = objects.first { $0.type == Self.slideArchiveType }?.identifier ?? 0
             slides.append((entry.name, slideID, Self.normalize(IWAArchive.text(from: objects))))
         }
 
         // Order by the document's slide tree (authoritative); fall back to
         // slide-archive id, then filename, when it can't be resolved.
-        let documentStream = streams.first { $0.name.hasSuffix("Document.iwa") }?.stream
-        let deck = Self.deckOrder(documentStream: documentStream, slideIDs: Set(slides.map(\.id)))
+        let deck = Self.deckOrder(objects: prepared.bodyObjects, slideIDs: Set(slides.map(\.id)))
         let rank = Dictionary(deck.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
         let ordered = slides.sorted { lhs, rhs in
             let lr = rank[lhs.id] ?? Int.max
@@ -88,14 +93,17 @@ public struct KeynoteConverter: DocumentConverter {
         // Master/template object ids, so the table reachability walk can avoid
         // descending into theme subgraphs.
         var masterObjectIDs: Set<UInt64> = []
-        for entry in streams where Self.isMaster(entry.name) {
-            for object in IWAArchive.objects(in: entry.stream) { masterObjectIDs.insert(object.identifier) }
+        for (entry, objects) in zip(streams, prepared.streamObjects) where Self.isMaster(entry.name) {
+            for object in objects {
+                try Task.checkCancellation()
+                masterObjectIDs.insert(object.identifier)
+            }
         }
         // Tables grouped by the slide that owns them (reachable from the slide
         // object, not from master/template subgraphs), so each renders right after
         // its slide rather than appended at the end of the deck.
         let tablesForSlide = IWATable.tablesBySlide(
-            slideIDs: ordered.map(\.id), in: streams.map(\.stream), excludingSubgraphs: masterObjectIDs
+            slideIDs: ordered.map(\.id), in: streams.map(\.stream), excludingSubgraphs: masterObjectIDs, objectBudget: objectBudget, prepared: prepared
         )
 
         var sections: [DocumentSection] = []
@@ -131,14 +139,17 @@ public struct KeynoteConverter: DocumentConverter {
         // recovers its text; the recovered body leads, ahead of any table sections.
         if !emittedSlideText {
             var pieces: [String] = []
-            for entry in streams.filter({ !Self.isMaster($0.name) }).sorted(by: { $0.name < $1.name }) {
-                let text = IWAArchive.text(in: entry.stream)
+            for index in streams.indices.filter({ !Self.isMaster(streams[$0].name) }).sorted(by: { streams[$0].name < streams[$1].name }) {
+                try Task.checkCancellation()
+                let text = IWAArchive.text(from: prepared.streamObjects[index])
                 if !text.isEmpty { pieces.append(text) }
             }
             let cleaned = Self.normalize(pieces.joined(separator: "\n\n"))
             if !cleaned.isEmpty { sections.insert(DocumentSection(kind: .body, markdown: cleaned), at: 0) }
         }
 
+        try Task.checkCancellation()
+        try objectBudget.check()
         guard !sections.isEmpty else { throw PicoDocsError.emptyDocument }
         let title = (info.filename?.isEmpty == false) ? info.filename : nil
         return ConverterResult(title: title, sections: MarkdownLiteral.escapeSectionBackslashes(sections))
@@ -179,9 +190,8 @@ public struct KeynoteConverter: DocumentConverter {
     /// falls back to slide-id / filename order). Structural — it identifies the
     /// tree and nodes via the reference graph rather than hard-coding their
     /// message types; only the slide-archive type above is fixed.
-    private static func deckOrder(documentStream: [UInt8]?, slideIDs: Set<UInt64>) -> [UInt64] {
-        guard !slideIDs.isEmpty, let documentStream else { return [] }
-        let objects = IWAArchive.objects(in: documentStream)
+    private static func deckOrder(objects: [IWAArchive.Object], slideIDs: Set<UInt64>) -> [UInt64] {
+        guard !slideIDs.isEmpty else { return [] }
         // A slide-tree node references exactly one slide; map node id -> slide id.
         var nodeToSlide: [UInt64: UInt64] = [:]
         for object in objects {
@@ -208,9 +218,14 @@ public struct KeynoteConverter: DocumentConverter {
     /// failing that — from a nested `Index.zip` (the common Keynote layout).
     private func iwaComponents(in archive: Archive) throws -> [Component] {
         var components: [Component] = []
-        for entry in archive where entry.type == .file
-            && entry.path.hasPrefix("Index/") && entry.path.hasSuffix(".iwa") {
-            guard let data = Self.readEntry(archive, path: entry.path) else {
+        var componentBudget = IWAComponentBudget()
+        var indexEntry: Entry?
+        for entry in archive {
+            try componentBudget.scan(entry.path)
+            if entry.path == "Index.zip", indexEntry == nil { indexEntry = entry }
+            guard entry.type == .file, entry.path.hasPrefix("Index/"), entry.path.hasSuffix(".iwa") else { continue }
+            try componentBudget.retainComponent(entry.path)
+            guard let data = try ZIPEntryReader.read(archive, entry: entry) else {
                 // A present-but-unreadable slide is corruption (primary content);
                 // auxiliary components are skipped leniently.
                 if Self.isSlide(entry.path) { throw PicoDocsError.fileCorrupted }
@@ -223,13 +238,16 @@ public struct KeynoteConverter: DocumentConverter {
         // Nested layout: slides live inside Index.zip. If that container is present
         // but can't be read/opened, the file is corrupt — not an unsupported
         // layout — so surface that distinctly rather than failing silently.
-        if archive["Index.zip"] != nil {
-            guard let indexZip = Self.readEntry(archive, path: "Index.zip"),
+        if let indexEntry {
+            guard let indexZip = try ZIPEntryReader.read(archive, entry: indexEntry),
                   let inner = Archive(data: indexZip, accessMode: .read) else {
                 throw PicoDocsError.fileCorrupted
             }
-            for entry in inner where entry.type == .file && entry.path.hasSuffix(".iwa") {
-                guard let data = Self.readEntry(inner, path: entry.path) else {
+            for entry in inner {
+                try componentBudget.scan(entry.path)
+                guard entry.type == .file, entry.path.hasSuffix(".iwa") else { continue }
+                try componentBudget.retainComponent(entry.path)
+                guard let data = try ZIPEntryReader.read(inner, entry: entry) else {
                     if Self.isSlide(entry.path) { throw PicoDocsError.fileCorrupted }
                     continue
                 }
@@ -241,8 +259,8 @@ public struct KeynoteConverter: DocumentConverter {
 
     // MARK: - Helpers (mirror PagesConverter; see file note)
 
-    static func readEntry(_ archive: Archive, path: String) -> Data? {
-        ZIPEntryReader.read(archive, path: path)
+    static func readEntry(_ archive: Archive, path: String) throws -> Data? {
+        try ZIPEntryReader.read(archive, path: path)
     }
 
     /// Folds iWork's line/paragraph separators to `\n`, drops C0/C1 control
