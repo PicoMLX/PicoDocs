@@ -137,7 +137,12 @@ struct CorpusTests {
         // (`Macro1` in xlmmacro.xlsm) isn't a worksheet and is skipped.
         let result = try await Self.convert(path)
         #expect(result.sections.compactMap(\.sheetName) == sheets)
-        #expect(result.markdown().contains(expected))
+        if expected.isEmpty {
+            // Their worksheets hold no cells.
+            #expect(result.sections.allSatisfy(\.markdown.isEmpty))
+        } else {
+            #expect(result.markdown().contains(expected))
+        }
     }
 
     @Test("Strict OOXML workbooks resolve their purl.oclc.org relationships")
