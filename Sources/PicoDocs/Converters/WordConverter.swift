@@ -24,7 +24,7 @@ public struct WordConverter: DocumentConverter {
     }
 
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
-        guard let archive = Archive(data: data, accessMode: .read) else {
+        guard let archive = ZIPEntryReader.archive(data) else {
             throw PicoDocsError.fileCorrupted
         }
         guard let documentData = try Self.readEntry(archive, path: "word/document.xml"),
@@ -188,9 +188,9 @@ public struct WordConverter: DocumentConverter {
                 } else if style != "PicoCodeBlock" { advance(element) }
                 try collectBoxes(element)
             case "w:tbl":
-                for row in element.children().array() where row.tagName().lowercased() == "w:tr" {
-                    for cell in row.children().array() where cell.tagName().lowercased() == "w:tc" {
-                        for paragraph in try cell.getElementsByTag("w:p") where !isInsideTextBox(paragraph, before: cell) && !paragraph.parents().prefix(while: { $0 !== cell }).contains(where: { ["w:del", "w:movefrom"].contains($0.tagName().lowercased()) }) {
+                for row in tableChildren(of: element, named: "w:tr") {
+                    for cell in tableChildren(of: row, named: "w:tc") {
+                        for paragraph in cellParagraphs(cell) {
                             advance(paragraph)
                             try collectBoxes(paragraph)
                         }
@@ -276,7 +276,19 @@ public struct WordConverter: DocumentConverter {
 
     /// The nearest ancestor element with the given (lowercased) tag name.
     private static func ancestor(of element: Element, named tag: String) -> Element? {
-        element.parents().first { $0.tagName().lowercased() == tag }
+        ancestors(of: element).first { $0.tagName().lowercased() == tag }
+    }
+
+    /// `element`'s ancestors, nearest first, up to the root or (exclusively)
+    /// `boundary`. Walks `parent()` lazily: SwiftSoup's `parents()` builds the
+    /// whole chain to the root on every call, which made the per-paragraph
+    /// checks in nested tables quadratic in the nesting depth.
+    private static func ancestors(of element: Element, below boundary: Element? = nil) -> UnfoldSequence<Element, Element> {
+        sequence(state: element) { current in
+            guard let parent = current.parent(), parent !== boundary else { return nil }
+            current = parent
+            return parent
+        }
     }
 
     /// True when `paragraph` is inside a `w:txbxContent` that is nested *within*
@@ -286,11 +298,29 @@ public struct WordConverter: DocumentConverter {
     /// box; reaching `boundary` first means any text box is an ancestor of the
     /// cell (a table inside a text box), so the cell's own paragraphs still render.
     private static func isInsideTextBox(_ paragraph: Element, before boundary: Element) -> Bool {
-        for ancestor in paragraph.parents() {
-            if ancestor === boundary { return false }
-            if ancestor.tagName().lowercased() == "w:txbxcontent" { return true }
+        ancestors(of: paragraph, below: boundary).contains { $0.tagName().lowercased() == "w:txbxcontent" }
+    }
+
+    /// The paragraphs a table cell renders, in document order: all descendant
+    /// paragraphs, so those in block content controls (w:sdt) and nested tables
+    /// are included, except paragraphs of a text box nested in the cell (emitted
+    /// once by extractTextBoxes; rendering them here too would duplicate them) and
+    /// tracked-deleted / moved-away content. (A table inside a text box isn't
+    /// affected: its cells are below the text box.) Pruning those subtrees in a
+    /// single top-down walk keeps deeply nested tables linear, where an ancestor
+    /// check per paragraph was quadratic.
+    private static func cellParagraphs(_ cell: Element) -> [Element] {
+        var paragraphs: [Element] = []
+        var pending = Array(cell.children().array().reversed())
+        while let element = pending.popLast() {
+            switch element.tagName().lowercased() {
+            case "w:txbxcontent", "w:del", "w:movefrom": continue
+            case "w:p": paragraphs.append(element)
+            default: break
+            }
+            pending.append(contentsOf: element.children().array().reversed())
         }
-        return false
+        return paragraphs
     }
 
     /// Whether a `w:txbxContent` should be rendered, honoring markup-compatibility
@@ -303,7 +333,7 @@ public struct WordConverter: DocumentConverter {
         var inner = txbx
         while let alternate = ancestor(of: inner, named: "mc:alternatecontent") {
             guard let branch = selectedBranch(of: alternate),
-                  txbx.parents().contains(where: { $0 === branch }) else { return false }
+                  ancestors(of: txbx).contains(where: { $0 === branch }) else { return false }
             inner = alternate
         }
         return true
@@ -461,6 +491,16 @@ public struct WordConverter: DocumentConverter {
                 for child in node.getChildNodes() {
                     if let textNode = child as? TextNode { textBuffer += escapeLiteralText(textNode.getWholeText()) }
                 }
+            case "w:ruby":
+                // Phonetic guides (e.g. furigana): the base is the document's
+                // text; the reading above it (w:rt) is an annotation, left out.
+                for baseRun in child(of: node, named: "w:rubybase")?.children().array() ?? [] where baseRun.tagName().lowercased() == "w:r" {
+                    for text in baseRun.children().array() where text.tagName().lowercased() == "w:t" {
+                        for child in text.getChildNodes() {
+                            if let textNode = child as? TextNode { textBuffer += escapeLiteralText(textNode.getWholeText()) }
+                        }
+                    }
+                }
             case "w:tab":
                 textBuffer += "\t"
             case "w:br", "w:cr":
@@ -594,13 +634,37 @@ public struct WordConverter: DocumentConverter {
         }
     }
 
+    /// A table's rows, or a row's cells (`tag`): the direct children plus those
+    /// Word nests in content controls (`w:sdt` → `w:sdtContent`; a repeating
+    /// section wraps whole rows, a form field a single cell) and custom-XML
+    /// wrappers, in document order.
+    static func tableChildren(of element: Element, named tag: String) -> [Element] {
+        var found: [Element] = []
+        var pending = Array(element.children().array().reversed())
+        while let child = pending.popLast() {
+            switch child.tagName().lowercased() {
+            case tag:
+                found.append(child)
+            case "w:sdt":
+                if let content = child.children().first(where: { $0.tagName().lowercased() == "w:sdtcontent" }) {
+                    pending.append(contentsOf: content.children().array().reversed())
+                }
+            case "w:customxml":
+                pending.append(contentsOf: child.children().array().reversed())
+            default:
+                continue
+            }
+        }
+        return found
+    }
+
     static func renderTable(_ table: Element, relationships: [String: String], numbering: WordListNumbering? = nil, budget: TableBudget = TableBudget(), textBoxes: ((Element) throws -> Void)? = nil) throws -> String {
         // Reserve the padded grid across the whole conversion before allocating
         // any span placeholders or serialized Markdown for this table.
         var rowCount = 0, columnCount = 0
-        for row in table.children().array() where row.tagName().lowercased() == "w:tr" {
+        for row in tableChildren(of: table, named: "w:tr") {
             var columns = 0
-            for cell in row.children().array() where cell.tagName().lowercased() == "w:tc" {
+            for cell in tableChildren(of: row, named: "w:tc") {
                 let span = try gridSpan(of: cell)
                 guard columns <= 16_384 - span else { throw PicoDocsError.fileCorrupted }
                 columns += span
@@ -611,22 +675,15 @@ public struct WordConverter: DocumentConverter {
         try budget.reserve(rows: rowCount, columns: columnCount)
         var rows: [[String]] = []
         var widestRow = 0
-        for tr in table.children().array() where tr.tagName().lowercased() == "w:tr" {
+        for tr in tableChildren(of: table, named: "w:tr") {
             var cells: [String] = []
-            for tc in tr.children().array() where tc.tagName().lowercased() == "w:tc" {
+            for tc in tableChildren(of: tr, named: "w:tc") {
                 let span = try gridSpan(of: tc)
                 guard cells.count <= 16_384 - span else { throw PicoDocsError.fileCorrupted }
                 widestRow = max(widestRow, cells.count + span)
                 guard rows.count < 1_000_000 / widestRow else { throw PicoDocsError.fileCorrupted }
                 var cellText = ""
-                // Gather all descendant paragraphs so paragraphs inside block
-                // content controls (w:sdt) within the cell are included too. Skip
-                // paragraphs belonging to a text box nested in this cell — those are
-                // emitted once by extractTextBoxes, so rendering them here too would
-                // duplicate them. (A table inside a text box is not skipped, so its
-                // own cells still render — see isInsideTextBox.)
-                for paragraph in (try? tc.getElementsByTag("w:p").array()) ?? [] {
-                    if isInsideTextBox(paragraph, before: tc) || paragraph.parents().prefix(while: { $0 !== tc }).contains(where: { ["w:del", "w:movefrom"].contains($0.tagName().lowercased()) }) { continue }
+                for paragraph in cellParagraphs(tc) {
                     let properties = paragraph.children().first { $0.tagName().lowercased() == "w:ppr" }
                     let numPr = properties?.children().first { $0.tagName().lowercased() == "w:numpr" }
                     let style = try? properties?.children().first { $0.tagName().lowercased() == "w:pstyle" }?.attr("w:val")

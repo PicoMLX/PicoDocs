@@ -35,4 +35,20 @@ enum Fixture {
     static func data(_ name: String, _ ext: String) throws -> Data {
         try Data(contentsOf: url(name, ext))
     }
+
+    /// A third-party test-suite file under `Resources/Corpus/` (sources and
+    /// licenses in the README there), by its path relative to that folder.
+    static func corpusURL(_ path: String) throws -> URL {
+        let file = path as NSString
+        let name = file.lastPathComponent as NSString
+        let directory = ["Resources/Corpus", file.deletingLastPathComponent].filter { !$0.isEmpty }.joined(separator: "/")
+        if let url = Bundle.module.url(forResource: name.deletingPathExtension, withExtension: name.pathExtension, subdirectory: directory) {
+            return url
+        }
+        throw FixtureError.missing(path)
+    }
+
+    static func corpusData(_ path: String) throws -> Data {
+        try Data(contentsOf: corpusURL(path))
+    }
 }

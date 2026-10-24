@@ -37,7 +37,7 @@ public struct KeynoteConverter: DocumentConverter {
     }
 
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
-        guard let archive = Archive(data: data, accessMode: .read) else {
+        guard let archive = ZIPEntryReader.archive(data) else {
             throw PicoDocsError.fileCorrupted
         }
         let components = try iwaComponents(in: archive)
@@ -240,7 +240,7 @@ public struct KeynoteConverter: DocumentConverter {
         // layout — so surface that distinctly rather than failing silently.
         if let indexEntry {
             guard let indexZip = try ZIPEntryReader.read(archive, entry: indexEntry),
-                  let inner = Archive(data: indexZip, accessMode: .read) else {
+                  let inner = ZIPEntryReader.archive(indexZip) else {
                 throw PicoDocsError.fileCorrupted
             }
             for entry in inner {

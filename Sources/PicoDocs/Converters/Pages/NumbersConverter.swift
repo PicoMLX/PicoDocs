@@ -51,7 +51,7 @@ public struct NumbersConverter: DocumentConverter {
 
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
         try Task.checkCancellation()
-        guard let archive = Archive(data: data, accessMode: .read) else {
+        guard let archive = ZIPEntryReader.archive(data) else {
             throw PicoDocsError.fileCorrupted
         }
         // A nested Index.zip is released before decoding, so retaining it beside
