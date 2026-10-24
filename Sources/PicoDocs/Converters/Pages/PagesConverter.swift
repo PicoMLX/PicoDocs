@@ -145,7 +145,12 @@ public struct PagesConverter: DocumentConverter {
     /// failing that — from a nested `Index.zip`. A present-but-unreadable main
     /// story (`Document.iwa`) is treated as corruption; auxiliary entries that
     /// fail to extract are skipped leniently.
-    static func iwaComponents(in archive: Archive, maximumEntryBytes: Int = Int.max, maximumTotalBytes: Int = Int.max,
+    ///
+    /// `maximumEntryBytes` and `maximumTotalBytes` bound the IWA streams. A nested
+    /// `Index.zip` is a container, not a stream: its streams take those budgets as
+    /// they are extracted, so it has its own `maximumContainerBytes` allowance
+    /// (`maximumTotalBytes` by default) and is released when this returns.
+    static func iwaComponents(in archive: Archive, maximumEntryBytes: Int = Int.max, maximumTotalBytes: Int = Int.max, maximumContainerBytes: Int? = nil,
                               maximumArchiveEntries: Int = 16_384, maximumComponents: Int = 16_384, maximumMetadataBytes: Int = 8 * 1024 * 1024) throws -> [Component] {
         var components: [Component] = []
         var remaining = maximumTotalBytes
@@ -183,7 +188,12 @@ public struct PagesConverter: DocumentConverter {
         // is present but can't be read/opened, the file is corrupt — not an
         // unsupported layout — so surface that distinctly.
         if let indexEntry {
-            guard let indexZip = try readBounded(archive, entry: indexEntry),
+            // Charging the container to the stream budgets too would reject a
+            // container over the per-stream cap and leave a nested package about
+            // half the stream bytes of the loose layout.
+            let containerLimit = maximumContainerBytes ?? maximumTotalBytes
+            guard containerLimit >= 0, indexEntry.uncompressedSize <= UInt64(containerLimit),
+                  let indexZip = try ZIPEntryReader.read(archive, entry: indexEntry, maxBytes: containerLimit),
                   let inner = Archive(data: indexZip, accessMode: .read) else {
                 throw PicoDocsError.fileCorrupted
             }
