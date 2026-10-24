@@ -61,16 +61,21 @@ public struct SpreadsheetConverter: DocumentConverter {
 
     // MARK: - Markdown table
 
-    private static func markdownTable(rows: [Row], sharedStrings: SharedStrings?, sheetName: String?, projectionBudget: inout SpreadsheetProjectionBudget) throws -> (markdown: String, csv: String) {
+    static func markdownTable(rows: [Row], sharedStrings: SharedStrings?, sheetName: String?, projectionBudget: inout SpreadsheetProjectionBudget, isCancelled: () -> Bool = { Task.isCancelled }) throws -> (markdown: String, csv: String) {
         let origin = ColumnReference("A")!
         var columnCount = 0, rowCount = 0
         try projectionBudget.reservePhysicalRows(rows.count)
+        // Both passes below visit every admitted row and cell (up to a million)
+        // before `materializeGrid` checks cancellation, so poll as they go.
+        var visits = 0
         var seenRows: Set<UInt> = []
         for row in rows {
+            try checkpoint(&visits, isCancelled)
             guard row.reference > 0, row.reference <= 1_048_576, seenRows.insert(row.reference).inserted else { throw PicoDocsError.fileCorrupted }
             rowCount = max(rowCount, Int(clamping: row.reference))
             var seenColumns: Set<Int> = []
             for cell in row.cells {
+                try checkpoint(&visits, isCancelled)
                 guard cell.reference.row == row.reference else { throw PicoDocsError.fileCorrupted }
                 let column = origin.distance(to: cell.reference.column)
                 // Bound the set before insertion and reject physical duplicates,
@@ -95,10 +100,12 @@ public struct SpreadsheetConverter: DocumentConverter {
         try projectionBudget.reserveWriterStorage(rows: rowCount, columns: columnCount)
         var grid: [Int: [String]] = [:]
         for row in rows {
+            try checkpoint(&visits, isCancelled)
             let rowIndex = Int(clamping: row.reference)
             guard rowIndex > 0 else { throw PicoDocsError.fileCorrupted }
             var values = grid[rowIndex] ?? Array(repeating: "", count: columnCount)
             for cell in row.cells {
+                try checkpoint(&visits, isCancelled)
                 let column = origin.distance(to: cell.reference.column)
                 guard column >= 0, column < columnCount else { throw PicoDocsError.fileCorrupted }
                 let value = cellText(cell, sharedStrings: sharedStrings)
@@ -108,6 +115,12 @@ public struct SpreadsheetConverter: DocumentConverter {
             grid[rowIndex] = values
         }
         return try materializeGrid(grid, rows: rowCount, columns: columnCount, sheetName: sheetName)
+    }
+
+    /// Counts one row or cell visit and polls `isCancelled` every 64 visits.
+    private static func checkpoint(_ visits: inout Int, _ isCancelled: () -> Bool) throws {
+        visits += 1
+        if visits % 64 == 0, isCancelled() { throw CancellationError() }
     }
 
     static func materializeGrid(_ grid: [Int: [String]], rows rowCount: Int, columns columnCount: Int, sheetName: String?) throws -> (markdown: String, csv: String) {

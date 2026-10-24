@@ -26,6 +26,11 @@ public struct AttributedStringDOCXExporter: DocumentExporter {
     public func accepts(_ format: ExportableFileType) -> Bool { format == .docx }
 
     public func write(_ result: ConverterResult, format: ExportableFileType) throws -> Data {
+        try write(result, format: format, isCancelled: { Task.isCancelled })
+    }
+
+    func write(_ result: ConverterResult, format: ExportableFileType, isCancelled: () -> Bool) throws -> Data {
+        if isCancelled() { throw CancellationError() }
         guard format == .docx else { throw ExporterError.notAccepted }
         #if canImport(AppKit)
         try OfficeDocumentBlocks.validateInput(result)
@@ -37,10 +42,16 @@ public struct AttributedStringDOCXExporter: DocumentExporter {
         if let title = result.title { properties[.title] = title }
         if let author = result.author { properties[.author] = author }
         do {
-            return try attributed.data(
+            if isCancelled() { throw CancellationError() }
+            // Foundation's serializer is synchronous and can't observe
+            // cancellation mid-call, so recheck before returning its output.
+            let data = try attributed.data(
                 from: NSRange(location: 0, length: attributed.length),
                 documentAttributes: properties
             )
+            if isCancelled() { throw CancellationError() }
+            return data
+        } catch is CancellationError { throw CancellationError()
         } catch {
             throw ExporterError.serializationFailed("DOCX (officeOpenXML) serialization failed: \(error.localizedDescription)")
         }
