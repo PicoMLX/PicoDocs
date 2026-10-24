@@ -11,6 +11,7 @@ Designed for chat clients and LLM server applications that utilize Retrieval-Aug
 PicoDocs supports and processes a variety of document formats:
 - **File Types**: PDF, ePub, DOCX, XLSX, PPTX, HTML, Markdown, Pages, Keynote, and more.
 - **Export Options**: Convert documents to HTML, Markdown, and JSON formats for LLM compatibility, with embedded and referenced images.
+- **In-place Editing**: Apply an LLM's exact-match find/replace edits to a DOCX while keeping its formatting (see [Editing in place](#editing-in-place-llm-findreplace-formatting-preserved)).
 - **Content Cleanup**: Utilizes Readability to clean HTML content, enhancing focus on the main content similar to Safari's Reader View.
 - **OCR**: On-device text recognition (Apple Vision) for standalone images and scanned / image-only PDF pages — no model bundle or cloud service. Enabled by default; toggle with `enableOCR`.
 - **Unicode Sanitization** *(opt-in)*: On request (`sanitizeUnicode: true`), cleans extracted text for LLM/RAG use — canonical (NFC) normalization, removal of invisible/control characters (zero-width, bidi, soft hyphen, BOM), and folding of Unicode whitespace/line separators to ASCII — while preserving visible typography (and ZWJ/ZWNJ joiners). Off by default while it post-processes generated Markdown; per-converter integration is planned.
@@ -89,6 +90,46 @@ Notes:
   DOCX/PPTX and let Pages/Keynote import it instead.
 - Custom or additional writers can be registered via `DocumentExporterRegistry`,
   mirroring `DocumentConverterRegistry` on the import side.
+
+## Editing in place (LLM find/replace, formatting preserved)
+
+When an LLM needs to *change* an existing document rather than rewrite it,
+`PicoDocsEngine.applyEdits(...)` makes surgical edits to the original file. Only
+the matched text changes; styles, images and structure stay as they were. That
+avoids both the lost formatting and the silent rewording you get from "convert
+the whole document, let the model regenerate it, write a new file".
+
+Edits are exact-match find/replace, so the model can only change text it quotes
+verbatim. Anything that doesn't match exactly and unambiguously is rejected
+rather than guessed at.
+
+```swift
+// 1. Show the model the exact text to quote from. Use this, not the Markdown
+//    export: it's the string the editor searches, so a verbatim quote matches.
+let text = try await PicoDocsEngine.editableText(for: docx, filename: "report.docx")
+
+// 2. Apply the model's edits. The result is a .docx with its formatting intact.
+let result = try await PicoDocsEngine.applyEdits([
+    TextEdit(find: "Q3 revenue was $4.2M", replace: "Q3 revenue was $4.8M"),
+    TextEdit(find: "DRAFT", replace: "FINAL", replaceAll: true),
+], to: docx, filename: "report.docx")
+// result.data: the edited file. result.applied: replacements per edit, e.g. [1, 3].
+```
+
+Notes:
+- **DOCX only** for now. Other formats throw `documentTypeNotSupported`. For them,
+  the lossy fallback is `convert` → edit the Markdown → `write(...)`, which does
+  not keep the original formatting.
+- Exact matching limits *where and how much* changes. It does not check that the
+  replacement is correct; that stays the caller's job.
+- A batch is all-or-nothing, and its edits may not overlap. An edit is rejected
+  (`PicoDocsError.editCrossesBoundary`) if it spans a paragraph, tab or line
+  break, touches a hyperlink, field, content control or tracked change, or adds a
+  tab or line break. The error messages are written so a model can correct its
+  next attempt.
+- Only `word/document.xml` is rewritten. Every other part of the package is copied
+  through byte for byte. Headers, footers, footnotes and text boxes aren't
+  editable yet.
 
 ## Setup for Apps
 

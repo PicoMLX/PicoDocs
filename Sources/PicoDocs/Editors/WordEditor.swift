@@ -25,7 +25,7 @@
 import Foundation
 import ZIPFoundation
 
-struct WordEditor {
+public struct WordEditor: DocumentEditor {
 
     static let documentPath = "word/document.xml"
 
@@ -38,11 +38,15 @@ struct WordEditor {
     /// hostile archive can demand.
     static let maximumPackageBytes = 1024 * 1024 * 1024
 
-    init() {}
+    public init() {}
+
+    public func accepts(_ info: StreamInfo) -> Bool {
+        info.detectedFormat == .docx
+    }
 
     /// The document's editable text: the exact string to show a model and to
     /// quote `TextEdit.find` from.
-    func editableText(_ data: Data) throws -> String {
+    public func editableText(_ data: Data) throws -> String {
         let archive = try Self.open(data)
         return try WordEditableText(documentXML: Self.documentXML(in: archive)).text
     }
@@ -52,7 +56,7 @@ struct WordEditor {
     /// All edits match against the same original text, their targets may not
     /// overlap, and the batch is all-or-nothing: any failing edit throws and no
     /// output is produced.
-    func applyEdits(_ edits: [TextEdit], to data: Data) throws -> EditResult {
+    public func applyEdits(_ edits: [TextEdit], to data: Data) throws -> EditResult {
         let archive = try Self.open(data)
         let xml = try Self.documentXML(in: archive)
         let snapshot = try WordEditableText(documentXML: xml)
