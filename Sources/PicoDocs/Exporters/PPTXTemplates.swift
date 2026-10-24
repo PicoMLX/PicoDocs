@@ -51,6 +51,35 @@ enum PPTXTemplates {
     </Relationships>
     """
 
+    /// Written only when a deck has speaker notes. The slide-image and body
+    /// placeholders give PowerPoint's Notes Page its 4:3 layout; neither carries
+    /// text or list styles, so imported notes keep their explicit formatting.
+    static let notesMaster = OOXMLPackageWriter.xmlDeclaration + """
+    <p:notesMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" \
+    xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" \
+    xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">\
+    <p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>\
+    <p:sp><p:nvSpPr><p:cNvPr id="2" name="Slide Image Placeholder 1"/>\
+    <p:cNvSpPr><a:spLocks noGrp="1" noRot="1" noChangeAspect="1"/></p:cNvSpPr><p:nvPr><p:ph type="sldImg" idx="2"/></p:nvPr></p:nvSpPr>\
+    <p:spPr><a:xfrm><a:off x="1143000" y="685800"/><a:ext cx="4572000" cy="3429000"/></a:xfrm>\
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr></p:sp>\
+    <p:sp><p:nvSpPr><p:cNvPr id="3" name="Notes Placeholder 2"/>\
+    <p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" sz="quarter" idx="3"/></p:nvPr></p:nvSpPr>\
+    <p:spPr><a:xfrm><a:off x="685800" y="4343400"/><a:ext cx="5486400" cy="4114800"/></a:xfrm>\
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>\
+    <p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp></p:spTree></p:cSld>\
+    <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" \
+    accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>\
+    </p:notesMaster>
+    """
+
+    /// Each master owns a theme, so the notes master gets its own copy.
+    static let notesMasterRels = OOXMLPackageWriter.xmlDeclaration + """
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\
+    <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme2.xml"/>\
+    </Relationships>
+    """
+
     static let slideRels = OOXMLPackageWriter.xmlDeclaration + """
     <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\
     <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>\
