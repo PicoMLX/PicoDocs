@@ -119,6 +119,9 @@ public struct RTFConverter: DocumentConverter {
         var fontNameIgnored = false
         var infoGroup = false
         var metadataField: String?
+        // True until the current group's first token: `\*` marks an ignorable
+        // destination only there (`{\*\dest ...}`).
+        var groupStart = false
         var ansiEncoding: String.Encoding = .windowsCP1252
         var isDBCS = false
         var stack: [GroupState] = []
@@ -139,6 +142,22 @@ public struct RTFConverter: DocumentConverter {
         func finishFont() {
             guard fontTable, !fontNameIgnored else { return }
             fonts.finish(font)
+        }
+
+        // `\'hh` bytes decode with the active font's code page when its charset
+        // names one — Word and WordPad write `\ansicpg1252` documents whose
+        // Cyrillic, Central European or CJK text is in `\fcharset204`/`238`/`128`
+        // fonts — and with the document's `\ansicpg` otherwise.
+        var codepageEncodings: [Int: String.Encoding?] = [:]
+        func byteEncoding() -> (encoding: String.Encoding, isDBCS: Bool) {
+            guard let codepage = fonts.codepage(font) else { return (ansiEncoding, isDBCS) }
+            let encoding = codepageEncodings[codepage] ?? {
+                let resolved = Self.encoding(forCodepage: codepage)
+                codepageEncodings[codepage] = resolved
+                return resolved
+            }()
+            guard let encoding else { return (ansiEncoding, isDBCS) }
+            return (encoding, Self.dbcsCodepages.contains(codepage))
         }
 
         func appendText(_ s: String) {
@@ -163,7 +182,7 @@ public struct RTFConverter: DocumentConverter {
         // character spanning consecutive escapes survives) and append the result.
         func flushBytes() {
             guard !pendingBytes.isEmpty else { return }
-            let decoded = Self.decodeBytes(pendingBytes, encoding: ansiEncoding)
+            let decoded = Self.decodeBytes(pendingBytes, encoding: byteEncoding().encoding)
             pendingBytes.removeAll(keepingCapacity: true)
             appendText(decoded)
         }
@@ -216,6 +235,8 @@ public struct RTFConverter: DocumentConverter {
 
         while i < n {
             let c = chars[i]
+            let atGroupStart = groupStart
+            if c != "\r", c != "\n", c != "\r\n" { groupStart = false }
             // Consecutive `\'hh` escapes form one (possibly multibyte) character;
             // flush the buffer before any other token so byte order is preserved.
             // Raw newlines are non-content (RTF line-wrapping) and can fall *inside*
@@ -231,6 +252,7 @@ public struct RTFConverter: DocumentConverter {
                 // writer signals canonical Markdown. Binary/ignored payloads do not.
                 if stack.count == 1, !ignore, !encounteredBody, chars[i...].starts(with: canonicalMarker) { canonical = true }
                 stack.append(GroupState(bold: bold, italic: italic, ignore: ignore, ucSkip: ucSkip, field: field, instruction: instruction, font: font, fontTable: fontTable, fontNameIgnored: fontNameIgnored, infoGroup: infoGroup, metadataField: metadataField))
+                groupStart = true
                 i += 1
 
             case "}":
@@ -269,6 +291,9 @@ public struct RTFConverter: DocumentConverter {
                     case "deff": if let param { defaultFont = param; font = param }
                     case "f": if let param { finishFont(); font = param; if fontTable { fonts.admit(font) } }
                     case "fmodern": if fontTable, !fontNameIgnored { fonts.markMonospace(font) }
+                    case "fcharset":
+                        if fontTable, let param, let codepage = Self.codepage(forCharset: param) { fonts.setCodepage(codepage, font: font) }
+                    case "cpg": if fontTable, let param { fonts.setCodepage(param, font: font) }
                     case "falt": if fontTable { fontNameIgnored = true }
                     case "field": field = Field()
                     case "fldinst": instruction = field != nil; ignore = true; metadataField = nil
@@ -372,6 +397,9 @@ public struct RTFConverter: DocumentConverter {
                     case "_": appendText("-")                 // non-breaking hyphen
                     case "-": break                            // optional hyphen
                     case "*":
+                        // Elsewhere (LibreOffice writes `\*\cs7` before a run's
+                        // text) it marks nothing, so the group's text is kept.
+                        guard atGroupStart else { break }
                         ignore = true; metadataField = nil
                         // fonttbl is ignored as body text, but its primary names
                         // are collected separately from ignorable subgroups.
@@ -381,13 +409,14 @@ public struct RTFConverter: DocumentConverter {
                             // DBCS code pages: buffer the byte (a lead byte alone is
                             // undecodable) and let flushBytes decode whole characters.
                             // Single-byte code pages decode each byte on its own.
-                            if isDBCS {
+                            let (encoding, doubleByte) = byteEncoding()
+                            if doubleByte {
                                 if instruction, let field {
                                     if field.admitBufferedInstructionByte(pendingBytes.count) { pendingBytes.append(byte) }
                                     else { pendingBytes.removeAll(keepingCapacity: true) }
                                 } else if !ignore || metadataField != nil { pendingBytes.append(byte) }
                             } else {
-                                appendText(Self.decodeByte(byte, encoding: ansiEncoding))
+                                appendText(Self.decodeByte(byte, encoding: encoding))
                             }
                             i += 2
                         }
@@ -536,10 +565,9 @@ public struct RTFConverter: DocumentConverter {
     /// become the right punctuation/letters rather than C1 control characters.
     /// Falls back to Windows-1252, then Latin-1, for undecodable bytes.
     ///
-    /// Used for single-byte code pages; DBCS code pages declared via `\ansicpg`
-    /// (Shift-JIS, GBK, Big5, …) are reassembled across escapes by `decodeBytes`.
-    /// A document that switches code page per font via `\fcharsN` alone (without
-    /// `\ansicpg`) is still a deferred niche — the font table isn't tracked.
+    /// Used for single-byte code pages; DBCS code pages (Shift-JIS, GBK, Big5, …,
+    /// declared via `\ansicpg` or a font's charset) are reassembled across
+    /// escapes by `decodeBytes`.
     private static func decodeByte(_ byte: UInt8, encoding: String.Encoding) -> String {
         if let decoded = String(bytes: [byte], encoding: encoding), !decoded.isEmpty {
             return decoded
@@ -549,6 +577,30 @@ public struct RTFConverter: DocumentConverter {
             return decoded
         }
         return Unicode.Scalar(UInt32(byte)).map { String(Character($0)) } ?? ""
+    }
+
+    /// The Windows code page an RTF font charset (`\fcharsetN`) implies. ANSI,
+    /// default, symbol and OEM charsets return nil and keep the document's code
+    /// page (`\ansicpgN`).
+    private static func codepage(forCharset charset: Int) -> Int? {
+        switch charset {
+        case 77: return 10000      // Mac Roman
+        case 128: return 932       // Shift-JIS
+        case 129: return 949       // Hangul (UHC)
+        case 130: return 1361      // Johab
+        case 134: return 936       // GB2312 / GBK
+        case 136: return 950       // Big5
+        case 161: return 1253      // Greek
+        case 162: return 1254      // Turkish
+        case 163: return 1258      // Vietnamese
+        case 177: return 1255      // Hebrew
+        case 178: return 1256      // Arabic
+        case 186: return 1257      // Baltic
+        case 204: return 1251      // Cyrillic
+        case 222: return 874       // Thai
+        case 238: return 1250      // Central European
+        default: return nil
+        }
     }
 
     /// Maps an RTF `\ansicpgN` Windows code page number to a `String.Encoding`.

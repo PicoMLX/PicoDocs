@@ -138,7 +138,7 @@ public enum ContentTypeDetector {
     static func classifyZip(_ data: Data) -> DetectedFormat {
         let format = zipCentralDirectory(data).map { classifyZipEntries(in: $0, bounded: false) }
             ?? classifyZipEntries(in: data, bounded: true)
-        guard format == .zip, let zip = try? Archive(data: data, accessMode: .read) else { return format }
+        guard format == .zip, let zip = ZIPEntryReader.archive(data) else { return format }
         // Detection remains a bounded hint; the converter validates the whole
         // package and its manifest after routing.
         // Read the bounded root relationships, then only a prefix of the main
