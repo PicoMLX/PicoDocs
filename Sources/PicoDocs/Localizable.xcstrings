@@ -1,1388 +1,436 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-    "Bookmark is stale. User needs to allow access to file(s) again" : {
+    "Select the file again to allow access." : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "الإشارة المرجعية غير متاحة. يحتاج المستخدم إلى السماح بالوصول إلى الملف/الملفات مرة أخرى"
+            "value" : "حدد الملف مجددًا للسماح بالوصول إليه."
           }
         },
         "ca" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "El marcador està obsolet. L'usuari ha de permetre l'accés al fitxer o fitxers novament"
+            "value" : "Torna a seleccionar el fitxer per permetre-hi l’accés."
           }
         },
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Záložka je zastaralá. Uživatel musí znovu povolit přístup k souboru/souborům"
+            "value" : "Znovu vyberte soubor a povolte k němu přístup."
           }
         },
         "da" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bogmærket er forældet. Brugeren skal give adgang til filen/filene igen"
+            "value" : "Vælg filen igen for at tillade adgang."
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Das Lesezeichen ist veraltet. Der Benutzer muss den Zugriff auf die Datei(en) erneut zulassen"
+            "value" : "Wähle die Datei erneut aus, um den Zugriff zu erlauben."
           }
         },
         "el" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ο σελιδοδείκτης είναι παρωχημένος. Ο χρήστης πρέπει να επιτρέψει ξανά την πρόσβαση στο/στα αρχείο(-α)"
+            "value" : "Επιλέξτε ξανά το αρχείο για να επιτρέψετε την πρόσβαση."
           }
         },
         "en-AU" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bookmark is stale. User needs to allow access to file(s) again"
+            "value" : "Select the file again to allow access."
           }
         },
         "en-GB" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bookmark is stale. User needs to allow access to file(s) again"
+            "value" : "Select the file again to allow access."
           }
         },
         "en-IN" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bookmark is stale. User needs to allow access to file(s) again"
+            "value" : "Select the file again to allow access."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "El marcador está obsoleto. El usuario necesita permitir el acceso a los archivos nuevamente"
+            "value" : "Vuelve a seleccionar el archivo para permitir el acceso."
           }
         },
         "es-419" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "El marcador está obsoleto. El usuario necesita permitir el acceso a los archivos nuevamente"
+            "value" : "Selecciona el archivo de nuevo para permitir el acceso."
           }
         },
         "fi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Kirjanmerkki on vanhentunut. Käyttäjän on sallittava tiedoston uudelleen käyttöoikeus"
+            "value" : "Valitse tiedosto uudelleen salliaksesi sen käytön."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Le signet est obsolète. L'utilisateur doit à nouveau autoriser l'accès au(x) fichier(s)"
+            "value" : "Sélectionnez à nouveau le fichier pour autoriser l’accès."
           }
         },
         "fr-CA" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Le signet est obsolète. L'utilisateur doit à nouveau autoriser l'accès au(x) fichier(s)"
+            "value" : "Sélectionnez à nouveau le fichier pour autoriser l’accès."
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "הסימניה אינה עדכנית. על המשתמש לאפשר גישה לקובץ/ים שוב"
+            "value" : "יש לבחור שוב את הקובץ כדי לאפשר גישה."
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "बुकमार्क पुराना है। उपयोगकर्ता को फिर से फ़ाइल(फ़ाइलों) तक पहुँच की अनुमति देनी होगी"
+            "value" : "ऐक्सेस की अनुमति देने के लिए फ़ाइल फिर से चुनें।"
           }
         },
         "hr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Oznaka je zastarjela. Korisnik mora ponovno dopustiti pristup datoteci(ama)"
+            "value" : "Ponovno odaberite datoteku kako biste dopustili pristup."
           }
         },
         "hu" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "A könyvjelző elavult. A felhasználónak újra engedélyeznie kell a fájl(ok)hoz való hozzáférést"
+            "value" : "A hozzáférés engedélyezéséhez válassza ki újra a fájlt."
           }
         },
         "id" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Penanda buku sudah usang. Pengguna perlu mengizinkan akses ke file lagi"
+            "value" : "Pilih file lagi untuk mengizinkan akses."
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Il segnalibro è obsoleto. L'utente deve consentire nuovamente l'accesso al/ai file"
+            "value" : "Seleziona di nuovo il file per consentire l’accesso."
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ブックマークが古くなっています。ユーザーは再度ファイルへのアクセスを許可する必要があります"
+            "value" : "ファイルをもう一度選択してアクセスを許可してください。"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "북마크가 오래되었습니다. 사용자가 파일에 대한 접근을 다시 허용해야 합니다"
+            "value" : "접근을 허용하려면 파일을 다시 선택하십시오."
           }
         },
         "ms" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Penanda buku sudah lama. Pengguna perlu membenarkan akses ke fail sekali lagi"
+            "value" : "Pilih fail sekali lagi untuk membenarkan akses."
           }
         },
         "nb" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bokmerke er utdatert. Brukeren må gi tilgang til fil(er) igjen"
+            "value" : "Velg filen på nytt for å gi tilgang."
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bladwijzer is verouderd. Gebruiker moet opnieuw toegang tot bestand(en) toestaan"
+            "value" : "Selecteer het bestand opnieuw om toegang toe te staan."
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Zakładka jest nieaktualna. Użytkownik musi ponownie zezwolić na dostęp do pliku(ów)"
+            "value" : "Wybierz plik ponownie, aby zezwolić na dostęp."
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "O favorito está desatualizado. O usuário precisa permitir acesso ao(s) arquivo(s) novamente"
+            "value" : "Selecione o arquivo novamente para permitir o acesso."
           }
         },
         "pt-PT" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "O marcador está obsoleto. O utilizador precisa de permitir novamente o acesso ao(s) ficheiro(s)"
+            "value" : "Volte a selecionar o ficheiro para permitir o acesso."
           }
         },
         "ro" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Marcajul este învechit. Utilizatorul trebuie să permită din nou accesul la fișier(e)"
+            "value" : "Selectați din nou fișierul pentru a permite accesul."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Закладка устарела. Пользователю необходимо снова разрешить доступ к файлу(ам)"
+            "value" : "Выберите файл еще раз, чтобы разрешить доступ."
           }
         },
         "sk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Záložka je zastaraná. Používateľ musí znova povoliť prístup k súborom"
+            "value" : "Znova vyberte súbor a povoľte k nemu prístup."
           }
         },
         "sv" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bokmärket är inaktuellt. Användaren måste ge åtkomst till fil(er) igen"
+            "value" : "Välj filen igen för att tillåta åtkomst."
           }
         },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "บุ๊กมาร์กเก่า ผู้ใช้ต้องอนุญาตเข้าถึงไฟล์อีกครั้ง"
+            "value" : "เลือกไฟล์อีกครั้งเพื่ออนุญาตการเข้าถึง"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Yer işareti bayat. Kullanıcının dosyaya/dosyalara erişime tekrar izin vermesi gerekiyor"
+            "value" : "Erişime izin vermek için dosyayı yeniden seçin."
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Закладка застаріла. Користувачу потрібно знову дозволити доступ до файлів"
+            "value" : "Виберіть файл знову, щоб дозволити доступ."
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dấu trang đã cũ. Người dùng cần cho phép truy cập lại tệp tin(s)"
+            "value" : "Chọn lại tệp để cho phép truy cập."
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "書籤已過期，用戶需要重新允許訪問文件"
+            "value" : "請重新選取檔案以允許取用。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "书签已失效。用户需要再次允许访问文件"
+            "value" : "请重新选择文件以允许访问。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "書籤已過期。用戶需要重新允許訪問檔案"
+            "value" : "請重新選取檔案以允許取用。"
           }
         }
       }
     },
-    "Document has no content" : {
+    "The URL isn’t valid." : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "المستند لا يحتوي على محتوى"
+            "value" : "عنوان URL غير صالح."
           }
         },
         "ca" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "El document no té contingut"
+            "value" : "L’URL no és vàlid."
           }
         },
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokument neobsahuje žádný obsah"
+            "value" : "URL není platná."
           }
         },
         "da" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokumentet har ingen indhold"
+            "value" : "URL-adressen er ugyldig."
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokument hat keinen Inhalt"
+            "value" : "Die URL ist ungültig."
           }
         },
         "el" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Το έγγραφο δεν έχει περιεχόμενο"
+            "value" : "Η διεύθυνση URL δεν είναι έγκυρη."
           }
         },
         "en-AU" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Document doesn't have any content"
+            "value" : "The URL isn’t valid."
           }
         },
         "en-GB" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Document contains no content"
+            "value" : "The URL isn’t valid."
           }
         },
         "en-IN" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Document does not have any content"
+            "value" : "The URL isn’t valid."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "El documento no tiene contenido"
+            "value" : "La URL no es válida."
           }
         },
         "es-419" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "El documento no tiene contenido"
+            "value" : "La URL no es válida."
           }
         },
         "fi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Asiakirjassa ei ole sisältöä"
+            "value" : "URL-osoite ei ole kelvollinen."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Le document est vide"
+            "value" : "L’URL n’est pas valide."
           }
         },
         "fr-CA" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Le document est vide"
+            "value" : "L’URL n’est pas valide."
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "המסמך אינו מכיל תוכן"
+            "value" : "כתובת ה-URL אינה תקינה."
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "दस्तावेज़ में कोई सामग्री नहीं है"
+            "value" : "URL मान्य नहीं है।"
           }
         },
         "hr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokument nema sadržaja"
+            "value" : "URL nije valjan."
           }
         },
         "hu" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "A dokumentum nem tartalmaz adatot"
+            "value" : "Az URL nem érvényes."
           }
         },
         "id" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokumen tidak memiliki konten"
+            "value" : "URL tidak valid."
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Il documento non contiene contenuti"
+            "value" : "L’URL non è valido."
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ドキュメントに内容がありません"
+            "value" : "URLが無効です。"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "문서에 내용이 없습니다"
+            "value" : "URL이 유효하지 않습니다."
           }
         },
         "ms" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokumen tiada kandungan"
+            "value" : "URL tidak sah."
           }
         },
         "nb" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokumentet har ikke noe innhold"
+            "value" : "URL-adressen er ugyldig."
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Document heeft geen inhoud"
+            "value" : "De URL is ongeldig."
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokument nie zawiera treści"
+            "value" : "Adres URL jest nieprawidłowy."
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "O documento não possui conteúdo"
+            "value" : "O URL não é válido."
           }
         },
         "pt-PT" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "O documento não tem conteúdo"
+            "value" : "O URL não é válido."
           }
         },
         "ro" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Documentul nu conține conținut"
+            "value" : "URL-ul nu este valid."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Документ не содержит данных"
+            "value" : "Неверный URL-адрес."
           }
         },
         "sk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokument nemá žiadny obsah"
+            "value" : "URL adresa nie je platná."
           }
         },
         "sv" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokumentet har inget innehåll"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "เอกสารไม่มีเนื้อหา"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Belge içeriği yok"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Документ не містить вмісту"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tài liệu không có nội dung"
-          }
-        },
-        "zh-HK" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "文件沒有內容"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "文档没有内容"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "文件沒有內容"
-          }
-        }
-      }
-    },
-    "Document type not supported" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "نوع المستند غير مدعوم"
-          }
-        },
-        "ca" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tipus de document no compatible"
-          }
-        },
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Typ dokumentu není podporován"
-          }
-        },
-        "da" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Dokumenttype ikke understøttet"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Dokumenttyp nicht unterstützt"
-          }
-        },
-        "el" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Τύπος εγγράφου μη υποστηριζόμενος"
-          }
-        },
-        "en-AU" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Document type not supported"
-          }
-        },
-        "en-GB" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Document type unsupported"
-          }
-        },
-        "en-IN" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Document type not supported"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tipo de documento no soportado"
-          }
-        },
-        "es-419" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tipo de documento no admitido"
-          }
-        },
-        "fi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Asiakirjatyyppiä ei tueta"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Type de document non pris en charge"
-          }
-        },
-        "fr-CA" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Type de document non pris en charge"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "סוג מסמך לא נתמך"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "दस्तावेज़ प्रकार समर्थित नहीं है"
-          }
-        },
-        "hr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Vrsta dokumenta nije podržana"
-          }
-        },
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Dokumentumtípus nem támogatott"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Jenis dokumen tidak didukung"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tipo di documento non supportato"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ドキュメントタイプがサポートされていません"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "지원되지 않는 문서 유형"
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Jenis dokumen tidak disokong"
-          }
-        },
-        "nb" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Dokumenttype støttes ikke"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Documenttype wordt niet ondersteund"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Typ dokumentu nie jest obsługiwany"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tipo de documento não suportado"
-          }
-        },
-        "pt-PT" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tipo de documento não suportado"
-          }
-        },
-        "ro" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tip de document nesuportat"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Тип документа не поддерживается"
-          }
-        },
-        "sk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Typ dokumentu nie je podporovaný"
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Dokumenttyp stöds inte"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ประเภทเอกสารไม่รองรับ"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Belge türü desteklenmiyor"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Тип документа не підтримується"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Không hỗ trợ loại tài liệu"
-          }
-        },
-        "zh-HK" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "不支援文件類型"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "不支持的文档类型"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "不支援的檔案類型"
-          }
-        }
-      }
-    },
-    "Error parsing document" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "خطأ في معالجة المستند"
-          }
-        },
-        "ca" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Error en analitzar el document"
-          }
-        },
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Chyba při analýze dokumentu"
-          }
-        },
-        "da" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Fejl ved parsing af dokument"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Fehler beim Parsen des Dokuments"
-          }
-        },
-        "el" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Σφάλμα κατά την ανάλυση του εγγράφου"
-          }
-        },
-        "en-AU" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Error parsing document"
-          }
-        },
-        "en-GB" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Error parsing document"
-          }
-        },
-        "en-IN" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Error parsing document"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Error al analizar el documento"
-          }
-        },
-        "es-419" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Error al analizar el documento"
-          }
-        },
-        "fi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Virhe asiakirjan jäsentämisessä"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Erreur d'analyse du document"
-          }
-        },
-        "fr-CA" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Erreur lors de l'analyse du document"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "שגיאה בניתוח המסמך"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "दस्तावेज़ पार्स करने में त्रुटि"
-          }
-        },
-        "hr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Pogreška pri raščlanjivanju dokumenta"
-          }
-        },
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hiba a dokumentum elemzésekor"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Kesalahan saat memproses dokumen"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Errore nell'analisi del documento"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ドキュメントの解析エラー"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "문서 구문 오류"
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ralat menganalisis dokumen"
-          }
-        },
-        "nb" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Feil ved tolkning av dokument"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Fout bij het parseren van document"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Błąd podczas przetwarzania dokumentu"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Erro ao analisar documento"
-          }
-        },
-        "pt-PT" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Erro ao analisar o documento"
-          }
-        },
-        "ro" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Eroare la analizarea documentului"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ошибка разбора документа"
-          }
-        },
-        "sk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Chyba pri spracovaní dokumentu"
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Fel vid tolkning av dokument"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "เกิดข้อผิดพลาดในการแยกวิเคราะห์เอกสาร"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Belge çözümleme hatası"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Помилка аналізу документа"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Lỗi phân tích tài liệu"
-          }
-        },
-        "zh-HK" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "解析文件時出錯"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "解析文档时出错"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "無法解析文件"
-          }
-        }
-      }
-    },
-    "File is corrupted" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "الملف تالف"
-          }
-        },
-        "ca" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "L'arxiu està corrupte"
-          }
-        },
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Soubor je poškozený"
-          }
-        },
-        "da" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Filen er beskadiget"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Datei ist beschädigt"
-          }
-        },
-        "el" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Το αρχείο είναι κατεστραμμένο"
-          }
-        },
-        "en-AU" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "File is corrupt"
-          }
-        },
-        "en-GB" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "File is corrupted"
-          }
-        },
-        "en-IN" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "File is corrupted"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "El archivo está dañado"
-          }
-        },
-        "es-419" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "El archivo está dañado"
-          }
-        },
-        "fi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tiedosto on vioittunut"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Le fichier est corrompu"
-          }
-        },
-        "fr-CA" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Le fichier est corrompu"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "הקובץ פגום"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "फ़ाइल खराब हो गई है"
-          }
-        },
-        "hr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Datoteka je oštećena"
-          }
-        },
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "A fájl sérült"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "File rusak"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Il file è danneggiato"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ファイルが破損しています"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "파일이 손상되었습니다"
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Fail rosak"
-          }
-        },
-        "nb" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Filen er ødelagt"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bestand is beschadigd"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Plik jest uszkodzony"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Arquivo está corrompido"
-          }
-        },
-        "pt-PT" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "O ficheiro está corrompido"
-          }
-        },
-        "ro" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Fișierul este corupt"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Файл поврежден"
-          }
-        },
-        "sk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Súbor je poškodený"
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Filen är skadad"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ไฟล์เสียหาย"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Dosya bozuk"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Файл пошкоджено"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tệp bị hỏng"
-          }
-        },
-        "zh-HK" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "檔案已損壞"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "文件已损坏"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "檔案損毀"
-          }
-        }
-      }
-    },
-    "Invalid URL" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "عنوان URL غير صالح"
-          }
-        },
-        "ca" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL no vàlida"
-          }
-        },
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Neplatná URL"
-          }
-        },
-        "da" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ugyldig URL"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ungültige URL"
-          }
-        },
-        "el" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Μη έγκυρη διεύθυνση URL"
-          }
-        },
-        "en-AU" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Invalid URL"
-          }
-        },
-        "en-GB" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Invalid URL"
-          }
-        },
-        "en-IN" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Invalid URL"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL no válida"
-          }
-        },
-        "es-419" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL no válida"
-          }
-        },
-        "fi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Virheellinen URL-osoite"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL invalide"
-          }
-        },
-        "fr-CA" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL non valide"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "כתובת URL לא תקינה"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "अमान्य URL"
-          }
-        },
-        "hr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Nevažeći URL"
-          }
-        },
-        "hu" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Érvénytelen URL"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL tidak valid"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL non valido"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "無効なURL"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "잘못된 URL"
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL tidak sah"
-          }
-        },
-        "nb" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ugyldig URL"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ongeldige URL"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Nieprawidłowy URL"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL inválido"
-          }
-        },
-        "pt-PT" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL inválido"
-          }
-        },
-        "ro" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL nevalidă"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Недействительный URL"
-          }
-        },
-        "sk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Neplatná URL"
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ogiltig URL"
+            "value" : "URL-adressen är ogiltig."
           }
         },
         "th" : {
@@ -1394,471 +442,709 @@
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Geçersiz URL"
+            "value" : "URL geçerli değil."
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Недійсний URL-адреса"
+            "value" : "URL-адреса недійсна."
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "URL không hợp lệ"
+            "value" : "URL không hợp lệ."
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "無效的網址"
+            "value" : "URL 無效。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "无效的URL"
+            "value" : "URL 无效。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "無效的 URL"
+            "value" : "URL 無效。"
           }
         }
       }
     },
-    "No access to File" : {
+    "The document couldn’t be read." : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "لا يوجد وصول إلى الملف"
+            "value" : "تعذّرت قراءة المستند."
           }
         },
         "ca" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "No hi ha accés al fitxer"
+            "value" : "No s’ha pogut llegir el document."
           }
         },
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Žádný přístup k souboru"
+            "value" : "Dokument se nepodařilo přečíst."
           }
         },
         "da" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ingen adgang til filen"
+            "value" : "Dokumentet kunne ikke læses."
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Kein Zugriff auf Datei"
+            "value" : "Das Dokument konnte nicht gelesen werden."
           }
         },
         "el" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Δεν υπάρχει πρόσβαση στο Αρχείο"
+            "value" : "Δεν ήταν δυνατή η ανάγνωση του εγγράφου."
           }
         },
         "en-AU" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "No access to File"
+            "value" : "The document couldn’t be read."
           }
         },
         "en-GB" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "No access to File"
+            "value" : "The document couldn’t be read."
           }
         },
         "en-IN" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "No access to File"
+            "value" : "The document couldn’t be read."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sin acceso al archivo"
+            "value" : "No se ha podido leer el documento."
           }
         },
         "es-419" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sin acceso al archivo"
+            "value" : "No se pudo leer el documento."
           }
         },
         "fi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ei pääsyä tiedostoon"
+            "value" : "Asiakirjaa ei voitu lukea."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Accès refusé au fichier"
+            "value" : "Le document n’a pas pu être lu."
           }
         },
         "fr-CA" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Accès au fichier refusé"
+            "value" : "Le document n’a pas pu être lu."
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "אין גישה לקובץ"
+            "value" : "לא ניתן לקרוא את המסמך."
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "फ़ाइल तक पहुँच नहीं"
+            "value" : "दस्तावेज़ पढ़ा नहीं जा सका।"
           }
         },
         "hr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Nema pristupa datoteci"
+            "value" : "Dokument se nije mogao pročitati."
           }
         },
         "hu" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Nincs hozzáférés a fájlhoz"
+            "value" : "A dokumentum nem olvasható."
           }
         },
         "id" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Tidak ada akses ke File"
+            "value" : "Dokumen tidak dapat dibaca."
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Nessun accesso al file"
+            "value" : "Non è stato possibile leggere il documento."
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ファイルにアクセスできません"
+            "value" : "書類を読み取れませんでした。"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "파일에 접근할 수 없음"
+            "value" : "문서를 읽을 수 없습니다."
           }
         },
         "ms" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Tiada akses kepada Fail"
+            "value" : "Dokumen tidak dapat dibaca."
           }
         },
         "nb" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ingen tilgang til filen"
+            "value" : "Dokumentet kunne ikke leses."
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Geen toegang tot bestand"
+            "value" : "Het document kan niet worden gelezen."
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Brak dostępu do pliku"
+            "value" : "Nie można odczytać dokumentu."
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sem acesso ao arquivo"
+            "value" : "Não foi possível ler o documento."
           }
         },
         "pt-PT" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sem acesso ao ficheiro"
+            "value" : "Não foi possível ler o documento."
           }
         },
         "ro" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Acces interzis la fișier"
+            "value" : "Documentul nu a putut fi citit."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Нет доступа к файлу"
+            "value" : "Не удалось прочитать документ."
           }
         },
         "sk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Žiadny prístup k súboru"
+            "value" : "Dokument sa nepodarilo prečítať."
           }
         },
         "sv" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ingen åtkomst till fil"
+            "value" : "Dokumentet kunde inte läsas."
           }
         },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ไม่มีการเข้าถึงไฟล์"
+            "value" : "ไม่สามารถอ่านเอกสารได้"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dosyaya erişim yok"
+            "value" : "Belge okunamadı."
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Немає доступу до файлу"
+            "value" : "Не вдалося прочитати документ."
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Không có quyền truy cập vào Tệp"
+            "value" : "Không thể đọc tài liệu."
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "無法訪問檔案"
+            "value" : "無法讀取文件。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "无法访问文件"
+            "value" : "无法读取文稿。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "無法存取檔案"
+            "value" : "無法讀取文件。"
           }
         }
       }
     },
-    "The document is empty" : {
+    "The document has no readable content." : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "المستند فارغ"
+            "value" : "لا يحتوي المستند على محتوى قابل للقراءة."
           }
         },
         "ca" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "El document està buit"
+            "value" : "El document no té contingut llegible."
           }
         },
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokument je prázdný"
+            "value" : "Dokument nemá čitelný obsah."
           }
         },
         "da" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokumentet er tomt"
+            "value" : "Dokumentet har intet læsbart indhold."
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Das Dokument ist leer"
+            "value" : "Das Dokument enthält keinen lesbaren Inhalt."
           }
         },
         "el" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Το έγγραφο είναι κενό"
+            "value" : "Το έγγραφο δεν έχει αναγνώσιμο περιεχόμενο."
           }
         },
         "en-AU" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "The document is empty"
+            "value" : "The document has no readable content."
           }
         },
         "en-GB" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "The document is empty"
+            "value" : "The document has no readable content."
           }
         },
         "en-IN" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "The document is empty"
+            "value" : "The document has no readable content."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "El documento está vacío"
+            "value" : "El documento no tiene contenido legible."
           }
         },
         "es-419" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "El documento está vacío"
+            "value" : "El documento no tiene contenido legible."
           }
         },
         "fi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Asiakirja on tyhjä"
+            "value" : "Asiakirjassa ei ole luettavaa sisältöä."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Le document est vide"
+            "value" : "Le document ne contient aucun contenu lisible."
           }
         },
         "fr-CA" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Le document est vide"
+            "value" : "Le document ne contient aucun contenu lisible."
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "המסמך ריק"
+            "value" : "המסמך אינו מכיל תוכן שניתן לקרוא."
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "दस्तावेज़ खाली है"
+            "value" : "दस्तावेज़ में पढ़ने योग्य सामग्री नहीं है।"
           }
         },
         "hr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokument je prazan"
+            "value" : "Dokument nema čitljivog sadržaja."
           }
         },
         "hu" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "A dokumentum üres"
+            "value" : "A dokumentum nem tartalmaz olvasható tartalmat."
           }
         },
         "id" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokumen kosong"
+            "value" : "Dokumen tidak memiliki konten yang dapat dibaca."
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Il documento è vuoto"
+            "value" : "Il documento non contiene contenuti leggibili."
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ドキュメントは空です"
+            "value" : "書類に読み取り可能な内容がありません。"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "문서가 비어 있습니다"
+            "value" : "문서에 읽을 수 있는 콘텐츠가 없습니다."
           }
         },
         "ms" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokumen ini kosong"
+            "value" : "Dokumen tiada kandungan yang boleh dibaca."
           }
         },
         "nb" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokumentet er tomt"
+            "value" : "Dokumentet har ikke lesbart innhold."
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Het document is leeg"
+            "value" : "Het document bevat geen leesbare inhoud."
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokument jest pusty"
+            "value" : "Dokument nie zawiera czytelnej treści."
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "O documento está vazio"
+            "value" : "O documento não tem conteúdo legível."
           }
         },
         "pt-PT" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "O documento está vazio"
+            "value" : "O documento não tem conteúdo legível."
           }
         },
         "ro" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Documentul este gol"
+            "value" : "Documentul nu conține conținut lizibil."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Документ пустой"
+            "value" : "Документ не содержит доступного для чтения содержимого."
           }
         },
         "sk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokument je prázdny"
+            "value" : "Dokument neobsahuje čitateľný obsah."
           }
         },
         "sv" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dokumentet är tomt"
+            "value" : "Dokumentet har inget läsbart innehåll."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เอกสารไม่มีเนื้อหาที่อ่านได้"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Belgede okunabilir içerik yok."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Документ не містить вмісту, придатного для читання."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tài liệu không có nội dung có thể đọc được."
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文件沒有可讀取的內容。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文稿没有可读取的内容。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文件沒有可讀取的內容。"
+          }
+        }
+      }
+    },
+    "The document is empty." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "المستند فارغ."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "El document està buit."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dokument je prázdný."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dokumentet er tomt."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Das Dokument ist leer."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Το έγγραφο είναι κενό."
+          }
+        },
+        "en-AU" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The document is empty."
+          }
+        },
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The document is empty."
+          }
+        },
+        "en-IN" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The document is empty."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "El documento está vacío."
+          }
+        },
+        "es-419" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "El documento está vacío."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Asiakirja on tyhjä."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Le document est vide."
+          }
+        },
+        "fr-CA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Le document est vide."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "המסמך ריק."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "दस्तावेज़ खाली है।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dokument je prazan."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A dokumentum üres."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dokumen kosong."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Il documento è vuoto."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "書類は空です。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "문서가 비어 있습니다."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dokumen kosong."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dokumentet er tomt."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Het document is leeg."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dokument jest pusty."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "O documento está vazio."
+          }
+        },
+        "pt-PT" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "O documento está vazio."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Documentul este gol."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Документ пуст."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dokument je prázdny."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dokumentet är tomt."
           }
         },
         "th" : {
@@ -1870,275 +1156,989 @@
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Belge boş"
+            "value" : "Belge boş."
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Документ порожній"
+            "value" : "Документ порожній."
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Tài liệu trống"
+            "value" : "Tài liệu trống."
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "文件為空"
+            "value" : "文件是空的。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "文档为空"
+            "value" : "文稿为空。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "文件為空"
+            "value" : "文件是空的。"
           }
         }
       }
     },
-    "The file cannot be exported to requested format" : {
+    "The file can’t be exported in this format." : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "لا يمكن تصدير الملف إلى التنسيق المطلوب"
+            "value" : "لا يمكن تصدير الملف بهذا التنسيق."
           }
         },
         "ca" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "L'arxiu no es pot exportar al format sol·licitat"
+            "value" : "El fitxer no es pot exportar en aquest format."
           }
         },
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Soubor nelze exportovat do požadovaného formátu"
+            "value" : "Soubor nelze exportovat v tomto formátu."
           }
         },
         "da" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Filen kan ikke eksporteres til det ønskede format"
+            "value" : "Filen kan ikke eksporteres i dette format."
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Die Datei kann nicht in das angeforderte Format exportiert werden"
+            "value" : "Die Datei kann nicht in diesem Format exportiert werden."
           }
         },
         "el" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Δεν είναι δυνατή η εξαγωγή του αρχείου στη ζητούμενη μορφή"
+            "value" : "Δεν είναι δυνατή η εξαγωγή του αρχείου σε αυτή τη μορφή."
           }
         },
         "en-AU" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "The file can't be exported to the requested format"
+            "value" : "The file can’t be exported in this format."
           }
         },
         "en-GB" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "The file cannot be exported to the requested format"
+            "value" : "The file can’t be exported in this format."
           }
         },
         "en-IN" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "The file cannot be exported to the requested format"
+            "value" : "The file can’t be exported in this format."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "El archivo no puede exportarse al formato solicitado"
+            "value" : "El archivo no se puede exportar en este formato."
           }
         },
         "es-419" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "No se puede exportar el archivo al formato solicitado"
+            "value" : "El archivo no se puede exportar en este formato."
           }
         },
         "fi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Tiedostoa ei voi viedä pyydettyyn muotoon"
+            "value" : "Tiedostoa ei voi viedä tässä muodossa."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Le fichier ne peut pas être exporté au format demandé"
+            "value" : "Le fichier ne peut pas être exporté dans ce format."
           }
         },
         "fr-CA" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Le fichier ne peut pas être exporté vers le format demandé"
+            "value" : "Le fichier ne peut pas être exporté dans ce format."
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "לא ניתן לייצא את הקובץ בפורמט המבוקש"
+            "value" : "לא ניתן לייצא את הקובץ בפורמט הזה."
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "फ़ाइल को अनुरोधित प्रारूप में निर्यात नहीं किया जा सकता है"
+            "value" : "फ़ाइल इस फ़ॉर्मैट में एक्सपोर्ट नहीं की जा सकती।"
           }
         },
         "hr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Datoteka se ne može izvesti u traženi format"
+            "value" : "Datoteka se ne može izvesti u ovom formatu."
           }
         },
         "hu" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "A fájl nem exportálható a kért formátumba"
+            "value" : "A fájl nem exportálható ebben a formátumban."
           }
         },
         "id" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "File tidak dapat diekspor ke format yang diminta"
+            "value" : "File tidak dapat diekspor dalam format ini."
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Il file non può essere esportato nel formato richiesto"
+            "value" : "Il file non può essere esportato in questo formato."
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ファイルを要求された形式にエクスポートできません"
+            "value" : "この形式ではファイルを書き出せません。"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "파일을 요청한 형식으로 내보낼 수 없습니다"
+            "value" : "이 포맷으로 파일을 내보낼 수 없습니다."
           }
         },
         "ms" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Fail tidak dapat dieksport ke format yang diminta"
+            "value" : "Fail tidak dapat dieksport dalam format ini."
           }
         },
         "nb" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Filen kan ikke eksporteres til ønsket format"
+            "value" : "Filen kan ikke eksporteres i dette formatet."
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Het bestand kan niet worden geëxporteerd naar het gevraagde formaat"
+            "value" : "Het bestand kan niet in deze structuur worden geëxporteerd."
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Nie można wyeksportować pliku do żądanego formatu"
+            "value" : "Nie można wyeksportować pliku w tym formacie."
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Não é possível exportar o arquivo para o formato solicitado"
+            "value" : "O arquivo não pode ser exportado neste formato."
           }
         },
         "pt-PT" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "O ficheiro não pode ser exportado para o formato solicitado"
+            "value" : "O ficheiro não pode ser exportado neste formato."
           }
         },
         "ro" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Fișierul nu poate fi exportat în formatul solicitat"
+            "value" : "Fișierul nu poate fi exportat în acest format."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Не удалось экспортировать файл в запрошенный формат"
+            "value" : "Не удается экспортировать файл в этом формате."
           }
         },
         "sk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Súbor nie je možné exportovať do požadovaného formátu"
+            "value" : "Súbor sa nedá exportovať v tomto formáte."
           }
         },
         "sv" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Filen kan inte exporteras till det begärda formatet"
+            "value" : "Filen kan inte exporteras i det här formatet."
           }
         },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ไม่สามารถส่งออกไฟล์ในรูปแบบที่ร้องขอได้"
+            "value" : "ไม่สามารถส่งออกไฟล์ในรูปแบบนี้ได้"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dosya, istenilen biçime aktarılmıyor"
+            "value" : "Dosya bu biçimde dışa aktarılamıyor."
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Не вдалося експортувати файл у запитуваний формат"
+            "value" : "Не вдається експортувати файл у цьому форматі."
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Tệp không thể xuất sang định dạng yêu cầu"
+            "value" : "Không thể xuất tệp ở định dạng này."
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "無法將檔案匯出為請求的格式"
+            "value" : "無法以此格式輸出檔案。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "无法将文件导出为请求的格式"
+            "value" : "无法以此格式导出文件。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "無法將文件匯出為請求的格式"
+            "value" : "無法以此格式輸出檔案。"
+          }
+        }
+      }
+    },
+    "The file is damaged and can’t be opened." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الملف تالف ولا يمكن فتحه."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "El fitxer està malmès i no es pot obrir."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Soubor je poškozený a nelze ho otevřít."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Filen er beskadiget og kan ikke åbnes."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Die Datei ist beschädigt und kann nicht geöffnet werden."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Το αρχείο είναι κατεστραμμένο και δεν μπορεί να ανοίξει."
+          }
+        },
+        "en-AU" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The file is damaged and can’t be opened."
+          }
+        },
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The file is damaged and can’t be opened."
+          }
+        },
+        "en-IN" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The file is damaged and can’t be opened."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "El archivo está dañado y no se puede abrir."
+          }
+        },
+        "es-419" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "El archivo está dañado y no se puede abrir."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tiedosto on vioittunut, eikä sitä voi avata."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Le fichier est endommagé et ne peut pas être ouvert."
+          }
+        },
+        "fr-CA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Le fichier est endommagé et ne peut pas être ouvert."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "הקובץ פגום ולא ניתן לפתוח אותו."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "फ़ाइल क्षतिग्रस्त है और खोली नहीं जा सकती।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Datoteka je oštećena i ne može se otvoriti."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A fájl sérült, és nem nyitható meg."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "File rusak dan tidak dapat dibuka."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Il file è danneggiato e non può essere aperto."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ファイルが破損しているため開けません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "파일이 손상되어 열 수 없습니다."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fail rosak dan tidak dapat dibuka."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Filen er skadet og kan ikke åpnes."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Het bestand is beschadigd en kan niet worden geopend."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Plik jest uszkodzony i nie można go otworzyć."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "O arquivo está danificado e não pode ser aberto."
+          }
+        },
+        "pt-PT" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "O ficheiro está danificado e não pode ser aberto."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fișierul este deteriorat și nu poate fi deschis."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Файл поврежден, и его не удается открыть."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Súbor je poškodený a nedá sa otvoriť."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Filen är skadad och kan inte öppnas."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไฟล์เสียหายและไม่สามารถเปิดได้"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dosya hasarlı olduğu için açılamıyor."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Файл пошкоджено, і його неможливо відкрити."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tệp bị hỏng và không thể mở."
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "檔案已損毀，無法開啟。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文件已损坏，无法打开。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "檔案已損毀，無法打開。"
+          }
+        }
+      }
+    },
+    "This document type isn’t supported." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "نوع المستند هذا غير مدعوم."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aquest tipus de document no és compatible."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tento typ dokumentu není podporován."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Denne dokumenttype understøttes ikke."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dieser Dokumenttyp wird nicht unterstützt."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Αυτός ο τύπος εγγράφου δεν υποστηρίζεται."
+          }
+        },
+        "en-AU" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This document type isn’t supported."
+          }
+        },
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This document type isn’t supported."
+          }
+        },
+        "en-IN" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This document type isn’t supported."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Este tipo de documento no es compatible."
+          }
+        },
+        "es-419" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Este tipo de documento no es compatible."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tätä asiakirjatyyppiä ei tueta."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ce type de document n’est pas pris en charge."
+          }
+        },
+        "fr-CA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ce type de document n’est pas pris en charge."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "סוג מסמך זה אינו נתמך."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "यह दस्तावेज़ प्रकार समर्थित नहीं है।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ova vrsta dokumenta nije podržana."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ez a dokumentumtípus nem támogatott."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Jenis dokumen ini tidak didukung."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Questo tipo di documento non è supportato."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この書類の種類には対応していません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 문서 유형은 지원되지 않습니다."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Jenis dokumen ini tidak disokong."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Denne dokumenttypen støttes ikke."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dit documenttype wordt niet ondersteund."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ten typ dokumentu nie jest obsługiwany."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Este tipo de documento não é compatível."
+          }
+        },
+        "pt-PT" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Este tipo de documento não é suportado."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Acest tip de document nu este acceptat."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Этот тип документа не поддерживается."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tento typ dokumentu nie je podporovaný."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Den här dokumenttypen stöds inte."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ไม่รองรับเอกสารประเภทนี้"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bu belge türü desteklenmiyor."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Цей тип документа не підтримується."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Loại tài liệu này không được hỗ trợ."
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不支援此文件類型。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不支持此文稿类型。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不支援此文件類型。"
+          }
+        }
+      }
+    },
+    "You don’t have permission to open this file." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ليس لديك إذن لفتح هذا الملف."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No tens permís per obrir aquest fitxer."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nemáte oprávnění otevřít tento soubor."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Du har ikke tilladelse til at åbne denne fil."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Du hast nicht die erforderlichen Zugriffsrechte, um diese Datei zu öffnen."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Δεν έχετε άδεια να ανοίξετε αυτό το αρχείο."
+          }
+        },
+        "en-AU" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "You don’t have permission to open this file."
+          }
+        },
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "You don’t have permission to open this file."
+          }
+        },
+        "en-IN" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "You don’t have permission to open this file."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No tienes permiso para abrir este archivo."
+          }
+        },
+        "es-419" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No tienes permiso para abrir este archivo."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sinulla ei ole oikeutta avata tätä tiedostoa."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vous n’avez pas l’autorisation d’ouvrir ce fichier."
+          }
+        },
+        "fr-CA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vous n’avez pas l’autorisation d’ouvrir ce fichier."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "אין לך הרשאה לפתוח את הקובץ הזה."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "आपको इस फ़ाइल को खोलने की अनुमति नहीं है।"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nemate dopuštenje za otvaranje ove datoteke."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nincs jogosultsága a fájl megnyitásához."
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anda tidak memiliki izin untuk membuka file ini."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Non disponi dell’autorizzazione per aprire questo file."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このファイルを開くアクセス権がありません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 파일을 열 수 있는 권한이 없습니다."
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anda tiada keizinan untuk membuka fail ini."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Du har ikke tilgang til å åpne denne filen."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Je hebt geen bevoegdheden om dit bestand te openen."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nie masz uprawnień do otwarcia tego pliku."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Você não tem permissão para abrir este arquivo."
+          }
+        },
+        "pt-PT" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Não tem permissão para abrir este ficheiro."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nu aveți permisiunea de a deschide acest fișier."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "У Вас нет разрешения на открытие этого файла."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nemáte oprávnenie na otvorenie tohto súboru."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Du har inte behörighet att öppna den här filen."
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "คุณไม่มีสิทธิ์เปิดไฟล์นี้"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bu dosyayı açma izniniz yok."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ви не маєте дозволу на відкриття цього файлу."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bạn không có quyền mở tệp này."
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你沒有開啟此檔案的權限。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你没有打开此文件的权限。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你沒有打開此檔案的權限。"
           }
         }
       }

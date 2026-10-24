@@ -61,7 +61,7 @@ struct ContentView: View {
                             .tag(index)
                     }
                 } label: {
-                    Text("Show Chapter")
+                    Text("Chapter")
                 }
                 .padding()
                 ScrollView {
@@ -83,21 +83,21 @@ struct ContentView: View {
             Divider()
             HStack {
                 
-                Picker("Output format", selection: $outputFormat) {
-                    Text("Original Content")
+                Picker("Output Format", selection: $outputFormat) {
+                    Text("Original", comment: "The document’s original content, before conversion.")
                         .tag(nil as ExportFileType?)
                     ForEach(ExportFileType.allCases, id: \.self) { item in
-                        Text(item.rawValue)
+                        Text(formatName(item))
                             .tag(item as ExportFileType?)
                     }
                 }
             
                 Spacer()
-                Menu("Open File...") {
-                    Button("Select File From Disk...") {
+                Menu("Open…") {
+                    Button("Choose File…") {
                         isShowingFileImporter = true
                     }
-                    Button("Enter Web URL...") {
+                    Button("Open URL…") {
                         isShowingURLDialog = true
                     }
                 }
@@ -116,19 +116,19 @@ struct ContentView: View {
                             do {
                                 try await loadFileFromDisk(url: url)
                             } catch {
-                                text = "Error: \(error.localizedDescription)"
+                                text = String(localized: "Couldn’t open the document: \(error.localizedDescription)")
                             }
                         }
                     case .failure(let error):
-                        text = "Error: \(error.localizedDescription)"
+                        text = String(localized: "Couldn’t open the document: \(error.localizedDescription)")
                     }
                 }
-                .alert("Download a file from the web", isPresented: $isShowingURLDialog) {
-                    TextField("", text: $webURLString)
-                    Button("OK", action: downloadFileFromWeb)
+                .alert("Open URL", isPresented: $isShowingURLDialog) {
+                    TextField("URL", text: $webURLString)
+                    Button("Open", action: downloadFileFromWeb)
                     Button("Cancel", role: .cancel) { }
                 } message: {
-                    Text("Enter URL of any HTML, PDF, Word, Excel, or ePub file on the web")
+                    Text("Enter the URL of a webpage or document.")
                 }
             }
         }
@@ -140,7 +140,7 @@ struct ContentView: View {
             // However, if you drag a URL from Safari in Finder and then drag the webloc file onto this app, it does work.
             
             guard !urls.isEmpty else {
-                print("No URLs received")
+                print("Drop ignored: no URLs received")
                 return false
             }
             
@@ -154,7 +154,7 @@ struct ContentView: View {
                             try await self.parse(url: url)
                         }
                     } catch {
-                        print("Error importing file \(url): \(error.localizedDescription)")
+                        print("Document import failed for \(url): \(error.localizedDescription)")
                     }
                 }
             }
@@ -167,7 +167,7 @@ struct ContentView: View {
         .overlay {
             if isTargeted {
                 ContentUnavailableView {
-                    Label("Drop documents or directories here", systemImage: "arrow.down.doc")
+                    Label("Drop files or folders here", systemImage: "arrow.down.doc")
                 } description: {
                     EmptyView()
                 }
@@ -181,6 +181,16 @@ struct ContentView: View {
         }
     }
     
+    private func formatName(_ format: ExportFileType) -> String {
+        switch format {
+        case .plaintext: String(localized: "Plain Text")
+        case .html: "HTML"
+        case .xml: "XML"
+        case .markdown: "Markdown"
+        case .csv: "CSV"
+        }
+    }
+
     private func loadFileFromDisk(url: URL) async throws {
         
         // Create bookmark with read-only access to access file or directory outside of sandbox
@@ -218,14 +228,14 @@ struct ContentView: View {
     
     private func downloadFileFromWeb() {
         guard let url = URL(string: webURLString) else {
-            text = "Error: not a valid URL"
+            text = String(localized: "The URL isn’t valid.")
             return
         }
         Task {
             do {
                 try await parse(url: url)
             } catch {
-                print("Error: \(error)")
+                print("Document download failed for \(url): \(error.localizedDescription)")
             }
         }
     }
@@ -252,10 +262,10 @@ struct MetadataView: View {
     
     var body: some View {
         
-        GroupBox("File metadata") {
+        GroupBox("File Info") {
             Grid {
                 GridRow {
-                    Text("Filename:")
+                    Text("Name:")
                     Text(document.filename)
                         .frame(maxWidth: .infinity)
                 }
@@ -269,7 +279,7 @@ struct MetadataView: View {
                     Text(formatFileSize(document.fileSize))
                 }
                 GridRow {
-                    Text("Original location")
+                    Text("Location:")
                     HStack {
                         Text(document.originURL.path)
                         Button {
@@ -277,6 +287,8 @@ struct MetadataView: View {
                         } label: {
                             Image(systemName: "link")
                         }
+                        .accessibilityLabel("Open Original") // [VERIFY] Opens the document’s original location.
+                        .help("Open Original")
                         .buttonStyle(.borderless)
                         .controlSize(.mini)
                     }
@@ -286,32 +298,32 @@ struct MetadataView: View {
                     
                     switch document.status {
                     case .parsed:
-                        Text("Parsed")
+                        Text("Ready", comment: "The document has been converted and is ready to read.")
                     case .downloaded:
                         Text("Downloaded")
                     case .inProgress(let fraction):
-                        Text("Downloading in progress (\(fraction.formatted(.percent)))")
+                        Text("Downloading (\(fraction.formatted(.percent)))")
                     case .failed(let error):
                         Text("Download failed: \(error.localizedDescription)")
                             .foregroundStyle(.red)
                     case .awaitingFetch:
-                        Text("Not started")
+                        Text("Waiting")
                     }
                 }
                 GridRow {
-                    Text("Date created:")
+                    Text("Created:")
                     if let dateCreated = document.dateCreated {
                         Text(dateCreated, style: .date)
                     }
                 }
                 GridRow {
-                    Text("Date last modified:")
+                    Text("Modified:")
                     if let dateLastModified = document.dateModified {
                         Text(dateLastModified, style: .date)
                     }
                 }
                 GridRow {
-                    Text("Children:")
+                    Text("Items:", comment: "Number of documents contained in this folder or document.")
                     if let children = document.children {
                         Text("\(children.count)")
                     }

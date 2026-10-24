@@ -23,23 +23,23 @@ extension PicoDocsError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .documentTypeNotSupported:
-            return String(localized: "Document type not supported")
+            return String(localized: "This document type isn’t supported.", bundle: .module)
         case .parsingError:
-            return String(localized: "Error parsing document")
+            return String(localized: "The document couldn’t be read.", bundle: .module)
         case .emptyDocument:
-            return String(localized: "The document is empty")
+            return String(localized: "The document is empty.", bundle: .module)
         case .noContent:
-            return String(localized: "Document has no content")
+            return String(localized: "The document has no readable content.", bundle: .module)
         case .noAccess:
-            return String(localized: "No access to File")
+            return String(localized: "You don’t have permission to open this file.", bundle: .module)
         case .stale:
-            return String(localized: "Bookmark is stale. User needs to allow access to file(s) again")
+            return String(localized: "Select the file again to allow access.", bundle: .module)
         case .invalidURL:
-            return String(localized: "Invalid URL")
+            return String(localized: "The URL isn’t valid.", bundle: .module)
         case .unableToExportToRequestedFormat:
-            return String(localized: "The file cannot be exported to requested format")
+            return String(localized: "The file can’t be exported in this format.", bundle: .module)
         case .fileCorrupted:
-            return String(localized: "File is corrupted")
+            return String(localized: "The file is damaged and can’t be opened.", bundle: .module)
         }
     }
 }
