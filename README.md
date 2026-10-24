@@ -114,7 +114,7 @@ Create a PR to include your app here.
 
 ## Known Limitations
 
-- **iWork tables**: Tables are reconstructed as Markdown grids — placed inline at their original position in Pages, and with the slide that contains them in Keynote. Text, date/time, Boolean, number, and formula-result cells are decoded. Numbers and cached numeric results retain their stored values; currency, percentage, and other display formats are not applied. Formula-error cells without decoded error details render as `#ERROR!`; duration cells currently render as empty.
+- **iWork tables**: Tables are reconstructed as Markdown grids — placed inline at their original position in Pages, and with the slide that contains them in Keynote. Text, date/time, Boolean, number, and formula-result cells are decoded. Number, currency and percentage formats are applied (for example `62%` or `$1,234.50`) without rounding away stored digits; other display formats keep the stored value. Formula-error cells without decoded error details render as `#ERROR!`; duration cells currently render as empty.
 
 ## License
 

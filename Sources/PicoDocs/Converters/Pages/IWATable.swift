@@ -44,17 +44,18 @@ enum IWATable {
     private static let hyperlinkFieldType: UInt64 = 2032   // TSWP.HyperlinkFieldArchive (smart field)
     private static let tableModelTypes: Set<UInt64> = [6001, 6316]   // TST.TableModelArchive
     private static let inlineListType: UInt64 = 1        // DataList.list_type for inline cell text
+    private static let formatListType: UInt64 = 2        // DataList.list_type for number formats
     // Cell record value-type byte (record offset 1) selects how to read offset
     // +12: rich text key (f1==8 list), inline text key (f1==1 list), a date
-    // (double, seconds since 2001-01-01), or a number / formula result (IEEE-754
-    // decimal128). Duration cells aren't decoded yet.
+    // (double, seconds since 2001-01-01), or a number / currency value (IEEE-754
+    // decimal128), including formula results. Duration cells aren't decoded yet.
     private static let richTextCell: UInt8 = 0x09
     private static let inlineTextCell: UInt8 = 0x03
     private static let dateCell: UInt8 = 0x05
     private static let booleanCell: UInt8 = 0x06
     private static let errorCell: UInt8 = 0x08
     private static let numberCell: UInt8 = 0x02
-    private static let formulaCell: UInt8 = 0x0a
+    private static let currencyCell: UInt8 = 0x0a
 
     /// One ordered piece of a converted body — a run of text or a reconstructed
     /// table, in reading order. Text is raw; the caller normalizes it.
@@ -1068,6 +1069,7 @@ enum IWATable {
         var storageCache: [UInt64: String] = [:]
         var richMaps: [UInt64: [UInt32: String]] = [:]
         var inlineMaps: [UInt64: [UInt32: String]] = [:]
+        var formatMaps: [UInt64: [UInt32: NumberFormat]] = [:]
         for object in objects.values where object.type == dataListType {
             guard copies.active, output.active else { return [:] }
             // Dispatch on list_type (field 1) so each datalist's entries are fully
@@ -1081,6 +1083,8 @@ enum IWATable {
                 if let map = richTextMap(object, objects: objects, cache: &storageCache, budget: output, objectBudget: copies) { richMaps[object.identifier] = map }
             } else if listType == inlineListType {
                 if let map = inlineTextMap(object, budget: output, objectBudget: copies) { inlineMaps[object.identifier] = map }
+            } else if listType == formatListType {
+                if let map = numberFormatMap(object, budget: output, objectBudget: copies) { formatMaps[object.identifier] = map }
             }
         }
 
@@ -1091,10 +1095,11 @@ enum IWATable {
             guard let first = positions.first, byTile[first.id] == nil else { continue }
             let rich = object.references.lazy.compactMap { richMaps[$0] }.first ?? [:]
             let inline = object.references.lazy.compactMap { inlineMaps[$0] }.first ?? [:]
+            let formats = formatListID(object, objectBudget: copies).flatMap { formatMaps[$0] } ?? [:]
             var grid: [[String?]] = []
             for position in positions {
                 guard copies.active, output.active, let tile = objects[position.id] else { continue }
-                mergeTile(tile, rowOffset: position.offset ?? grid.count, rich: rich, inline: inline,
+                mergeTile(tile, rowOffset: position.offset ?? grid.count, rich: rich, inline: inline, formats: formats,
                           grid: &grid, budget: output, objectBudget: copies, preserveCellWhitespace: preserveCellWhitespace)
             }
             if let markdown = render(grid: grid, budget: output) { byTile[first.id] = markdown }
@@ -1140,6 +1145,20 @@ enum IWATable {
             result.append((id, nil))
         }
         return result
+    }
+
+    /// Cells in the current storage buffers key their formats into the list at
+    /// data store (model field 4) field 22.
+    private static func formatListID(_ model: IWAArchive.Object, objectBudget: IWAObjectBudget) -> UInt64? {
+        var modelReader = ProtobufReader(model.payload, objectBudget: objectBudget)
+        while let field = modelReader.next() {
+            guard field.number == 4, case .length(let store) = field.value else { continue }
+            var storeReader = ProtobufReader(store, objectBudget: objectBudget)
+            while let field = storeReader.next() {
+                if field.number == 22, case .length(let reference) = field.value { return referencedID(in: reference, objectBudget: objectBudget) }
+            }
+        }
+        return nil
     }
 
     // MARK: - Inline attachments
@@ -1353,7 +1372,7 @@ enum IWATable {
     /// Place tile-local row indexes in the model's native tile range. Missing
     /// rows stay absent, and sparse placement is admitted before padding.
     private static func mergeTile(_ tile: IWAArchive.Object, rowOffset: Int,
-                                  rich: [UInt32: String], inline: [UInt32: String], grid: inout [[String?]],
+                                  rich: [UInt32: String], inline: [UInt32: String], formats: [UInt32: NumberFormat], grid: inout [[String?]],
                                   budget: IWAOutputBudget, objectBudget: IWAObjectBudget, preserveCellWhitespace: Bool) {
         var reader = ProtobufReader(tile.payload, objectBudget: objectBudget), ordinal = 0
         while let field = reader.next() {
@@ -1372,7 +1391,7 @@ enum IWATable {
                     guard budget.reserve(count, copies: 32) else { return }
                     grid += Array(repeating: [], count: count)
                 }
-                grid[index] = cellTexts(inRow: rowBytes, rich: rich, inline: inline, budget: budget, objectBudget: objectBudget, preserveCellWhitespace: preserveCellWhitespace)
+                grid[index] = cellTexts(inRow: rowBytes, rich: rich, inline: inline, formats: formats, budget: budget, objectBudget: objectBudget, preserveCellWhitespace: preserveCellWhitespace)
                 ordinal += 1
             }
         }
@@ -1381,7 +1400,7 @@ enum IWATable {
     /// One TileRowInfo: uint16 offsets (field 7) into the cell buffer (field 6);
     /// 0xFFFF marks an absent cell.
     private static func cellTexts(inRow rowBytes: [UInt8],
-                                  rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?, objectBudget: IWAObjectBudget, preserveCellWhitespace: Bool) -> [String?] {
+                                  rich: [UInt32: String], inline: [UInt32: String], formats: [UInt32: NumberFormat], budget: IWAOutputBudget?, objectBudget: IWAObjectBudget, preserveCellWhitespace: Bool) -> [String?] {
         var buffer: [UInt8] = []
         var offsets: [UInt8] = []
         var reader = ProtobufReader(rowBytes, objectBudget: objectBudget)
@@ -1398,7 +1417,7 @@ enum IWATable {
             guard !Task.isCancelled, budget?.reserveCell() != false else { return [] }
             let offset = Int(offsets[i]) | (Int(offsets[i + 1]) << 8)
             i += 2
-            cells.append(offset == 0xFFFF ? nil : cellText(in: buffer, at: offset, rich: rich, inline: inline, budget: budget, preserveCellWhitespace: preserveCellWhitespace))
+            cells.append(offset == 0xFFFF ? nil : cellText(in: buffer, at: offset, rich: rich, inline: inline, formats: formats, budget: budget, preserveCellWhitespace: preserveCellWhitespace))
         }
         while let last = cells.last, last == nil { cells.removeLast() }   // trim trailing absent cells
         return cells
@@ -1406,11 +1425,11 @@ enum IWATable {
 
     /// The rendered text of a cell record (`05 <type> …`): rich or inline text via
     /// the string maps (key is a little-endian uint32 at +12), or a date (double,
-    /// seconds since 2001-01-01, at +12), or a number / formula result (decimal128
-    /// at +12), a Boolean double, or an explicit error state. Duration cells aren't decoded yet. Returns "" (a present-but-empty
+    /// seconds since 2001-01-01, at +12), or a number / currency value (decimal128
+    /// at +12, in its decimal, currency or percentage format), a Boolean double, or an explicit error state. Duration cells aren't decoded yet. Returns "" (a present-but-empty
     /// cell) on any unhandled type or out-of-bounds read.
     private static func cellText(in buffer: [UInt8], at offset: Int,
-                                 rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?, preserveCellWhitespace: Bool) -> String {
+                                 rich: [UInt32: String], inline: [UInt32: String], formats: [UInt32: NumberFormat], budget: IWAOutputBudget?, preserveCellWhitespace: Bool) -> String {
         guard offset >= 0, offset + 2 <= buffer.count, buffer[offset] == 0x05 else { return "" }
         switch buffer[offset + 1] {
         case richTextCell:
@@ -1434,8 +1453,12 @@ enum IWATable {
             // IDs, not an inline error enum. Some native files have no error
             // table detail; retain the error state without inventing its kind.
             return "#ERROR!"
-        case numberCell, formulaCell:
-            return decimalString(in: buffer, at: offset + 12)
+        case numberCell, currencyCell:
+            // A currency cell keys its currency format; a number cell, or a
+            // currency cell without one, keys the number format.
+            let currency = buffer[offset + 1] == currencyCell ? formatKey(in: buffer, at: offset, bit: 14) : nil
+            let format = (currency ?? formatKey(in: buffer, at: offset, bit: 13)).flatMap { formats[$0] }
+            return decimalString(in: buffer, at: offset + 12, format: format)
         default:
             return ""
         }
@@ -1446,7 +1469,8 @@ enum IWATable {
     /// coefficient (any precision) into a decimal string — plain for everyday
     /// magnitudes, scientific notation for extreme exponents. Returns "" only for
     /// the rare large-coefficient encoding (combination field 0b11) or out-of-bounds.
-    private static func decimalString(in buffer: [UInt8], at offset: Int) -> String {
+    /// A supported `format` presents the same digits.
+    private static func decimalString(in buffer: [UInt8], at offset: Int, format: NumberFormat? = nil) -> String {
         guard offset >= 0, offset + 16 <= buffer.count else { return "" }
         let high = buffer[offset + 15]
         guard (high >> 5) & 0x3 != 0x3 else { return "" }     // large-coefficient form
@@ -1454,16 +1478,17 @@ enum IWATable {
         // Coefficient is the low 113 bits: bytes 0-13 (112 bits) + bit 112.
         var coefficient = Array(buffer[offset ..< offset + 14])
         coefficient.append(buffer[offset + 14] & 1)
-        return formatDecimal(negative: high & 0x80 != 0, coefficient: coefficient, exponent: exponent)
+        let digits = decimalDigits(coefficient)
+        if let format, let shown = format.display(negative: high & 0x80 != 0, digits: digits, exponent: exponent) { return shown }
+        return formatDecimal(negative: high & 0x80 != 0, digits: digits, exponent: exponent)
     }
 
-    /// Formats `coefficient × 10^exponent` (coefficient as a little-endian
-    /// magnitude): a plain decimal for everyday magnitudes — trimming trailing
+    /// Formats `digits × 10^exponent` (`digits` from `decimalDigits`): a plain
+    /// decimal for everyday magnitudes — trimming trailing
     /// fractional zeros (420×10⁻² → "4.2", 35×10⁻² → "0.35") — or scientific
     /// notation when the magnitude is extreme (e.g. "1E-200"), so no valid value
     /// is dropped. A zero coefficient is always "0".
-    private static func formatDecimal(negative: Bool, coefficient: [UInt8], exponent: Int) -> String {
-        let digits = decimalDigits(coefficient)
+    private static func formatDecimal(negative: Bool, digits: String, exponent: Int) -> String {
         if digits == "0" { return "0" }
         let sign = negative ? "-" : ""
 
@@ -1510,6 +1535,148 @@ enum IWATable {
             digits = String(remainder) + digits
         }
         return digits.isEmpty ? "0" : digits
+    }
+
+    /// Cell records store optional fields after the 12-byte header in flag-bit
+    /// order (flags are the uint32 at +8): decimal128 (bit 0), a double and
+    /// seconds (bits 1–2), then 4-byte ids, including the number (bit 13) and
+    /// currency (bit 14) format keys.
+    private static func formatKey(in buffer: [UInt8], at offset: Int, bit: Int) -> UInt32? {
+        guard let flags = readUInt32(buffer, at: offset + 8), flags & (1 << bit) != 0 else { return nil }
+        var position = offset + 12
+        for lower in 0 ..< bit where flags & (1 << lower) != 0 { position += lower == 0 ? 16 : (lower < 3 ? 8 : 4) }
+        return readUInt32(buffer, at: position)
+    }
+
+    /// A number-format DataList (`list_type == 2`): entry key → its
+    /// TSK.FormatStructArchive (field 6), for the formats `NumberFormat` applies.
+    private static func numberFormatMap(_ object: IWAArchive.Object, budget: IWAOutputBudget?, objectBudget: IWAObjectBudget) -> [UInt32: NumberFormat]? {
+        var listType: UInt64?
+        var map: [UInt32: NumberFormat] = [:]
+        var reader = ProtobufReader(object.payload, objectBudget: objectBudget)
+        while let field = reader.next() {
+            switch (field.number, field.value) {
+            case (1, .varint(let type)):
+                listType = type
+            case (3, .length(let entryBytes)):
+                var key: UInt32?
+                var format: NumberFormat?
+                var entryReader = ProtobufReader(entryBytes, objectBudget: objectBudget)
+                while let entryField = entryReader.next() {
+                    switch (entryField.number, entryField.value) {
+                    case (1, .varint(let k)): key = UInt32(truncatingIfNeeded: k)
+                    case (6, .length(let bytes)): format = NumberFormat(bytes, objectBudget: objectBudget)
+                    default: continue
+                    }
+                }
+                if let key, let format {
+                    guard budget?.reserve(64) != false else { return nil }
+                    map[key] = format
+                }
+            default:
+                continue
+            }
+        }
+        guard listType == formatListType else { return nil }
+        return map.isEmpty ? nil : map
+    }
+
+    /// The decimal, currency and percentage formats, presented with Numbers'
+    /// English separators. Fixed decimal places pad a value but never round its
+    /// stored digits away, so the text keeps the cell's exact value.
+    struct NumberFormat: Equatable {
+        enum Style: Equatable { case decimal, percent, currency(symbol: String) }
+        let style: Style
+        let decimalPlaces: Int?          // nil: automatic
+        let groupsThousands: Bool
+        let parenthesizesNegatives: Bool
+
+        /// English (CLDR) symbols; other ISO codes print as "CHF 12.50".
+        private static let currencySymbols: [String: String] = [
+            "USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥", "CNY": "CN¥", "INR": "₹", "KRW": "₩", "ILS": "₪",
+            "CAD": "CA$", "AUD": "A$", "NZD": "NZ$", "HKD": "HK$", "MXN": "MX$", "BRL": "R$", "TWD": "NT$"
+        ]
+
+        /// Reads format_type (1), decimal_places (2), currency_code (3),
+        /// negative_style (4), show_thousands_separator (5) and
+        /// use_accounting_style (6). Other format types keep the stored value.
+        init?(_ bytes: [UInt8], objectBudget: IWAObjectBudget) {
+            var type: UInt64?, places: UInt64?, code: [UInt8]?, negativeStyle: UInt64 = 0
+            var grouping = false, accounting = false
+            var reader = ProtobufReader(bytes, objectBudget: objectBudget)
+            while let field = reader.next() {
+                switch (field.number, field.value) {
+                case (1, .varint(let value)): type = value
+                case (2, .varint(let value)): places = value
+                case (3, .length(let value)): code = value
+                case (4, .varint(let value)): negativeStyle = value
+                case (5, .varint(let value)): grouping = value != 0
+                case (6, .varint(let value)): accounting = value != 0
+                default: continue
+                }
+            }
+            switch type {
+            case 256: style = .decimal
+            case 258: style = .percent
+            case 257:
+                guard let code, code.count == 3, code.allSatisfy({ (65...90).contains($0) }) else { return nil }
+                let iso = String(decoding: code, as: UTF8.self)
+                style = .currency(symbol: Self.currencySymbols[iso] ?? iso + " ")
+            default: return nil
+            }
+            // 253 is automatic. More places than a decimal128's 34 digits isn't
+            // a usable fixed format.
+            if let places, places != 253 {
+                guard places <= 34 else { return nil }
+                decimalPlaces = Int(places)
+            } else {
+                decimalPlaces = nil
+            }
+            groupsThousands = grouping
+            // Negative styles 2 and 3 are parentheses (3 also red); the minus
+            // sign stands in for red-only, which text can't show.
+            parenthesizesNegatives = negativeStyle == 2 || negativeStyle == 3 || accounting
+        }
+
+        /// `digits × 10^exponent` in this format, or nil for an extreme magnitude,
+        /// which keeps `formatDecimal`'s scientific notation.
+        func display(negative: Bool, digits: String, exponent: Int) -> String? {
+            let zero = digits == "0"
+            let exponent = zero ? 0 : exponent + (style == .percent ? 2 : 0)
+            let adjusted = exponent + digits.count - 1
+            guard adjusted >= -6, adjusted < 21 else { return nil }
+            var integer: String, fraction: String
+            if exponent >= 0 {
+                integer = digits + String(repeating: "0", count: exponent)
+                fraction = ""
+            } else {
+                let padded = String(repeating: "0", count: max(0, 1 - exponent - digits.count)) + digits
+                let split = padded.index(padded.endIndex, offsetBy: exponent)
+                integer = String(padded[..<split])
+                fraction = String(padded[split...])
+            }
+            let places = decimalPlaces ?? 0
+            while fraction.count > places, fraction.hasSuffix("0") { fraction.removeLast() }
+            if fraction.count < places { fraction += String(repeating: "0", count: places - fraction.count) }
+            integer = String(integer.drop(while: { $0 == "0" }))
+            if integer.isEmpty { integer = "0" }
+            if groupsThousands {
+                var grouped = ""
+                for (index, digit) in integer.enumerated() {
+                    if index > 0, (integer.count - index) % 3 == 0 { grouped.append(",") }
+                    grouped.append(digit)
+                }
+                integer = grouped
+            }
+            var body = fraction.isEmpty ? integer : integer + "." + fraction
+            switch style {
+            case .decimal: break
+            case .percent: body += "%"
+            case .currency(let symbol): body = symbol + body
+            }
+            guard negative, !zero else { return body }
+            return parenthesizesNegatives ? "(" + body + ")" : "-" + body
+        }
     }
 
     private static func readUInt32(_ buffer: [UInt8], at offset: Int) -> UInt32? {
