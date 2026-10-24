@@ -34,6 +34,7 @@ public struct WordConverter: DocumentConverter {
 
         var relationships = try Self.parseRelationships(archive)
         let document = try SwiftSoup.parse(documentXML, "", SwiftSoup.Parser.xmlParser())
+        defer { Self.releaseTree(document) }
         guard let body = try document.getElementsByTag("w:body").first() else {
             throw PicoDocsError.emptyDocument
         }
@@ -272,6 +273,19 @@ public struct WordConverter: DocumentConverter {
             blocks.append(contentsOf: try renderBlocks(in: txbx, relationships: relationships, numbering: numbering, tableBudget: tableBudget))
         }
         return blocks
+    }
+
+    /// Frees a parsed tree without recursion. A SwiftSoup node releases its
+    /// children from its deinit, so dropping a deeply nested document (5,000
+    /// nested tables) recursed once per level and overflowed the 512 KB stacks
+    /// of Swift concurrency's threads on Apple platforms. Emptying every element
+    /// top-down leaves only childless nodes to free.
+    static func releaseTree(_ root: Element) {
+        var pending: [Node] = [root]
+        while let node = pending.popLast() {
+            pending.append(contentsOf: node.getChildNodes())
+            (node as? Element)?.empty()
+        }
     }
 
     /// The nearest ancestor element with the given (lowercased) tag name.
