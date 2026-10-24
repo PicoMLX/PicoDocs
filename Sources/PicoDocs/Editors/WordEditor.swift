@@ -9,9 +9,11 @@
 //  Fidelity guarantee (asserted by WordEditorTests):
 //   1. Only `word/document.xml` changes; every other part's uncompressed bytes
 //      are identical. (The ZIP container itself is rebuilt and recompressed.)
-//   2. Within `document.xml`, only the matched run text changes. The one
-//      exception is `xml:space="preserve"`, added to an edited `<w:t>` when the
-//      edit leaves it with leading or trailing whitespace Word would drop.
+//   2. Within `document.xml`, only the matched run text changes, with two
+//      narrow exceptions that keep the result equivalent and well-formed:
+//      `xml:space="preserve"` is added to an edited `<w:t>` left with leading
+//      or trailing whitespace Word would drop, and a literal `>` right after an
+//      edit is written as `&gt;` when the edit would otherwise form `]]>`.
 //  Editing text reflows layout, so pagination can shift; that's inherent to any
 //  text edit.
 //
@@ -69,9 +71,12 @@ struct WordEditor {
     }
 
     /// A replacement's slice of one run, in UTF-16 offsets within the run.
+    /// `bytes` is the escaped `text`, built once per edit and shared by all of
+    /// its occurrences.
     private struct Cut {
         let range: Range<Int>
         let text: String
+        let bytes: [UInt8]
     }
 
     private static func splices(for edits: [TextEdit], at ranges: [[Range<Int>]], in snapshot: WordEditableText, xml: [UInt8]) throws -> [Splice] {
@@ -84,9 +89,11 @@ struct WordEditor {
             // Write what the file will actually hold: XML can't carry some
             // control characters, so they're dropped here as in the exporters.
             let replacement = OOXMLPackageWriter.xmlSafeText(edit.replace)
+            let bytes = Array(OOXMLPackageWriter.escape(replacement).utf8)
             for range in editRanges {
                 for (position, (segment, local)) in try coveredRuns(range, in: snapshot).enumerated() {
-                    cuts[segment, default: []].append(Cut(range: local, text: position == 0 ? replacement : ""))
+                    let cut = position == 0 ? Cut(range: local, text: replacement, bytes: bytes) : Cut(range: local, text: "", bytes: [])
+                    cuts[segment, default: []].append(cut)
                 }
             }
         }
@@ -102,7 +109,7 @@ struct WordEditor {
                       let upper = cursor.byteIndex(at: cut.range.upperBound) else {
                     throw PicoDocsError.parsingError
                 }
-                splices.append(Splice(range: lower..<upper, bytes: Array(OOXMLPackageWriter.escape(cut.text).utf8)))
+                splices.append(Splice(range: lower..<upper, bytes: cut.bytes))
             }
             if !run.preservesSpace,
                needsPreservedSpace(units[snapshot.segments[segment].range], after: sorted) {
@@ -189,21 +196,31 @@ struct WordEditor {
         }
     }
 
-    /// Whether a run's text, after `cuts`, starts or ends with whitespace Word
-    /// would drop from a `<w:t>` without `xml:space="preserve"`.
+    /// Whether a run's text, after `cuts` (sorted, non-overlapping), starts or
+    /// ends with whitespace Word would drop from a `<w:t>` without
+    /// `xml:space="preserve"`. Only the edited text's first and last code units
+    /// matter, so it's never materialized.
     private static func needsPreservedSpace(_ text: ArraySlice<UInt16>, after cuts: [Cut]) -> Bool {
-        var edited: [UInt16] = []
-        edited.reserveCapacity(text.count)
-        var position = text.startIndex
-        for cut in cuts {
-            edited += text[position..<text.startIndex + cut.range.lowerBound]
-            edited += cut.text.utf16
-            position = text.startIndex + cut.range.upperBound
+        func isXMLWhitespace(_ unit: UInt16?) -> Bool { unit == 0x20 || unit == 0x09 || unit == 0x0A || unit == 0x0D }
+        func first() -> UInt16? {
+            var position = text.startIndex
+            for cut in cuts {
+                if position < text.startIndex + cut.range.lowerBound { return text[position] }
+                if let unit = cut.text.utf16.first { return unit }
+                position = text.startIndex + cut.range.upperBound
+            }
+            return position < text.endIndex ? text[position] : nil
         }
-        edited += text[position...]
-        func isXMLWhitespace(_ unit: UInt16) -> Bool { unit == 0x20 || unit == 0x09 || unit == 0x0A || unit == 0x0D }
-        guard let first = edited.first, let last = edited.last else { return false }
-        return isXMLWhitespace(first) || isXMLWhitespace(last)
+        func last() -> UInt16? {
+            var position = text.endIndex
+            for cut in cuts.reversed() {
+                if text.startIndex + cut.range.upperBound < position { return text[position - 1] }
+                if let unit = cut.text.utf16.last { return unit }
+                position = text.startIndex + cut.range.lowerBound
+            }
+            return position > text.startIndex ? text[position - 1] : nil
+        }
+        return isXMLWhitespace(first()) || isXMLWhitespace(last())
     }
 
     /// Marks a run's `<w:t>` as preserving whitespace. The edge whitespace it
@@ -228,20 +245,44 @@ struct WordEditor {
 
     private static func apply(_ splices: [Splice], to xml: [UInt8]) throws -> [UInt8] {
         let sorted = splices.sorted { $0.range.lowerBound < $1.range.lowerBound }
+        let tooLarge = ExporterError.serializationFailed("The edited \(documentPath) exceeds the reader-compatible \(maximumDocumentBytes)-byte limit")
+        // Check the size before allocating; escaping a `>` below only adds bytes.
+        let size = sorted.reduce(xml.count) { $0 + $1.bytes.count - $1.range.count }
+        guard size <= maximumDocumentBytes else { throw tooLarge }
         var output: [UInt8] = []
-        output.reserveCapacity(xml.count + sorted.reduce(0) { $0 + $1.bytes.count })
+        output.reserveCapacity(size)
         var position = 0
-        for splice in sorted {
+        for (index, splice) in sorted.enumerated() {
             guard splice.range.lowerBound >= position else { throw PicoDocsError.editsOverlap }
             output += xml[position..<splice.range.lowerBound]
             output += splice.bytes
             position = splice.range.upperBound
+            let limit = index + 1 < sorted.count ? sorted[index + 1].range.lowerBound : xml.count
+            if let terminator = completedTerminator(at: position, before: limit, in: xml, after: output) {
+                output += xml[position..<terminator]
+                output += Array("&gt;".utf8)
+                position = terminator + 1
+            }
         }
         output += xml[position...]
-        guard output.count <= maximumDocumentBytes else {
-            throw ExporterError.serializationFailed("The edited \(documentPath) exceeds the reader-compatible \(maximumDocumentBytes)-byte limit")
-        }
+        guard output.count <= maximumDocumentBytes else { throw tooLarge }
         return output
+    }
+
+    /// A literal `>` in the raw bytes at `position` (or one byte later) that,
+    /// after the `output` written so far, would complete `]]>` — a sequence XML
+    /// forbids in character data. Inserted text never contains `>` (it's
+    /// escaped), so any new `]]>` ends within two bytes of a splice.
+    private static func completedTerminator(at position: Int, before limit: Int, in xml: [UInt8], after output: [UInt8]) -> Int? {
+        let bracket = UInt8(ascii: "]")
+        let angle = UInt8(ascii: ">")
+        if position < limit, xml[position] == angle, output.suffix(2).elementsEqual([bracket, bracket]) {
+            return position
+        }
+        if position + 1 < limit, xml[position] == bracket, xml[position + 1] == angle, output.last == bracket {
+            return position + 1
+        }
+        return nil
     }
 
     // MARK: - Package

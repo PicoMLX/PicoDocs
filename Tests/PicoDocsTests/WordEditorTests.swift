@@ -277,6 +277,27 @@ struct WordEditorTests {
         #expect(try part(result.data, WordEditor.documentPath) == documentXML("<w:p><w:r>\(expected)</w:r></w:p>"))
     }
 
+    @Test("An edit never joins text into the forbidden ]]> sequence", arguments: [
+        ("abc>", "abc", "]]", "]]&gt;"),
+        ("]]x>", "x", "", "]]&gt;"),
+        ("x]>", "x", "]", "]]&gt;"),
+        ("a]b>", "a", "]", "]]b>"),
+    ])
+    func noCDataTerminator(text: String, find: String, replace: String, expected: String) throws {
+        let (_, result) = try edit("<w:p><w:r><w:t>\(text)</w:t></w:r></w:p>", [TextEdit(find: find, replace: replace)])
+        let xml = try part(result.data, WordEditor.documentPath)
+        #expect(xml == documentXML("<w:p><w:r><w:t>\(expected)</w:t></w:r></w:p>"))
+        #expect(XMLParser(data: Data(xml.utf8)).parse())
+    }
+
+    @Test("Edits that would grow document.xml past the reader limit are rejected")
+    func documentSizeLimit() throws {
+        let input = try docx("<w:p><w:r><w:t>\(String(repeating: "a", count: 20_000))</w:t></w:r></w:p>")
+        #expect(throws: ExporterError.self) {
+            try WordEditor().applyEdits([TextEdit(find: "a", replace: String(repeating: "b", count: 2_000), replaceAll: true)], to: input)
+        }
+    }
+
     // MARK: - Rejected packages
 
     @Test("Input that isn't a usable DOCX package is rejected")
