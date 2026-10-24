@@ -30,7 +30,14 @@ indirect enum MarkdownInline: Equatable {
 }
 
 enum MarkdownInlineParser {
-    final class ParseMetrics { var copiedLabelBytes = 0 }
+    final class ParseMetrics {
+        var copiedLabelBytes = 0
+        /// Cumulative label bytes nested link/image parses may copy. Each
+        /// nesting level copies and reparses its label again, so a deep chain
+        /// around one payload would otherwise cost depth × payload. `parse`
+        /// derives it from the top-level input when unset.
+        var labelByteBudget: Int?
+    }
     /// Integer offsets without a Character-sized allocation for every character.
     /// Sequential and nearby reads reuse a cursor; arbitrary jumps start from a
     /// sparse checkpoint, at most 255 graphemes away. Both parser passes share
@@ -66,6 +73,16 @@ enum MarkdownInlineParser {
             offset = position
             return text[cursor]
         }
+        /// UTF-8 length of `range` without materializing its characters.
+        func utf8Count(_ range: Range<Int>) -> Int {
+            let lower = stringIndex(range.lowerBound)
+            return text.utf8.distance(from: lower, to: stringIndex(range.upperBound))
+        }
+        private func stringIndex(_ position: Int) -> String.Index {
+            guard position < endIndex else { return text.endIndex }
+            _ = self[position]
+            return cursor
+        }
     }
 
     private static let structuredRegex = try! NSRegularExpression(pattern: "\u{E020}([0-9]+)\u{E021}")
@@ -83,6 +100,8 @@ enum MarkdownInlineParser {
             return text.isEmpty ? [] : [.text(text)]
         }
         if let literal = escapeOnlyText(text) { return literal.isEmpty ? [] : [.text(literal)] }
+        let parseMetrics = metrics ?? ParseMetrics()
+        if parseMetrics.labelByteBudget == nil { parseMetrics.labelByteBudget = 4 * text.utf8.count + 65_536 }
         let chars = IndexedText(text)
         // Inspect backslash parity only at actual delimiters. The preceding
         // runs are disjoint, so this is linear without a per-escape index/set.
@@ -223,7 +242,7 @@ enum MarkdownInlineParser {
 
             // Image: ![alt](dest)
             if c == "!", i + 1 < chars.count, chars[i + 1] == "[",
-               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: labelCloses[i + 1], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth, tableCell: tableCell, metrics: metrics) {
+               let parsed = parseLinkOrImage(chars, from: i, isImage: true, labelEnd: labelCloses[i + 1], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth, tableCell: tableCell, metrics: parseMetrics) {
                 append(parsed.node)
                 i = parsed.next
                 continue
@@ -231,7 +250,7 @@ enum MarkdownInlineParser {
 
             if c == "[" {
                 // Link: [label](dest)
-                if !deactivatedLinks.contains(i), let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: labelCloses[i], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth, tableCell: tableCell, metrics: metrics) {
+                if !deactivatedLinks.contains(i), let parsed = parseLinkOrImage(chars, from: i, isImage: false, labelEnd: labelCloses[i], parenCloses: parenCloses, nextAngle: nextAngle, depth: depth, tableCell: tableCell, metrics: parseMetrics) {
                     append(parsed.node)
                     i = parsed.next
                     continue
@@ -312,6 +331,10 @@ enum MarkdownInlineParser {
         guard let labelEnd else { return nil }
         guard let destination = linkDestination(chars, labelEnd: labelEnd, parenCloses: parenCloses, nextAngle: nextAngle) else { return nil }
         let dest = destination.text
+        // Refuse a nested copy that would exceed the top-level budget before
+        // allocating it; the syntax then stays literal text.
+        if let metrics, let budget = metrics.labelByteBudget,
+           metrics.copiedLabelBytes + chars.utf8Count((bracket + 1)..<labelEnd) > budget { return nil }
         let labelText = String(chars[(bracket + 1)..<labelEnd])
         metrics?.copiedLabelBytes += labelText.utf8.count
         let label = parse(labelText, depth: depth + 1, tableCell: tableCell, metrics: metrics)
