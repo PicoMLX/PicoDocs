@@ -39,7 +39,7 @@ public struct PowerPointConverter: DocumentConverter {
 
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
         try Task.checkCancellation()
-        guard let zip = Archive(data: data, accessMode: .read) else {
+        guard let zip = ZIPEntryReader.archive(data) else {
             throw PicoDocsError.fileCorrupted
         }
         let archive = PowerPointPackage(archive: zip)

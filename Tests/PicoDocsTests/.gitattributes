@@ -1,0 +1,2 @@
+# Third-party fixtures are byte-exact (CRLF CSVs, binary-ish RTF): no EOL normalization.
+Resources/Corpus/** -text
