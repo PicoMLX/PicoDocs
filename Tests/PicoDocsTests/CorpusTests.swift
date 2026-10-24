@@ -139,7 +139,7 @@ struct CorpusTests {
         #expect(result.sections.compactMap(\.sheetName) == sheets)
         if expected.isEmpty {
             // Their worksheets hold no cells.
-            #expect(result.sections.allSatisfy(\.markdown.isEmpty))
+            #expect(result.sections.allSatisfy { $0.markdown.isEmpty })
         } else {
             #expect(result.markdown().contains(expected))
         }
