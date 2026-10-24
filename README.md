@@ -90,6 +90,42 @@ Notes:
 - Custom or additional writers can be registered via `DocumentExporterRegistry`,
   mirroring `DocumentConverterRegistry` on the import side.
 
+## Editing in place (LLM find/replace, formatting preserved)
+
+When an LLM needs to *change* an existing document rather than regenerate it,
+`PicoDocsEngine.applyEdits(...)` makes **surgical, source-preserving** edits: it
+changes only the matched text in the original file and leaves everything else —
+styles, images, structure — intact. This avoids the silent corruption and lost
+formatting you get from "read the whole doc → let the model rewrite it → save".
+
+Edits are exact-match find/replace (the same contract as a code editor), so the
+model can only change text it quotes verbatim; anything it can't match exactly and
+unambiguously is rejected rather than guessed at.
+
+```swift
+// 1. Show the model the exact text to quote from (NOT the rendered Markdown —
+//    this is the string the editor itself searches, so quotes always match):
+let text = try await PicoDocsEngine.editableText(for: docxData, filename: "report.docx")
+
+// 2. Apply the model's edits; the result is a .docx with its formatting preserved:
+let result = try await PicoDocsEngine.applyEdits([
+    TextEdit(find: "Q3 revenue was $4.2M", replace: "Q3 revenue was $4.8M"),
+    TextEdit(find: "DRAFT", replace: "FINAL", replaceAll: true),
+], to: docxData, filename: "report.docx")
+// result.data  → edited .docx   result.applied → per-edit summary
+```
+
+Notes:
+- **DOCX only** today. Other formats throw `documentTypeNotSupported`; the lossy
+  fallback is to `convert` → edit the Markdown → `write(...)` (which does not
+  preserve the original's formatting).
+- Exact-match constrains *where and how much* changes — it does **not** verify the
+  replacement is factually correct; that stays the caller's responsibility.
+- Edits are all-or-nothing and must not overlap. A match that crosses a paragraph
+  break, hyperlink, field, content control, or tracked change is rejected
+  (`PicoDocsError.edit*`). Only `word/document.xml` is rewritten; every other part
+  is copied through unchanged.
+
 ## Setup for Apps
 
 ### Info.plist Configuration

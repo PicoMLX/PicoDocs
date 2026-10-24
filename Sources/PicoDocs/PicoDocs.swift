@@ -249,6 +249,57 @@ public enum PicoDocsEngine {
         return try write(result, to: format, registry: exportRegistry)
     }
 
+    // MARK: - Editing (surgical, source-preserving find/replace)
+
+    /// The document's visible, editable text — the exact string to show an LLM and
+    /// to quote `TextEdit.find` from.
+    ///
+    /// This is deliberately **not** `export(to: .plaintext)`: the renderer injects
+    /// list markers, table pipes, and footnote numbers, so a quote taken from it
+    /// could fail to match. This returns the string the editor itself searches, so
+    /// a verbatim quote always matches. Spans inside hyperlinks/fields/content
+    /// controls are included for natural reading order but can't be edited (an edit
+    /// touching them is rejected); hidden text is excluded.
+    ///
+    /// Throws `PicoDocsError.documentTypeNotSupported` when no editor handles the
+    /// input (only DOCX is supported today).
+    public static func editableText(
+        for data: Data,
+        filename: String? = nil,
+        mimeType: String? = nil,
+        url: URL? = nil,
+        registry: DocumentEditorRegistry = .default
+    ) async throws -> String {
+        let info = ContentTypeDetector.classify(
+            data,
+            info: makeStreamInfo(filename: filename, mimeType: mimeType, url: url, charset: nil)
+        )
+        return try await registry.editableText(data, info: info)
+    }
+
+    /// Apply exact-match find/replace `edits` in place, returning the edited
+    /// document in the **same binary format as the input** with its formatting
+    /// preserved (see `WordEditor` for the DOCX fidelity guarantee).
+    ///
+    /// All edits match against the same original snapshot, their targets must not
+    /// overlap, and application is all-or-nothing. Throws the `edit*` cases of
+    /// `PicoDocsError` for an unmatched/ambiguous/overlapping/boundary-crossing
+    /// edit, and `documentTypeNotSupported` when no editor handles the input.
+    public static func applyEdits(
+        _ edits: [TextEdit],
+        to data: Data,
+        filename: String? = nil,
+        mimeType: String? = nil,
+        url: URL? = nil,
+        registry: DocumentEditorRegistry = .default
+    ) async throws -> EditResult {
+        let info = ContentTypeDetector.classify(
+            data,
+            info: makeStreamInfo(filename: filename, mimeType: mimeType, url: url, charset: nil)
+        )
+        return try await registry.applyEdits(edits, to: data, info: info)
+    }
+
     // MARK: - StreamInfo construction
 
     static func makeStreamInfo(filename: String?, mimeType: String?, url: URL?, charset: String.Encoding?, enhanceReadability: Bool = true, enableOCR: Bool = true, sanitizeUnicode: Bool = false) -> StreamInfo {
