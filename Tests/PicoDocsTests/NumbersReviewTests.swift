@@ -101,10 +101,15 @@ import ZIPFoundation
         #expect(try PagesConverter.iwaComponents(in: archive, maximumEntryBytes: 12, maximumTotalBytes: 24).count == 2)
         let nestedBytes = B.makeZip([(name: "Document.iwa", data: payload)])
         let nested = try Archive(data: B.makeZip([(name: "Index.zip", data: Array(nestedBytes))]), accessMode: .read)
-        // The outer container is itself a ZIP entry and has the same entry cap.
-        #expect(throws: PicoDocsError.fileCorrupted) { try PagesConverter.iwaComponents(in: nested, maximumEntryBytes: nestedBytes.count - 1, maximumTotalBytes: nestedBytes.count + 12) }
-        #expect(throws: PicoDocsError.fileCorrupted) { try PagesConverter.iwaComponents(in: nested, maximumEntryBytes: nestedBytes.count, maximumTotalBytes: nestedBytes.count + 11) }
-        #expect(try PagesConverter.iwaComponents(in: nested, maximumEntryBytes: nestedBytes.count, maximumTotalBytes: nestedBytes.count + 12).count == 1)
+        // Index.zip has its own allowance; only the streams inside it take the
+        // per-stream cap and the stream total.
+        #expect(try PagesConverter.iwaComponents(in: nested, maximumEntryBytes: 12, maximumTotalBytes: 12, maximumContainerBytes: nestedBytes.count).count == 1)
+        #expect(throws: PicoDocsError.fileCorrupted) { try PagesConverter.iwaComponents(in: nested, maximumEntryBytes: 12, maximumTotalBytes: 12, maximumContainerBytes: nestedBytes.count - 1) }
+        #expect(throws: PicoDocsError.fileCorrupted) { try PagesConverter.iwaComponents(in: nested, maximumEntryBytes: 11, maximumTotalBytes: 12, maximumContainerBytes: nestedBytes.count) }
+        #expect(throws: PicoDocsError.fileCorrupted) { try PagesConverter.iwaComponents(in: nested, maximumEntryBytes: 12, maximumTotalBytes: 11, maximumContainerBytes: nestedBytes.count) }
+        // By default the container's allowance is the stream total.
+        #expect(try PagesConverter.iwaComponents(in: nested, maximumEntryBytes: 12, maximumTotalBytes: nestedBytes.count).count == 1)
+        #expect(throws: PicoDocsError.fileCorrupted) { try PagesConverter.iwaComponents(in: nested, maximumEntryBytes: 12, maximumTotalBytes: nestedBytes.count - 1) }
         let frames = B.snappyFrame(payload) + B.snappyFrame(payload)
         #expect(throws: Snappy.SnappyError.outputLimitExceeded) { try Snappy.decompressIWA(frames, maximumOutputBytes: 23) }
         #expect(try Snappy.decompressIWA(frames, maximumOutputBytes: 24).count == 24)

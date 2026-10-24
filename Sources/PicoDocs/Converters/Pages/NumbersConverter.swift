@@ -54,7 +54,10 @@ public struct NumbersConverter: DocumentConverter {
         guard let archive = Archive(data: data, accessMode: .read) else {
             throw PicoDocsError.fileCorrupted
         }
-        let components = try PagesConverter.iwaComponents(in: archive, maximumEntryBytes: 32 * 1024 * 1024, maximumTotalBytes: 128 * 1024 * 1024)
+        // A nested Index.zip is released before decoding, so retaining it beside
+        // the streams peaks no higher than the streams plus their decoded output.
+        let components = try PagesConverter.iwaComponents(in: archive, maximumEntryBytes: 32 * 1024 * 1024, maximumTotalBytes: 128 * 1024 * 1024,
+                                                          maximumContainerBytes: 128 * 1024 * 1024)
         guard !components.isEmpty else {
             // Likely a legacy iWork '09 package — not supported.
             throw PicoDocsError.documentTypeNotSupported
