@@ -22,10 +22,12 @@ public struct SpreadsheetConverter: DocumentConverter {
 
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
         try Task.checkCancellation()
+        // CoreXLSX opens its own (private) archive over the same bytes, so the
+        // structural pre-flight must pass before it sees them.
+        guard let archive = ZIPEntryReader.archive(data) else { throw PicoDocsError.fileCorrupted }
         let file = try XLSXFile(data: data)
-        // CoreXLSX's archive is private. A metadata-only handle reuses the same
-        // root relationship, XML admission, CRC and cancellation policy as DOCX.
-        guard let archive = Archive(data: data, accessMode: .read) else { throw PicoDocsError.fileCorrupted }
+        // A metadata-only handle reuses the same root relationship, XML
+        // admission, CRC and cancellation policy as DOCX.
         let properties = try WordConverter.coreProperties(archive)
         // A workbook may have no shared-strings part (e.g. numbers-only, or
         // inline strings); don't fail the whole conversion when it's absent.
@@ -64,6 +66,7 @@ public struct SpreadsheetConverter: DocumentConverter {
     static func markdownTable(rows: [Row], sharedStrings: SharedStrings?, sheetName: String?, projectionBudget: inout SpreadsheetProjectionBudget, isCancelled: () -> Bool = { Task.isCancelled }) throws -> (markdown: String, csv: String) {
         let origin = ColumnReference("A")!
         var columnCount = 0, rowCount = 0
+        var valueColumnCount = 0, valueRowCount = 0
         try projectionBudget.reservePhysicalRows(rows.count)
         // Both passes below visit every admitted row and cell (up to a million)
         // before `materializeGrid` checks cancellation, so poll as they go.
@@ -83,7 +86,19 @@ public struct SpreadsheetConverter: DocumentConverter {
                 guard column >= 0, column < 16_384 else { throw PicoDocsError.parsingError }
                 guard seenColumns.insert(column).inserted else { throw PicoDocsError.fileCorrupted }
                 columnCount = max(columnCount, column + 1)
+                if hasValue(cell) {
+                    valueRowCount = max(valueRowCount, Int(clamping: row.reference))
+                    valueColumnCount = max(valueColumnCount, column + 1)
+                }
             }
+        }
+        // Styled-but-empty rows and cells keep their positions, unless they would
+        // stretch the grid past the dense bound below: spreadsheet apps format
+        // whole columns, and LibreOffice often ends a sheet with a formatted
+        // `<row r="1048576">`. Then only cells with a value size the grid.
+        if columnCount > 0, rowCount > 1_000_000 / columnCount {
+            rowCount = valueRowCount
+            columnCount = valueColumnCount
         }
         guard columnCount > 0 else {
             try projectionBudget.reserveGrid(rows: 0, columns: 0, name: sheetName)
@@ -103,9 +118,12 @@ public struct SpreadsheetConverter: DocumentConverter {
             try checkpoint(&visits, isCancelled)
             let rowIndex = Int(clamping: row.reference)
             guard rowIndex > 0 else { throw PicoDocsError.fileCorrupted }
+            guard rowIndex <= rowCount else { continue }
             var values = grid[rowIndex] ?? Array(repeating: "", count: columnCount)
             for cell in row.cells {
                 try checkpoint(&visits, isCancelled)
+                // Cells outside a value-sized grid are empty.
+                guard hasValue(cell) else { continue }
                 let column = origin.distance(to: cell.reference.column)
                 guard column >= 0, column < columnCount else { throw PicoDocsError.fileCorrupted }
                 let value = cellText(cell, sharedStrings: sharedStrings)
@@ -138,10 +156,20 @@ public struct SpreadsheetConverter: DocumentConverter {
         return (out, csvRows.joined(separator: "\n"))
     }
 
+    /// Whether a cell carries content (a value or an inline string), as
+    /// opposed to formatting alone.
+    private static func hasValue(_ cell: Cell) -> Bool {
+        cell.value != nil || cell.inlineString != nil
+    }
+
     private static func cellText(_ cell: Cell, sharedStrings: SharedStrings?) -> String {
         let raw: String
-        if let sharedStrings, let stringValue = cell.stringValue(sharedStrings) {
-            raw = stringValue
+        if cell.type == .sharedString, let index = cell.value.flatMap({ Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }) {
+            // Resolved here rather than via CoreXLSX's `stringValue`, which
+            // indexes the table unchecked (an out-of-range index traps) and
+            // returns nil for rich-text items (runs with no plain `<t>`).
+            guard let items = sharedStrings?.items, items.indices.contains(index) else { return "" }
+            raw = items[index].text ?? items[index].richText.compactMap(\.text).joined()
         } else if let inlineString = cell.inlineString?.text {
             raw = inlineString
         } else if let value = cell.value {

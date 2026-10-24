@@ -1379,16 +1379,19 @@ enum IWATable {
     }
 
     /// One TileRowInfo: uint16 offsets (field 7) into the cell buffer (field 6);
-    /// 0xFFFF marks an absent cell.
+    /// 0xFFFF marks an absent cell. With `has_wide_offsets` (field 8) the offsets
+    /// count 4-byte units, as numbers-parser and recent Numbers versions write.
     private static func cellTexts(inRow rowBytes: [UInt8],
                                   rich: [UInt32: String], inline: [UInt32: String], budget: IWAOutputBudget?, objectBudget: IWAObjectBudget, preserveCellWhitespace: Bool) -> [String?] {
         var buffer: [UInt8] = []
         var offsets: [UInt8] = []
+        var wideOffsets = false
         var reader = ProtobufReader(rowBytes, objectBudget: objectBudget)
         while let field = reader.next() {
             switch (field.number, field.value) {
             case (6, .length(let bytes)): buffer = bytes
             case (7, .length(let bytes)): offsets = bytes
+            case (8, .varint(let flag)): wideOffsets = flag != 0
             default: continue
             }
         }
@@ -1398,7 +1401,7 @@ enum IWATable {
             guard !Task.isCancelled, budget?.reserveCell() != false else { return [] }
             let offset = Int(offsets[i]) | (Int(offsets[i + 1]) << 8)
             i += 2
-            cells.append(offset == 0xFFFF ? nil : cellText(in: buffer, at: offset, rich: rich, inline: inline, budget: budget, preserveCellWhitespace: preserveCellWhitespace))
+            cells.append(offset == 0xFFFF ? nil : cellText(in: buffer, at: wideOffsets ? offset * 4 : offset, rich: rich, inline: inline, budget: budget, preserveCellWhitespace: preserveCellWhitespace))
         }
         while let last = cells.last, last == nil { cells.removeLast() }   // trim trailing absent cells
         return cells

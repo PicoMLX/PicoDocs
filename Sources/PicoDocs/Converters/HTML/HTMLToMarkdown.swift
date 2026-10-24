@@ -266,9 +266,17 @@ enum HTMLToMarkdown {
         s.replacingOccurrences(of: "[ \\t\\r\\n\\f]+", with: " ", options: .regularExpression)
     }
 
-    /// Collapses 3+ consecutive newlines down to a paragraph break.
+    /// Collapses 3+ consecutive newlines down to a paragraph break. Lines holding
+    /// only spaces/tabs (from whitespace text nodes between block elements) are
+    /// blank lines to Markdown, so they're emptied first — outside fenced code —
+    /// letting them collapse too instead of piling up as `" "` lines.
     private static func normalizeBlankLines(_ s: String) -> String {
-        var output = s.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+        var inFence = false
+        let lines = s.split(separator: "\n", omittingEmptySubsequences: false).map { line -> Substring in
+            if line.drop(while: { $0 == " " }).hasPrefix("```") { inFence.toggle(); return line }
+            return !inFence && line.allSatisfy({ $0 == " " || $0 == "\t" }) ? "" : line
+        }
+        var output = lines.joined(separator: "\n").replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
         if let start = output.firstIndex(where: { !$0.isWhitespace }), output[start...].hasPrefix(MarkdownLiteral.listRestartBoundary) {
             let end = output.index(start, offsetBy: MarkdownLiteral.listRestartBoundary.count)
             output.removeSubrange(start..<end)

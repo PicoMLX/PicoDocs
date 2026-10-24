@@ -44,7 +44,7 @@ public struct PagesConverter: DocumentConverter {
     }
 
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
-        guard let archive = Archive(data: data, accessMode: .read) else {
+        guard let archive = ZIPEntryReader.archive(data) else {
             throw PicoDocsError.fileCorrupted
         }
 
@@ -184,7 +184,7 @@ public struct PagesConverter: DocumentConverter {
         // unsupported layout — so surface that distinctly.
         if let indexEntry {
             guard let indexZip = try readBounded(archive, entry: indexEntry),
-                  let inner = Archive(data: indexZip, accessMode: .read) else {
+                  let inner = ZIPEntryReader.archive(indexZip) else {
                 throw PicoDocsError.fileCorrupted
             }
             for entry in inner {

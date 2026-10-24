@@ -51,7 +51,7 @@ public struct NumbersConverter: DocumentConverter {
 
     public func convert(_ data: Data, info: StreamInfo) async throws -> ConverterResult {
         try Task.checkCancellation()
-        guard let archive = Archive(data: data, accessMode: .read) else {
+        guard let archive = ZIPEntryReader.archive(data) else {
             throw PicoDocsError.fileCorrupted
         }
         let components = try PagesConverter.iwaComponents(in: archive, maximumEntryBytes: 32 * 1024 * 1024, maximumTotalBytes: 128 * 1024 * 1024)

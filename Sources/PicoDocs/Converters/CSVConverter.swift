@@ -80,13 +80,17 @@ public struct CSVConverter: DocumentConverter {
         // comma). Distinguishes a real final empty field (e.g. a closing `""`)
         // from "nothing after the last newline", which must not be emitted.
         var fieldStarted = false
+        // A quote opens a quoted field only as the field's first character; one
+        // inside an unquoted field (`37.8"N`) is literal, as in Excel and RFC 4180
+        // readers, rather than swallowing the rest of the field.
+        var atFieldStart = true
 
         // Iterate the unicode-scalar view (delimiters are ASCII) rather than
         // materializing a `[Character]`, to avoid a full copy of large inputs.
         let scalars = text.unicodeScalars
         var index = scalars.startIndex
 
-        func endField(_ endsRow: Bool = false) throws { try consume(field, endsRow); field = "" }
+        func endField(_ endsRow: Bool = false) throws { try consume(field, endsRow); field = ""; atFieldStart = true }
         func endRow() throws { try endField(true); fieldStarted = false }
 
         while index < scalars.endIndex {
@@ -109,9 +113,10 @@ public struct CSVConverter: DocumentConverter {
                 continue
             }
             switch scalar {
-            case "\"":
+            case "\"" where atFieldStart:
                 inQuotes = true
                 fieldStarted = true
+                atFieldStart = false
                 index = scalars.index(after: index)
             case ",":
                 fieldStarted = true
@@ -127,6 +132,7 @@ public struct CSVConverter: DocumentConverter {
                 index = scalars.index(after: index)
             default:
                 fieldStarted = true
+                atFieldStart = false
                 field.unicodeScalars.append(scalar)
                 index = scalars.index(after: index)
             }

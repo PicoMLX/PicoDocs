@@ -5,6 +5,7 @@ import Foundation
 final class RTFFontTable {
     private var names: [Int: String] = [:]
     private var monospace: Set<Int> = []
+    private var codepages: [Int: Int] = [:]
     private var remainingBytes: Int
     private let maximumFonts: Int
     private(set) var exceeded = false
@@ -35,6 +36,10 @@ final class RTFFontTable {
         if ["menlo", "monaco", "courier", "consolas", "sfmono", "sfnsmono", "monospaced"].contains(where: name.contains) { monospace.insert(font) }
     }
     func markMonospace(_ font: Int) { if admit(font) { monospace.insert(font) } }
+    /// The Windows code page a font's charset (`\fcharsetN` / `\cpgN`) implies
+    /// for the `\'hh` bytes written in it.
+    func setCodepage(_ codepage: Int, font: Int) { if admit(font) { codepages[font] = codepage } }
+    func codepage(_ font: Int) -> Int? { codepages[font] }
     func isMonospace(_ font: Int) -> Bool { monospace.contains(font) }
     func check() throws { if exceeded { throw PicoDocsError.fileCorrupted } }
 }
