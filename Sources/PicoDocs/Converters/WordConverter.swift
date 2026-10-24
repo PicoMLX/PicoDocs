@@ -34,6 +34,9 @@ public struct WordConverter: DocumentConverter {
 
         var relationships = try Self.parseRelationships(archive)
         let document = try SwiftSoup.parse(documentXML, "", SwiftSoup.Parser.xmlParser())
+        // Deeply nested tables (POI's deep-table-cell.docx has 5,000) would
+        // otherwise be freed recursively and overflow the converting thread.
+        defer { document.releaseIteratively() }
         guard let body = try document.getElementsByTag("w:body").first() else {
             throw PicoDocsError.emptyDocument
         }
