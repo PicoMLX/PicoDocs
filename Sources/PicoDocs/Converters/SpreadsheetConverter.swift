@@ -105,7 +105,7 @@ public struct SpreadsheetConverter: DocumentConverter {
         } else {
             raw = ""
         }
-        // Markdown table cells are single-line; escape pipes and flatten newlines
+        // Spreadsheet values are literal; escape inline syntax and table pipes, then flatten newlines
         // (including Windows CRLF and bare CR, common in Excel-on-Windows files).
         return MarkdownLiteral.escapePunctuation(raw, characters: #"\`*_{}[]<>|"#)
             .replacingOccurrences(of: "\r\n", with: " ")

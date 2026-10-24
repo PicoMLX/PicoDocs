@@ -37,7 +37,7 @@ public extension UTType {
         var types: [UTType] = [
             .folder, .directory,
             .webloc,
-            .doc, .docx, .xlsx,
+            .doc, .docx, .xlsx, .pptx,
             .epub, .pages, .pagesSingleFile, .keynote, .keynoteSingleFile,
             .pdf, .rtf, .rtfd, .text, .flatRTFD, .plainText, .utf8PlainText, .xml,
             .spreadsheet, .commaSeparatedText,
