@@ -1,7 +1,8 @@
 # Third-party test corpus
 
-Files copied unmodified from other projects' public test suites and used by
-`CorpusTests.swift`. Each was converted with PicoDocs and compared against a
+Files copied from other projects' public test suites and used by
+`CorpusTests.swift`; all are unmodified except the HTML pages marked *trimmed*
+below. Each was converted with PicoDocs and compared against a
 reference extractor (python-docx / python-pptx / openpyxl, LibreOffice, pandoc,
 the upstream project's own expected output). The set favors files that exposed
 a crash, a hang, or lost/garbled content, plus representative complex files.
@@ -28,7 +29,19 @@ a crash, a hang, or lost/garbled content, plus representative complex files.
 | `numbers-parser/format-1.numbers`, `format-1.csv` | numbers-parser `tests/data` | Tile rows with wide cell offsets; the CSV it was built from |
 | `python-pptx/tbl-cell.pptx` | python-pptx `features/steps/test_files` | Slide tables with merged cells |
 | `csv-spectrum/*.csv`, `*.json` | csv-spectrum `csvs/`, `json/` | CSV edge cases with expected records |
-| `readability/dev418.html` | Mozilla Readability `test/test-pages/dev418/source.html` | Article extraction, block whitespace |
+| `readability/dev418.html` | Mozilla Readability `test/test-pages/dev418/source.html` | Article extraction, block whitespace; image-only paragraphs and figures |
+| `readability/aclu.html` | Mozilla Readability `test/test-pages/aclu/source.html` (trimmed) | Article inside an "unlikely" (`sidebar`) panel: the retry that keeps unlikely nodes |
+| `readability/ehow-1.html` | Mozilla Readability `test/test-pages/ehow-1/source.html` (trimmed) | One candidate per step: their common ancestor becomes the article |
+| `readability/quanta-1.html` | Mozilla Readability `test/test-pages/quanta-1/source.html` (trimmed) | Paragraphs five levels deep; the article as an only child of its wrapper |
+| `readability/mathjax.html` | Mozilla Readability `test/test-pages/mathjax/source.html` (trimmed) | MathJax containers (`CtxtMenu` classes) and their `aria-hidden` render tree |
+| `readability/yahoo-2.html` | Mozilla Readability `test/test-pages/yahoo-2/source.html` (trimmed) | A video player's control labels vs. the article (`modalCentered` wrappers, text in `<div>`s) |
+
+The trimmed pages drop what neither the Readability.js port nor its
+predecessor reads: `<script>`, `<style>`, inline `<svg>`, `<link>`, comments,
+`<meta>` tags other than the title/author/description ones, attributes other
+than those the scorer inspects, and indentation outside `<pre>`. Each starts
+with a comment saying so, and each still converts to the same Markdown as its
+untrimmed source.
 
 ## Sources and licenses
 

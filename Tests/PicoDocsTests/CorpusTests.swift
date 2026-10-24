@@ -213,6 +213,60 @@ struct CorpusTests {
         #expect(Self.whitespaceOnlyLines(md) == 0)
     }
 
+    @Test("HTML image-only paragraphs and figures stay in the article, as in Readability's expected output")
+    func htmlReadabilityMediaParagraphs() async throws {
+        // <body> is the top candidate: Readability keeps all of its children and
+        // only cleans them, rather than filtering them like a candidate's siblings.
+        let md = try await Self.markdown("readability/dev418.html")
+        #expect(md.components(separatedBy: "![An image](").count - 1 == 8)
+        #expect(md.components(separatedBy: "Caption of the figure").count - 1 == 4)
+    }
+
+    @Test("HTML article inside an unlikely-looking panel is found by the retry that keeps unlikely nodes")
+    func htmlReadabilityRetry() async throws {
+        // The article sits in `panel-two-col-sidebar-right-mix` ("sidebar"), so
+        // the first attempt finds only the footer; the retry finds the article.
+        let md = try await Self.markdown("readability/aclu.html")
+        #expect(md.contains("I don't use Facebook. I'm not technophobic"))
+        #expect(md.contains("we also need to protect those of us who manage to opt out"))
+        #expect(!md.contains("This is the website of the American Civil Liberties Union"))
+    }
+
+    @Test("HTML article split into one candidate per step resolves to their common ancestor")
+    func htmlReadabilityCommonAncestor() async throws {
+        let md = try await Self.markdown("readability/ehow-1.html")
+        #expect(md.contains("Glass cloche terrariums are not only appealing"))
+        #expect(md.contains("Displayed alone or in a group, these pretty arrangements"))
+    }
+
+    @Test("HTML article nested five levels deep, as an only child, keeps its opening")
+    func htmlReadabilityDeepArticle() async throws {
+        let md = try await Self.markdown("readability/quanta-1.html")
+        #expect(md.contains("A little over half a century ago, chaos started spilling out of a famous experiment"))
+        #expect(md.contains("But you’re not going to be counted that way"))
+    }
+
+    @Test("HTML MathJax equations keep their MathML text")
+    func htmlReadabilityMathJax() async throws {
+        // The containers' `CtxtMenu` classes contain "menu", which Readability
+        // forgives for "MathJax"; the aria-hidden render tree is dropped.
+        let md = try await Self.markdown("readability/mathjax.html")
+        let start = try #require(md.range(of: "## The Lorenz Equations"))
+        let end = try #require(md.range(of: "## The Cauchy-Schwarz Inequality"))
+        let lorenz = md[start.upperBound..<end.lowerBound]
+        #expect(["σ", "ρ", "β"].allSatisfy { lorenz.contains($0) })
+        #expect(md.contains("is an example of an inline equation"))
+    }
+
+    @Test("HTML article outscores a video player's control labels")
+    func htmlReadabilityVideoPlayerPage() async throws {
+        let md = try await Self.markdown("readability/yahoo-2.html")
+        #expect(md.contains("the Soyuz-FG rocket booster with the Progress MS-04 cargo ship"))
+        #expect(md.contains("Marcia Dunn in Cape Canaveral"))
+        #expect(!md.contains("Captions will look like this"))
+        #expect(!md.contains("Style Options"))
+    }
+
     @Test("HTML whitespace-only lines inside preformatted code are kept")
     func htmlPreformattedWhitespace() async throws {
         let html = "<html><body><p>Intro</p>\n  \n<pre>first\n   \nlast</pre>\n \n<p>Outro</p></body></html>"
