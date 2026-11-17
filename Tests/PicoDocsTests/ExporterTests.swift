@@ -247,6 +247,26 @@ struct ExporterTests {
         #expect(md.contains("paragraph"))
         #expect(md.contains("**bold**"))
     }
+
+    @Test("RTF carries title and author where the platform writer supports them")
+    func rtfDocumentInfoRoundTrip() async throws {
+        let source = ConverterResult(
+            title: "Quarterly Report",
+            author: "Ada Lovelace",
+            sections: [DocumentSection(kind: .body, markdown: "Body text")]
+        )
+        let data = try PicoDocsEngine.write(source, to: .rtf)
+        let recovered = try await PicoDocsEngine.convert(data: data, filename: "out.rtf")
+        #expect(recovered.markdown().contains("Body text"))
+        #if canImport(AppKit)
+        #expect(recovered.title == "Quarterly Report")
+        #expect(recovered.author == "Ada Lovelace")
+        #else
+        // UIKit's RTF writer has no title/author document attributes.
+        #expect(recovered.title == "out.rtf")
+        #expect(recovered.author == nil)
+        #endif
+    }
     #endif
 
     // MARK: - Contract

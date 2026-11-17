@@ -8,6 +8,10 @@
 //  iOS, tvOS, visionOS), so this is the lowest-risk binary exporter and round-trips
 //  through the existing `RTFConverter`.
 //
+//  The title and author document attributes are AppKit-only, so the result's
+//  title and author reach the RTF `\info` group on macOS only. UIKit's writer has
+//  no equivalent keys, so other platforms write the body without them.
+//
 
 #if canImport(AppKit) || canImport(UIKit)
 
@@ -26,8 +30,10 @@ public struct AttributedStringRTFExporter: DocumentExporter {
         let attributed = try AttributedStringDocumentBuilder.attributedString(from: result, preserveBlockMarkers: true)
         guard attributed.length > 0 else { throw PicoDocsError.emptyDocument }
         var properties: [NSAttributedString.DocumentAttributeKey: Any] = [.documentType: NSAttributedString.DocumentType.rtf]
+        #if canImport(AppKit)
         if let title = result.title { properties[.title] = title }
         if let author = result.author { properties[.author] = author }
+        #endif
         do {
             try Task.checkCancellation()
             let data = try attributed.data(
